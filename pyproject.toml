@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-registry-marketplace-workshop"
+version = "0.1.0"
+description = "Enterprise Agent Marketplace workshop built on Google Cloud Agent Registry (v1) for Agent Plugins 1.0, Antigravity, Claude Code, VS Code/GitHub Copilot, and OpenAI Codex."
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn>=0.30.0",
+    "httpx>=0.27.0",
+    "pyyaml>=6.0.1",
+    "cryptography>=43.0.0",
+    "click>=8.1.7",
+    "jsonschema>=4.23.0",
+    "pytest>=8.3.0",
+]
+
+[tool.setuptools.packages.find]
+include = ["schemas*", "tools*", "middleware*", "mock_registry*", "platform_agent*"]
+
+[tool.setuptools.package-data]
+schemas = ["*.json"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+addopts = "-ra"
+filterwarnings = [
+    "ignore:Using `httpx` with `starlette\\.testclient` is deprecated:Warning",
+]

@@ -1,0 +1,23 @@
+# Example Terraform variables for Workstream A (terraform/core/).
+# Copy to terraform.tfvars and replace with your Google Cloud project values.
+
+project_id = "acme-agent-governance"
+location   = "us-central1"
+
+# Container images (leave empty to default to images in this module's Artifact Registry repo)
+middleware_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/polyglot-middleware:1.0.0"
+sample_mcp_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
+sample_a2a_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
+
+# Bootstrap standalone skills from starter-marketplace/plugins/gcp-finops-toolkit/
+enable_skills_bootstrap = true
+starter_plugin_dir      = "../../starter-marketplace/plugins/gcp-finops-toolkit"
+
+# Secure by default: keep false in shared or production environments.
+# Set true ONLY in isolated workshop sandboxes for unauthenticated IDE testing.
+allow_unauthenticated_workshop_demo = false
+
+# Core defaults KMS signature verification to false; set true once Workstream B
+# asymmetric KMS signing is provisioned and configured.
+require_kms_signature   = false
+kms_public_key_pem_path = ""

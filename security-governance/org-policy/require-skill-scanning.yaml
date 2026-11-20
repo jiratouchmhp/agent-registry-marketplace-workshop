@@ -1,0 +1,35 @@
+# Custom Organization Policy Constraint: Prevent Disabling Agent Registry Skill Scanning
+#
+# Usage (replace ORGANIZATION_ID with your numeric Google Cloud Organization ID):
+#   1. Register the custom constraint:
+#        gcloud org-policies set-custom-constraint \
+#          security-governance/org-policy/require-skill-scanning.yaml
+#
+#   2. Enforce the custom constraint at the organization (or folder/project) level:
+#        gcloud org-policies set-policy /dev/stdin <<'EOF'
+#        name: organizations/ORGANIZATION_ID/policies/custom.requireAgentRegistrySkillScanning
+#        spec:
+#          rules:
+#          - enforce: true
+#        EOF
+#
+#   3. Verify effective enforcement on a project:
+#        gcloud org-policies describe custom.requireAgentRegistrySkillScanning \
+#          --project=PROJECT_ID --effective
+#
+# Optional Strict Allow-Only Variant (forbid BOTH DISABLED and ENABLED_NONBLOCKING):
+#   To require ENABLED_BLOCKING on every Skill resource, either apply
+#   `require-skill-scanning-blocking.yaml` or change `condition` and `actionType` to:
+#     condition: resource.scanningConfig.policy == "ENABLED_BLOCKING"
+#     actionType: ALLOW
+
+name: organizations/ORGANIZATION_ID/customConstraints/custom.requireAgentRegistrySkillScanning
+resourceTypes:
+  - agentregistry.googleapis.com/Skill
+methodTypes:
+  - CREATE
+  - UPDATE
+condition: resource.scanningConfig.policy == "DISABLED"
+actionType: DENY
+displayName: Prevent Disabling Agent Registry Skill Scanning
+description: Prevents creating or updating Google Cloud Agent Registry Skills with scanningConfig.policy set to DISABLED.

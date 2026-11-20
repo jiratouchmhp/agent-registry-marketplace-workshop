@@ -1,0 +1,37 @@
+# Example Terraform variables for Workstream B (terraform/security_governance/).
+#
+# Run EITHER:
+#   A) Layered on top of Workstream A (populate outputs from `terraform -chdir=../core output`), OR
+#   B) Standalone against any existing Google Cloud Agent Registry project.
+#
+# Copy to terraform.tfvars and replace with your Google Cloud values.
+# Supply auth_provider_client_secret via environment variable:
+#   export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
+
+project_id    = "acme-agent-governance"
+location      = "us-central1"
+cmek_location = "us" # Use "us" for Skills in `us`, or "europe" for Skills in `eu`
+
+# Identities (from `terraform/core` outputs or existing project service accounts)
+middleware_sa_email   = "agent-marketplace-middleware@acme-agent-governance.iam.gserviceaccount.com"
+ci_publisher_sa_email = "agent-registry-ci-publisher@acme-agent-governance.iam.gserviceaccount.com"
+
+# Registered Agent Registry MCP server and A2A agent identifiers
+# Tip: Run `terraform -chdir=../core output` to retrieve live projected IDs & URNs.
+mcp_server_resource_id = "finops-mcp-server"
+mcp_server_urn         = "urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server"
+
+a2a_agent_resource_id = "finops-advisor-agent"
+a2a_agent_urn         = "urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent"
+
+# Optional CMEK SkillEncryptionSpec attachment:
+# Keep false if ANY Skill already exists in the target multi-region (`us`/`eu`),
+# otherwise Agent Registry rejects the update with FAILED_PRECONDITION.
+enable_cmek_spec = false
+
+# Optional Organization Policy custom constraint (requires roles/orgpolicy.policyAdmin):
+enable_org_policy = false
+org_id            = ""
+
+# Locked WORM audit bucket retention (irreversible once locked = true is applied):
+audit_retention_days = 90

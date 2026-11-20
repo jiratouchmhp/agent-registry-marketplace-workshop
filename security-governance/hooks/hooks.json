@@ -1,0 +1,29 @@
+{
+  "policy-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/policy_guard.py --event PreToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": ".*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/policy_guard.py --event PostToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

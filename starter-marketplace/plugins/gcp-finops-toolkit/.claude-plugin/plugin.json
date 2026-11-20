@@ -1,0 +1,10 @@
+{
+  "name": "gcp-finops-toolkit",
+  "version": "1.0.0",
+  "description": "Enterprise GCP FinOps toolkit for Cloud Billing anomaly triage, BigQuery optimization, and governed MCP tools.",
+  "author": {
+    "name": "Acme Platform Security",
+    "email": "platform-security@acme.example.com",
+    "url": "https://acme.example.com/platform"
+  }
+}

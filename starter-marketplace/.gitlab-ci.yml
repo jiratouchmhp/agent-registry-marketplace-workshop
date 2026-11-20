@@ -1,0 +1,371 @@
+# Enterprise Agent Marketplace CI/CD Pipeline (GitLab -> Google Cloud Agent Registry v1)
+#
+# Works cleanly in BOTH repository layouts:
+#   1. Monorepo root (`starter-marketplace/plugins/*`, local `pyproject.toml` + `schemas/` + `tools/`)
+#   2. Standalone GitLab repo rooted at `starter-marketplace/` (`plugins/*`, installing the
+#      published workshop tooling package via `WORKSHOP_TOOLS_PACKAGE`, e.g. a private PyPI
+#      package, Artifact Registry Python wheel, or git+https URL).
+#
+# GCP Authentication (Zero Static JSON Keys):
+#   Configure GitLab OIDC -> GCP Workload Identity Federation (`GCP_WORKLOAD_IDENTITY_PROVIDER`
+#   and `GCP_SERVICE_ACCOUNT_EMAIL`), OR supply a short-lived `AGENT_REGISTRY_AUTH_TOKEN`
+#   (or `GOOGLE_OAUTH_ACCESS_TOKEN`). The `register:*` (and Cloud KMS signing) jobs exchange
+#   `GCP_OIDC_TOKEN` via `sts.googleapis.com` + `iamcredentials.googleapis.com` using pure
+#   Python `httpx` — no `gcloud` CLI binary required in `python:3.12-slim`.
+#
+# Stages:
+#   1. validate          - Multi-IDE schema validation (`schemas.validators`) + Antigravity CLI
+#                          multi-tool validation with official `jq` warning filter.
+#   2. package-and-sign  - Deterministic per-skill ZIP packaging + optional Cloud KMS / PEM signing.
+#   3. register-registry - Push `TARGET_STATE_DRAFT` on MRs; promote `TARGET_STATE_ACTIVE` on tags.
+
+stages:
+  - validate
+  - package-and-sign
+  - register-registry
+
+variables:
+  PYTHON_IMAGE: "python:3.12-slim"
+  AGENT_REGISTRY_BASE_URL: "https://agentregistry.googleapis.com/v1"
+  GCP_PROJECT_ID: "acme-agent-governance"
+  GCP_LOCATION: "us-central1"
+  SCANNING_POLICY: "ENABLED_BLOCKING"
+  DIST_DIR: "dist"
+  # Leave empty to auto-detect `plugins` (standalone repo) or `starter-marketplace/plugins` (monorepo).
+  PLUGINS_DIR: ""
+  # In a standalone GitLab repo (without local `schemas/` and `tools/`), set to a pip spec,
+  # Artifact Registry wheel URL, or git+https URL providing `agent-registry-marketplace-workshop`.
+  WORKSHOP_TOOLS_PACKAGE: ""
+  # Optional GCP Workload Identity Federation variables for keyless GitLab OIDC -> GCP OAuth2 exchange:
+  #   GCP_WORKLOAD_IDENTITY_PROVIDER: "projects/<NUM>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>"
+  #   GCP_SERVICE_ACCOUNT_EMAIL: "agent-registry-ci-publisher@<PROJECT>.iam.gserviceaccount.com"
+  GCP_WORKLOAD_IDENTITY_PROVIDER: ""
+  GCP_SERVICE_ACCOUNT_EMAIL: ""
+
+default:
+  image: $PYTHON_IMAGE
+
+# ---------------------------------------------------------------------------
+# Reusable Helpers: Dual-Layout Path & Tooling Resolution + Keyless GCP WIF
+# ---------------------------------------------------------------------------
+
+.resolve_plugins_dir: &resolve_plugins_dir |
+  set -euo pipefail
+  if [[ -n "${PLUGINS_DIR:-}" ]]; then
+    RESOLVED_PLUGINS_DIR="${PLUGINS_DIR}"
+  elif [[ -d "plugins" ]]; then
+    RESOLVED_PLUGINS_DIR="plugins"
+  elif [[ -d "starter-marketplace/plugins" ]]; then
+    RESOLVED_PLUGINS_DIR="starter-marketplace/plugins"
+  else
+    echo "ERROR: Could not locate plugins directory (checked 'plugins' and 'starter-marketplace/plugins'). Set PLUGINS_DIR explicitly." >&2
+    exit 1
+  fi
+  export RESOLVED_PLUGINS_DIR
+  echo "Resolved plugins directory: ${RESOLVED_PLUGINS_DIR}"
+
+.install_workshop_tools: &install_workshop_tools |
+  set -euo pipefail
+  PYTHON_BIN="${PYTHON_BIN:-python}"
+  if "${PYTHON_BIN}" -c "import schemas.validators, tools.plugin_sync" >/dev/null 2>&1; then
+    echo "Workshop tooling (schemas, tools.plugin_sync) already importable."
+  elif [[ -f "pyproject.toml" && -d "schemas" && -d "tools/plugin_sync" ]]; then
+    echo "Monorepo layout detected; installing workshop tooling from repository root..."
+    "${PYTHON_BIN}" -m pip install --no-cache-dir -e .
+  elif [[ -n "${WORKSHOP_TOOLS_PACKAGE:-}" ]]; then
+    echo "Standalone repo layout detected; installing workshop tooling from WORKSHOP_TOOLS_PACKAGE..."
+    "${PYTHON_BIN}" -m pip install --no-cache-dir "${WORKSHOP_TOOLS_PACKAGE}"
+  else
+    echo "ERROR: Neither local workshop tooling (pyproject.toml + schemas/ + tools/plugin_sync/) nor WORKSHOP_TOOLS_PACKAGE is configured." >&2
+    echo "Set WORKSHOP_TOOLS_PACKAGE to your Artifact Registry / PyPI wheel or git+https URL for agent-registry-marketplace-workshop." >&2
+    exit 1
+  fi
+  "${PYTHON_BIN}" -c "import schemas.validators, tools.plugin_sync"
+
+.ensure_gcp_registry_auth: &ensure_gcp_registry_auth |
+  set -euo pipefail
+  PYTHON_BIN="${PYTHON_BIN:-python}"
+  REQUIRE_GCP_AUTH="false"
+  if [[ "${AGENT_REGISTRY_BASE_URL:-}" == *"googleapis.com"* && "${CI_DRY_RUN_ONLY:-false}" != "true" ]]; then
+    REQUIRE_GCP_AUTH="true"
+  elif [[ -n "${KMS_SIGNING_KEY_VERSION:-}" && -z "${SIGNING_KEY_PEM_PATH:-}" ]]; then
+    REQUIRE_GCP_AUTH="true"
+  fi
+  if [[ "${REQUIRE_GCP_AUTH}" == "true" ]]; then
+    if [[ -n "${AGENT_REGISTRY_AUTH_TOKEN:-}" ]]; then
+      echo "Using pre-configured AGENT_REGISTRY_AUTH_TOKEN."
+    elif [[ -n "${GOOGLE_OAUTH_ACCESS_TOKEN:-}" ]]; then
+      export AGENT_REGISTRY_AUTH_TOKEN="${GOOGLE_OAUTH_ACCESS_TOKEN}"
+      echo "Using GOOGLE_OAUTH_ACCESS_TOKEN."
+    elif [[ -n "${GCP_OIDC_TOKEN:-}" && -n "${GCP_WORKLOAD_IDENTITY_PROVIDER:-}" && -n "${GCP_SERVICE_ACCOUNT_EMAIL:-}" ]]; then
+      echo "Exchanging GitLab OIDC token via GCP Workload Identity Federation (STS + IAM Credentials)..."
+      AGENT_REGISTRY_AUTH_TOKEN="$("${PYTHON_BIN}" - << 'PYEOF'
+  import os
+  import sys
+  import httpx
+
+  oidc_token = os.environ["GCP_OIDC_TOKEN"]
+  wif_provider = os.environ["GCP_WORKLOAD_IDENTITY_PROVIDER"].lstrip("/")
+  sa_email = os.environ["GCP_SERVICE_ACCOUNT_EMAIL"]
+
+  sts_resp = httpx.post(
+      "https://sts.googleapis.com/v1/token",
+      json={
+          "audience": f"//iam.googleapis.com/{wif_provider}",
+          "grantType": "urn:ietf:params:oauth:grant-type:token-exchange",
+          "requestedTokenType": "urn:ietf:params:oauth:token-type:access_token",
+          "scope": "https://www.googleapis.com/auth/cloud-platform",
+          "subjectTokenType": "urn:ietf:params:oauth:token-type:jwt",
+          "subjectToken": oidc_token,
+      },
+      timeout=20.0,
+  )
+  if sts_resp.status_code != 200:
+      print(f"ERROR: GCP STS token exchange failed ({sts_resp.status_code}): {sts_resp.text}", file=sys.stderr)
+      sys.exit(1)
+  fed_token = sts_resp.json()["access_token"]
+
+  iam_resp = httpx.post(
+      f"https://iamcredentials.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}:generateAccessToken",
+      headers={"Authorization": f"Bearer {fed_token}"},
+      json={"scope": ["https://www.googleapis.com/auth/cloud-platform"]},
+      timeout=20.0,
+  )
+  if iam_resp.status_code != 200:
+      print(f"ERROR: IAM generateAccessToken failed ({iam_resp.status_code}): {iam_resp.text}", file=sys.stderr)
+      sys.exit(1)
+  print(iam_resp.json()["accessToken"], end="")
+  PYEOF
+      )"
+      export AGENT_REGISTRY_AUTH_TOKEN
+    else
+      echo "ERROR: Target endpoint requires GCP OAuth2 authentication (AGENT_REGISTRY_BASE_URL=${AGENT_REGISTRY_BASE_URL:-}, KMS_SIGNING_KEY_VERSION=${KMS_SIGNING_KEY_VERSION:-})." >&2
+      echo "Configure GitLab Workload Identity Federation (GCP_WORKLOAD_IDENTITY_PROVIDER + GCP_SERVICE_ACCOUNT_EMAIL) or supply AGENT_REGISTRY_AUTH_TOKEN." >&2
+      exit 1
+    fi
+  fi
+
+# ---------------------------------------------------------------------------
+# Stage 1: Multi-IDE Schema & Antigravity Pre-Publish Validation
+# ---------------------------------------------------------------------------
+
+validate:schemas:
+  stage: validate
+  script:
+    - *resolve_plugins_dir
+    - *install_workshop_tools
+    - |
+      set -euo pipefail
+      PYTHON_BIN="${PYTHON_BIN:-python}"
+      "${PYTHON_BIN}" - << 'EOF'
+      import os
+      import sys
+      from pathlib import Path
+      from schemas.validators import (
+          validate_agent_plugin_bundle,
+          validate_antigravity_bundle,
+          validate_claude_plugin_bundle,
+          validate_codex_plugin_bundle,
+          validate_copilot_plugin_bundle,
+      )
+
+      plugins_root = Path(os.environ["RESOLVED_PLUGINS_DIR"])
+      plugin_dirs = sorted(p for p in plugins_root.iterdir() if p.is_dir())
+      if not plugin_dirs:
+          print(f"[FAIL] No plugin directories found under {plugins_root}")
+          sys.exit(1)
+
+      failed = False
+      for plugin_dir in plugin_dirs:
+          checks = [
+              ("agent-plugins-1.0", validate_agent_plugin_bundle(plugin_dir)),
+              ("antigravity", validate_antigravity_bundle(plugin_dir)),
+              ("claude-code", validate_claude_plugin_bundle(plugin_dir)),
+              ("copilot", validate_copilot_plugin_bundle(plugin_dir)),
+              ("codex", validate_codex_plugin_bundle(plugin_dir)),
+          ]
+          for name, res in checks:
+              if not res.valid:
+                  failed = True
+                  print(f"[FAIL] {plugin_dir} ({name}):")
+                  for err in res.errors:
+                      print(f"  - {err}")
+              else:
+                  print(f"[PASS] {plugin_dir} ({name}) ({len(res.warnings)} warning(s))")
+      sys.exit(1 if failed else 0)
+      EOF
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+validate:antigravity-cli:
+  stage: validate
+  # Requires an image/runner with `agy` CLI and `jq` installed.
+  script:
+    - *resolve_plugins_dir
+    - |
+      set -euo pipefail
+      if ! command -v agy >/dev/null 2>&1; then
+        echo "agy CLI not found on runner; install Antigravity CLI to run native validation." >&2
+        exit 1
+      fi
+      for plugin_dir in "${RESOLVED_PLUGINS_DIR}"/*/; do
+        echo "Validating ${plugin_dir} with agy plugin validate --json (multi-tool jq filter)..."
+        agy_rc=0
+        report="$(agy plugin validate --json "${plugin_dir}")" || agy_rc=$?
+        echo "${report}" | jq .
+        # Multi-tool filter: fail on ANY error, and fail on ANY warning EXCEPT expected
+        # multi-tool warnings for .mcp.json, mcp.json, AGENTS.md, and shadowed root plugin.json.
+        echo "${report}" | jq -e '
+          [
+            (.findings // [])[]
+            | select(
+                .severity == "error"
+                or (
+                  .severity == "warning"
+                  and (.file != ".mcp.json")
+                  and (.file != "mcp.json")
+                  and (.file != "AGENTS.md")
+                  and ((.file == "plugin.json" and (.message | contains("takes precedence"))) | not)
+                )
+              )
+          ] | length == 0
+        '
+        if [[ "${agy_rc}" -ne 0 ]]; then
+          echo "agy plugin validate exited with status ${agy_rc} for ${plugin_dir}" >&2
+          exit "${agy_rc}"
+        fi
+      done
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+# ---------------------------------------------------------------------------
+# Stage 2: Deterministic Skill Packaging & Optional Cloud KMS / PEM Signing
+# ---------------------------------------------------------------------------
+
+package-and-sign:
+  stage: package-and-sign
+  needs:
+    - validate:schemas
+    - validate:antigravity-cli
+  variables:
+    CI_DRY_RUN_ONLY: "true"
+  id_tokens:
+    GCP_OIDC_TOKEN:
+      aud: "https://iam.googleapis.com/${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+  script:
+    - *resolve_plugins_dir
+    - *install_workshop_tools
+    - *ensure_gcp_registry_auth
+    - |
+      set -euo pipefail
+      PYTHON_BIN="${PYTHON_BIN:-python}"
+      SIGN_ARGS=()
+      if [[ -n "${KMS_SIGNING_KEY_VERSION:-}" ]]; then
+        SIGN_ARGS+=(--kms-key-version "${KMS_SIGNING_KEY_VERSION}")
+      elif [[ -n "${SIGNING_KEY_PEM_PATH:-}" ]]; then
+        SIGN_ARGS+=(--sign-pem "${SIGNING_KEY_PEM_PATH}")
+      fi
+      for plugin_dir in "${RESOLVED_PLUGINS_DIR}"/*/; do
+        plugin_name="$(basename "${plugin_dir}")"
+        "${PYTHON_BIN}" -m tools.plugin_sync sync \
+          --plugin-dir "${plugin_dir}" \
+          --registry-url "${AGENT_REGISTRY_BASE_URL}" \
+          --project "${GCP_PROJECT_ID}" \
+          --location "${GCP_LOCATION}" \
+          --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
+          --git-commit "${CI_COMMIT_SHA:-HEAD}" \
+          --scanning-policy "${SCANNING_POLICY}" \
+          --output-dir "${DIST_DIR}/${plugin_name}" \
+          --dry-run \
+          "${SIGN_ARGS[@]}"
+      done
+  artifacts:
+    paths:
+      - dist/
+    expire_in: 14 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+    - if: '$CI_COMMIT_TAG'
+
+# ---------------------------------------------------------------------------
+# Stage 3: Register into Google Cloud Agent Registry (v1)
+# ---------------------------------------------------------------------------
+
+register:draft-mr:
+  stage: register-registry
+  needs:
+    - package-and-sign
+  id_tokens:
+    GCP_OIDC_TOKEN:
+      aud: "https://iam.googleapis.com/${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+  script:
+    - *resolve_plugins_dir
+    - *install_workshop_tools
+    - *ensure_gcp_registry_auth
+    - |
+      set -euo pipefail
+      PYTHON_BIN="${PYTHON_BIN:-python}"
+      SIGN_ARGS=()
+      if [[ -n "${KMS_SIGNING_KEY_VERSION:-}" ]]; then
+        SIGN_ARGS+=(--kms-key-version "${KMS_SIGNING_KEY_VERSION}")
+      elif [[ -n "${SIGNING_KEY_PEM_PATH:-}" ]]; then
+        SIGN_ARGS+=(--sign-pem "${SIGNING_KEY_PEM_PATH}")
+      fi
+      # Merge Requests always upload in TARGET_STATE_DRAFT (quarantined while scanned).
+      for plugin_dir in "${RESOLVED_PLUGINS_DIR}"/*/; do
+        "${PYTHON_BIN}" -m tools.plugin_sync sync \
+          --plugin-dir "${plugin_dir}" \
+          --registry-url "${AGENT_REGISTRY_BASE_URL}" \
+          --project "${GCP_PROJECT_ID}" \
+          --location "${GCP_LOCATION}" \
+          --target-state TARGET_STATE_DRAFT \
+          --scanning-policy "${SCANNING_POLICY}" \
+          --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
+          --git-commit "${CI_COMMIT_SHA:-HEAD}" \
+          "${SIGN_ARGS[@]}"
+      done
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+
+register:active-release:
+  stage: register-registry
+  needs:
+    - package-and-sign
+  id_tokens:
+    GCP_OIDC_TOKEN:
+      aud: "https://iam.googleapis.com/${GCP_WORKLOAD_IDENTITY_PROVIDER}"
+  script:
+    - *resolve_plugins_dir
+    - *install_workshop_tools
+    - *ensure_gcp_registry_auth
+    - |
+      set -euo pipefail
+      PYTHON_BIN="${PYTHON_BIN:-python}"
+      SIGN_ARGS=()
+      if [[ -n "${KMS_SIGNING_KEY_VERSION:-}" ]]; then
+        SIGN_ARGS+=(--kms-key-version "${KMS_SIGNING_KEY_VERSION}")
+      elif [[ -n "${SIGNING_KEY_PEM_PATH:-}" ]]; then
+        SIGN_ARGS+=(--sign-pem "${SIGNING_KEY_PEM_PATH}")
+      fi
+      # Tagged releases from main promote verified, clean-scanned revisions to TARGET_STATE_ACTIVE.
+      for plugin_dir in "${RESOLVED_PLUGINS_DIR}"/*/; do
+        "${PYTHON_BIN}" -m tools.plugin_sync sync \
+          --plugin-dir "${plugin_dir}" \
+          --registry-url "${AGENT_REGISTRY_BASE_URL}" \
+          --project "${GCP_PROJECT_ID}" \
+          --location "${GCP_LOCATION}" \
+          --target-state TARGET_STATE_ACTIVE \
+          --scanning-policy "${SCANNING_POLICY}" \
+          --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
+          --git-commit "${CI_COMMIT_SHA:-HEAD}" \
+          "${SIGN_ARGS[@]}"
+      done
+  rules:
+    - if: '$CI_COMMIT_TAG =~ /^v[0-9]+\.[0-9]+\.[0-9]+/'
+    - if: '$CI_COMMIT_BRANCH == "main"'
+      when: manual

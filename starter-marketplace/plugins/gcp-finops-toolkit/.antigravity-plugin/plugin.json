@@ -1,0 +1,27 @@
+{
+  "$schema": "https://antigravity.google/schemas/v1/plugin.json",
+  "name": "gcp-finops-toolkit",
+  "displayName": "GCP FinOps Toolkit",
+  "description": "Enterprise GCP FinOps toolkit for Cloud Billing cost anomaly triage, BigQuery SQL optimization, and governed FinOps tools.",
+  "version": "1.0.0",
+  "logo": "assets/logo.svg",
+  "suggestedPrompts": [
+    "Triage yesterday's Cloud Billing cost anomaly across GCP projects",
+    "Analyze my BigQuery SQL query to reduce bytes scanned and cost",
+    "Summarize the top GCP SKUs driving spend in the current billing period"
+  ],
+  "author": {
+    "name": "Acme Platform Security",
+    "email": "platform-security@acme.example.com",
+    "url": "https://acme.example.com/platform"
+  },
+  "homepage": "https://acme.example.com/plugins/gcp-finops-toolkit",
+  "repository": "https://gitlab.acme.example.com/platform/starter-marketplace",
+  "license": "Apache-2.0",
+  "keywords": [
+    "gcp",
+    "finops",
+    "bigquery",
+    "billing"
+  ]
+}

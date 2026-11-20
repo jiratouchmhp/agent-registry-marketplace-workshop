@@ -1,0 +1,32 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "gcp-finops-toolkit",
+  "version": "1.0.0",
+  "description": "Enterprise GCP FinOps toolkit providing BigQuery query optimization, Cloud Billing cost anomaly triage, governed MCP tools, and an A2A FinOps advisor.",
+  "author": {
+    "name": "Acme Platform Security",
+    "email": "platform-security@acme.example.com",
+    "url": "https://acme.example.com/platform"
+  },
+  "homepage": "https://acme.example.com/plugins/gcp-finops-toolkit",
+  "repository": "https://gitlab.acme.example.com/platform/starter-marketplace",
+  "license": "Apache-2.0",
+  "keywords": [
+    "gcp",
+    "finops",
+    "bigquery",
+    "billing",
+    "cost-optimization"
+  ],
+  "extensions": {
+    "com.openai": {
+      "category": "Cloud Operations"
+    },
+    "com.acme.agentregistry": {
+      "displayName": "GCP FinOps Toolkit",
+      "mcpServiceId": "finops-mcp-server",
+      "agentServiceId": "finops-advisor-agent",
+      "endpointServiceId": "finops-billing-api"
+    }
+  }
+}

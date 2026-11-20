@@ -1,0 +1,24 @@
+{
+  "policy-guard": {
+    "enabled": true,
+    "PreToolUse": [
+      {
+        "matcher": "mcp_finops-mcp-server_delete_.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "./scripts/finops-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "./scripts/finops-guard.sh --audit",
+        "timeout": 15
+      }
+    ]
+  }
+}

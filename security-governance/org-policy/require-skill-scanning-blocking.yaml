@@ -1,0 +1,20 @@
+# Strict Allow-Only Variant: Require ENABLED_BLOCKING on Every Agent Registry Skill
+#
+# Unlike `require-skill-scanning.yaml` (which denies DISABLED while still allowing
+# ENABLED_NONBLOCKING for audit-only rollout), this strict constraint ONLY allows
+# Skills whose `scanningConfig.policy` is explicitly `ENABLED_BLOCKING`.
+#
+# Usage (replace ORGANIZATION_ID with your numeric Google Cloud Organization ID):
+#   gcloud org-policies set-custom-constraint \
+#     security-governance/org-policy/require-skill-scanning-blocking.yaml
+
+name: organizations/ORGANIZATION_ID/customConstraints/custom.requireBlockingSkillScanning
+resourceTypes:
+  - agentregistry.googleapis.com/Skill
+methodTypes:
+  - CREATE
+  - UPDATE
+condition: resource.scanningConfig.policy == "ENABLED_BLOCKING"
+actionType: ALLOW
+displayName: Require Blocking Mode for Agent Registry Skill Scanning
+description: Only allows creating or updating Google Cloud Agent Registry Skills when scanningConfig.policy is ENABLED_BLOCKING.

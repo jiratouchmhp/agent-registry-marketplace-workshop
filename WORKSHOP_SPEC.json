@@ -1,0 +1,108 @@
+{
+  "spec_version": "1.0.0",
+  "workshop_name": "agent-registry-marketplace-workshop",
+  "project_defaults": {
+    "project_id": "acme-agent-governance",
+    "project_number": "123456789012",
+    "location": "us-central1",
+    "cmek_location": "us"
+  },
+  "ports": {
+    "mock_registry": 8090,
+    "sample_mcp_server": 8091,
+    "sample_a2a_agent": 8092,
+    "middleware": 8080
+  },
+  "sample_plugin": {
+    "name": "gcp-finops-toolkit",
+    "display_name": "GCP FinOps Toolkit",
+    "version": "1.0.0",
+    "skills": [
+      "cost-anomaly-triage",
+      "bq-query-optimizer"
+    ],
+    "mcp_service_id": "finops-mcp-server",
+    "antigravity_mcp_server_key": "finops-mcp-server",
+    "agent_service_id": "finops-advisor-agent",
+    "endpoint_service_id": "finops-billing-api"
+  },
+  "middleware_endpoints": [
+    "/healthz",
+    "/v1/catalog",
+    "/v1/marketplace/claude.json",
+    "/v1/marketplace/copilot.json",
+    "/v1/marketplace/codex.json",
+    "/v1/marketplace/antigravity.json",
+    "/v1/plugins/{plugin_name}.zip",
+    "/mcp"
+  ],
+  "skill_metadata_keys": [
+    "plugin_name",
+    "plugin_display_name",
+    "plugin_version",
+    "source_repo",
+    "git_commit",
+    "mcp_service_id",
+    "agent_service_id",
+    "kms_signature",
+    "kms_key_version"
+  ],
+  "env_vars": {
+    "AGENT_REGISTRY_BASE_URL": "http://127.0.0.1:8090/v1",
+    "GCP_PROJECT_ID": "acme-agent-governance",
+    "GCP_LOCATION": "us-central1",
+    "MIDDLEWARE_PUBLIC_URL": "http://127.0.0.1:8080",
+    "REQUIRE_KMS_SIGNATURE": "true",
+    "KMS_PUBLIC_KEY_PEM_PATH": "",
+    "HUB_MIDDLEWARE_URL": "http://127.0.0.1:8080",
+    "HUB_AUTH_TOKEN": ""
+  },
+  "agent_registry": {
+    "api_service": "agentregistry.googleapis.com",
+    "rest_base": "https://agentregistry.googleapis.com/v1",
+    "remote_mcp_url": "https://agentregistry.googleapis.com/mcp",
+    "p4sa_template": "service-{project_number}@gcp-sa-agentregistry.iam.gserviceaccount.com",
+    "private_skill_prefix": "private-"
+  },
+  "urns": {
+    "mcp_server": "urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server",
+    "agent": "urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent",
+    "endpoint": "urn:endpoint:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-billing-api",
+    "skills": {
+      "cost-anomaly-triage": "urn:skill:projects-123456789012:locations:us-central1:private-cost-anomaly-triage",
+      "bq-query-optimizer": "urn:skill:projects-123456789012:locations:us-central1:private-bq-query-optimizer"
+    }
+  },
+  "resource_names": {
+    "mcp_service": "projects/acme-agent-governance/locations/us-central1/services/finops-mcp-server",
+    "agent_service": "projects/acme-agent-governance/locations/us-central1/services/finops-advisor-agent",
+    "endpoint_service": "projects/acme-agent-governance/locations/us-central1/services/finops-billing-api",
+    "skills": {
+      "cost-anomaly-triage": "projects/acme-agent-governance/locations/us-central1/skills/private-cost-anomaly-triage",
+      "bq-query-optimizer": "projects/acme-agent-governance/locations/us-central1/skills/private-bq-query-optimizer"
+    }
+  },
+  "marketplace_defaults": {
+    "name": "acme-enterprise-marketplace",
+    "display_name": "Acme Enterprise Agent Marketplace",
+    "description": "Governed enterprise plugins, skills, MCP servers, and A2A agents backed by Google Cloud Agent Registry.",
+    "owner": {
+      "name": "Acme Platform Security",
+      "email": "platform-security@acme.example.com"
+    }
+  },
+  "terraform_outputs": [
+    "agent_registry_p4sa",
+    "mcp_service_name",
+    "mcp_registry_resource",
+    "agent_service_name",
+    "agent_registry_resource",
+    "endpoint_service_name",
+    "endpoint_registry_resource",
+    "binding_name",
+    "agent_gateway_name",
+    "cmek_crypto_key_id",
+    "signing_crypto_key_id",
+    "audit_log_bucket_id"
+  ]
+}

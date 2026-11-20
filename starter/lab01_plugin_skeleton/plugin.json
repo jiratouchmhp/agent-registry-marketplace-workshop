@@ -1,0 +1,22 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "hello-finops-plugin",
+  "version": "0.1.0",
+  "description": "Lab 01 starter skeleton: extend this Agent Plugins 1.0 bundle into a full 5-IDE governed FinOps plugin.",
+  "author": {
+    "name": "Acme Platform Security",
+    "email": "platform-security@acme.example.com",
+    "url": "https://acme.example.com/platform"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "finops",
+    "workshop",
+    "starter"
+  ],
+  "extensions": {
+    "com.openai": {
+      "category": "Cloud Operations"
+    }
+  }
+}

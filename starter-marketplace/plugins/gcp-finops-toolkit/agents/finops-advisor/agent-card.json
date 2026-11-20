@@ -1,0 +1,66 @@
+{
+  "name": "GCP FinOps Advisor",
+  "description": "Enterprise A2A v1.0 FinOps specialist that analyzes GCP Cloud Billing anomalies, BigQuery query efficiency, and safe cost-remediation plans.",
+  "version": "1.0.0",
+  "provider": {
+    "organization": "Acme Platform Security",
+    "url": "https://acme.example.com/platform"
+  },
+  "supportedInterfaces": [
+    {
+      "url": "http://127.0.0.1:8092/a2a",
+      "protocolBinding": "JSONRPC",
+      "protocolVersion": "1.0"
+    },
+    {
+      "url": "http://127.0.0.1:8092/a2a",
+      "protocolBinding": "HTTP+JSON",
+      "protocolVersion": "1.0"
+    }
+  ],
+  "capabilities": {
+    "streaming": false,
+    "pushNotifications": false,
+    "stateTransitionHistory": true
+  },
+  "defaultInputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "defaultOutputModes": [
+    "text/plain",
+    "application/json"
+  ],
+  "skills": [
+    {
+      "id": "cost-anomaly-triage",
+      "name": "Cost Anomaly Triage",
+      "description": "Diagnose unexpected GCP Cloud Billing spend spikes by service, SKU, and project labels without making destructive changes.",
+      "tags": [
+        "finops",
+        "billing",
+        "anomaly",
+        "gcp"
+      ],
+      "examples": [
+        "Why did BigQuery spend in acme-analytics jump 45% yesterday?",
+        "Triage the top 3 SKUs contributing to our weekly Cloud Billing alert."
+      ]
+    },
+    {
+      "id": "bq-query-optimization",
+      "name": "BigQuery Query Optimization",
+      "description": "Inspect BigQuery Standard SQL queries for full table scans, missing partition filters, and SELECT * anti-patterns, then propose safe rewrites.",
+      "tags": [
+        "finops",
+        "bigquery",
+        "sql",
+        "cost-optimization"
+      ],
+      "examples": [
+        "Optimize SELECT * FROM analytics.events for lower bytes scanned.",
+        "Estimate on-demand savings from adding a _PARTITIONDATE filter."
+      ]
+    }
+  ]
+}

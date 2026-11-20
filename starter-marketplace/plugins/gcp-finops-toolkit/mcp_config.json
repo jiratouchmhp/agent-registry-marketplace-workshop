@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "finops-mcp-server": {
+      "url": "http://127.0.0.1:8091/mcp",
+      "authProviderType": "google_credentials"
+    }
+  }
+}

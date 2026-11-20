@@ -1,0 +1,40 @@
+[
+  {
+    "description": "Allow read-only MCP tools on registered Agent Registry MCP servers",
+    "effect": "ALLOW",
+    "principals": [
+      "principal://agents.global.proj-123456789012.system.id.goog/resources/aiplatform/projects/acme-agent-governance/locations/us-central1/reasoningEngines/finops-advisor-agent"
+    ],
+    "operation": {
+      "permissions": [
+        "iap.googleapis.com/resources.egressViaIAP"
+      ]
+    },
+    "conditions": {
+      "iap.googleapis.com": {
+        "title": "Registered MCP Read-Only Tools",
+        "description": "Permit egress only to registered MCP servers when the invoked tool is annotated read_only_hint == true.",
+        "expression": "destination.is_registered == true && destination.agent_registry.resource_type == 'MCP_SERVER' && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true"
+      }
+    }
+  },
+  {
+    "description": "Deny destructive MCP tools on Agent Registry MCP servers",
+    "effect": "DENY",
+    "principals": [
+      "principal://agents.global.proj-123456789012.system.id.goog/resources/aiplatform/projects/acme-agent-governance/locations/us-central1/reasoningEngines/finops-advisor-agent"
+    ],
+    "operation": {
+      "permissions": [
+        "iap.googleapis.com/resources.egressViaIAP"
+      ]
+    },
+    "conditions": {
+      "iap.googleapis.com": {
+        "title": "Block Destructive MCP Tools",
+        "description": "Explicitly deny egress whenever the target MCP tool is annotated destructive_hint == true.",
+        "expression": "destination.agent_registry.mcp_server.tool.annotations.destructive_hint == true"
+      }
+    }
+  }
+]
