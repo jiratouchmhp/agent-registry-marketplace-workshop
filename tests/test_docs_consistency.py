@@ -14,7 +14,14 @@ DOCS_DIR = REPO_ROOT / "docs"
 LABS_DIR = DOCS_DIR / "labs"
 MAKEFILE_PATH = REPO_ROOT / "Makefile"
 README_PATH = REPO_ROOT / "README.md"
+LOCAL_SKILLS_DIR = REPO_ROOT / "local-skills"
 SPEC_PATH = REPO_ROOT / "WORKSHOP_SPEC.json"
+
+EXPECTED_LOCAL_SKILL_NAMES: tuple[str, ...] = (
+    "cloud-run-debugger",
+    "terraform-iam-auditor",
+    "incident-postmortem-writer",
+)
 
 EXPECTED_LAB_FILES: tuple[str, ...] = (
     "00-environment-setup.md",
@@ -37,6 +44,8 @@ REQUIRED_MAKE_TARGETS: frozenset[str] = frozenset(
         "run-samples",
         "run-middleware",
         "demo-sync",
+        "demo-sync-local",
+        "demo-sync-repo",
         "demo-hub-sync",
         "tf-core-plan",
         "tf-sec-plan",
@@ -45,7 +54,7 @@ REQUIRED_MAKE_TARGETS: frozenset[str] = frozenset(
 
 
 def _all_doc_markdown_files() -> list[Path]:
-    files = [README_PATH]
+    files = [README_PATH, LOCAL_SKILLS_DIR / "README.md"]
     files.extend(sorted(DOCS_DIR.rglob("*.md")))
     return files
 
@@ -103,10 +112,12 @@ def _extract_python_dash_m_modules(markdown_text: str) -> set[str]:
 
 
 def test_required_curriculum_files_exist_and_non_empty() -> None:
-    """All 9 lab guides, README.md, executive brief, architecture guide, and Makefile exist."""
+    """All 9 lab guides, README.md, local-skills docs/SKILL.md files, brief, arch, and Makefile exist."""
     required_files = [
         README_PATH,
         MAKEFILE_PATH,
+        LOCAL_SKILLS_DIR / "README.md",
+        *(LOCAL_SKILLS_DIR / name / "SKILL.md" for name in EXPECTED_LOCAL_SKILL_NAMES),
         DOCS_DIR / "customer-usecase-3-brief.md",
         DOCS_DIR / "architecture.md",
         *(LABS_DIR / name for name in EXPECTED_LAB_FILES),
@@ -118,7 +129,7 @@ def test_required_curriculum_files_exist_and_non_empty() -> None:
 
 
 def test_makefile_defines_required_targets_and_venv_defaults() -> None:
-    """Makefile defines all 10 required targets and uses .venv defaults."""
+    """Makefile defines all 12 required targets (including dual-source sync) and uses .venv defaults."""
     makefile_text = MAKEFILE_PATH.read_text(encoding="utf-8")
     assert "PYTHON ?= .venv/bin/python" in makefile_text
     assert "PYTEST ?= .venv/bin/pytest" in makefile_text
@@ -212,7 +223,7 @@ def test_all_python_dash_m_modules_are_importable() -> None:
 
 
 def test_readme_links_workstreams_and_all_labs() -> None:
-    """README.md links executive brief, architecture, starter, and all 9 lab guides with clear split."""
+    """README.md links executive brief, architecture, starter, local-skills, and all 9 lab guides."""
     readme = README_PATH.read_text(encoding="utf-8")
     assert "```mermaid" in readme
     assert "Workstream A" in readme
@@ -220,8 +231,48 @@ def test_readme_links_workstreams_and_all_labs() -> None:
     assert "docs/customer-usecase-3-brief.md" in readme
     assert "docs/architecture.md" in readme
     assert "starter/README.md" in readme
+    assert "local-skills/README.md" in readme
+    assert "demo-sync-local" in readme
+    assert "demo-sync-repo" in readme
+    assert "skills_source_mode" in readme
     for lab_file in EXPECTED_LAB_FILES:
         assert f"docs/labs/{lab_file}" in readme, f"README.md missing link to docs/labs/{lab_file}"
+
+
+def test_dual_skill_sources_documented_consistently() -> None:
+    """Local-skills paths, dual-source Make targets, CLI flags, Terraform mode, and GitLab CI vars stay aligned."""
+    spec = json.loads(SPEC_PATH.read_text(encoding="utf-8"))
+    assert tuple(spec["skill_sources"]["local"]["skills"]) == EXPECTED_LOCAL_SKILL_NAMES
+
+    local_readme = (LOCAL_SKILLS_DIR / "README.md").read_text(encoding="utf-8")
+    for skill_name in EXPECTED_LOCAL_SKILL_NAMES:
+        assert (LOCAL_SKILLS_DIR / skill_name / "SKILL.md").is_file()
+        assert skill_name in local_readme
+
+    lab01 = (LABS_DIR / "01-author-agent-plugin.md").read_text(encoding="utf-8")
+    for skill_name in EXPECTED_LOCAL_SKILL_NAMES:
+        assert skill_name in lab01
+
+    lab02 = (LABS_DIR / "02-register-agent-registry.md").read_text(encoding="utf-8")
+    for token in (
+        "demo-sync-local",
+        "demo-sync-repo",
+        "--source-type local",
+        "--source-type git",
+        "--git-token-env",
+        "skills_source_mode",
+    ):
+        assert token in lab02, f"Lab 02 missing dual-source token: {token}"
+
+    lab05 = (LABS_DIR / "05-platform-agents-gitlab-sot.md").read_text(encoding="utf-8")
+    for token in (
+        "--source-type git",
+        "WORKSHOP_TOOLS_PACKAGE",
+        "PLUGINS_DIR",
+        "GCP_WORKLOAD_IDENTITY_PROVIDER",
+        "GCP_SERVICE_ACCOUNT_EMAIL",
+    ):
+        assert token in lab05, f"Lab 05 missing GitLab migration / dual-source token: {token}"
 
 
 def test_executive_brief_and_architecture_cover_required_topics() -> None:

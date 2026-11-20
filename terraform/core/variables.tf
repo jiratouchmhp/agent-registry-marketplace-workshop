@@ -102,3 +102,93 @@ variable "skills_bootstrap_command" {
   type        = string
   default     = ""
 }
+
+variable "skills_source_mode" {
+  description = "Skill ingestion source mode for the bootstrapper: \"local\" (Option 1: local starter plugin plus optional standalone local skills) or \"git\" (Option 2: shallow-clone and ingest a centralized GitLab/GitHub repository)."
+  type        = string
+  default     = "local"
+
+  validation {
+    condition     = contains(["local", "git"], var.skills_source_mode)
+    error_message = "skills_source_mode must be either \"local\" or \"git\"."
+  }
+}
+
+variable "enable_local_standalone_skills" {
+  description = "When true and skills_source_mode is \"local\", also ingests standalone skills from local_skills_dir alongside starter_plugin_dir."
+  type        = bool
+  default     = true
+}
+
+variable "local_skills_dir" {
+  description = "Local path (relative to terraform/core/ or absolute) to pre-prepared standalone agentskills.io skills ingested when skills_source_mode is \"local\" and enable_local_standalone_skills is true."
+  type        = string
+  default     = "../../local-skills"
+}
+
+variable "local_skills_plugin_name" {
+  description = "Logical plugin bundle name assigned to standalone skills ingested from local_skills_dir."
+  type        = string
+  default     = "local-ops-toolkit"
+
+  validation {
+    condition     = length(var.local_skills_plugin_name) <= 64 && can(regex("^[a-z0-9]+(-[a-z0-9]+)*$", var.local_skills_plugin_name))
+    error_message = "local_skills_plugin_name must be lowercase kebab-case (1-64 chars, matching ^[a-z0-9]+(-[a-z0-9]+)*$)."
+  }
+}
+
+variable "skills_repo_url" {
+  description = "Centralized GitLab or GitHub repository URL to shallow-clone and ingest when skills_source_mode is \"git\"."
+  type        = string
+  default     = ""
+}
+
+variable "skills_repo_ref" {
+  description = "Git branch, tag, or commit ref to clone when skills_source_mode is \"git\"."
+  type        = string
+  default     = "main"
+
+  validation {
+    condition     = length(trimspace(var.skills_repo_ref)) > 0
+    error_message = "skills_repo_ref must be a non-empty Git branch, tag, or commit ref."
+  }
+}
+
+variable "skills_repo_subdir" {
+  description = "Optional relative subdirectory inside the cloned Git repository to ingest (for example, \"plugins\" or \"skills\")."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.skills_repo_subdir == "" || (!startswith(var.skills_repo_subdir, "/") && !can(regex("(^|/)\\.\\.(/|$)", var.skills_repo_subdir)))
+    error_message = "skills_repo_subdir must be empty or a relative path without '..' traversal segments."
+  }
+}
+
+variable "skills_repo_token_env" {
+  description = "Optional NAME of a local environment variable holding a private Git token (for example, \"GITLAB_TOKEN\" or \"GITHUB_TOKEN\"). NEVER place raw tokens in .tfvars files."
+  type        = string
+  default     = ""
+
+  validation {
+    condition     = var.skills_repo_token_env == "" || can(regex("^[A-Za-z_][A-Za-z0-9_]*$", var.skills_repo_token_env))
+    error_message = "skills_repo_token_env must be empty or a valid environment variable name (for example, GITLAB_TOKEN). Never place raw tokens in .tfvars files."
+  }
+}
+
+variable "skills_repo_plugin_name" {
+  description = "Default logical plugin bundle name assigned to standalone skills discovered inside the cloned Git repository when skills_source_mode is \"git\"."
+  type        = string
+  default     = "central-repo-skills"
+
+  validation {
+    condition     = length(var.skills_repo_plugin_name) <= 64 && can(regex("^[a-z0-9]+(-[a-z0-9]+)*$", var.skills_repo_plugin_name))
+    error_message = "skills_repo_plugin_name must be lowercase kebab-case (1-64 chars, matching ^[a-z0-9]+(-[a-z0-9]+)*$)."
+  }
+}
+
+variable "skills_per_skill_plugin" {
+  description = "When true, passes --per-skill-plugin to tools.plugin_sync ingest so each standalone skill is emitted as its own logical plugin bundle."
+  type        = bool
+  default     = false
+}

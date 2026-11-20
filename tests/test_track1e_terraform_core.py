@@ -359,6 +359,55 @@ def test_variables_and_secure_defaults() -> None:
     assert "starter-marketplace/plugins/gcp-finops-toolkit" in var_blocks["starter_plugin_dir"]
 
 
+def test_dual_source_skills_variables_and_validations() -> None:
+    variables_hcl = (TF_CORE_DIR / "variables.tf").read_text(encoding="utf-8")
+    var_blocks = {labels[0]: body for labels, body in _extract_hcl_blocks(variables_hcl, "variable")}
+
+    dual_source_vars = {
+        "skills_source_mode",
+        "enable_local_standalone_skills",
+        "local_skills_dir",
+        "local_skills_plugin_name",
+        "skills_repo_url",
+        "skills_repo_ref",
+        "skills_repo_subdir",
+        "skills_repo_token_env",
+        "skills_repo_plugin_name",
+        "skills_per_skill_plugin",
+    }
+    missing = dual_source_vars - set(var_blocks)
+    assert not missing, f"Missing dual-source skills variables in variables.tf: {sorted(missing)}"
+
+    # skills_source_mode must default to "local" and strictly allow only "local" or "git".
+    mode_body = var_blocks["skills_source_mode"]
+    assert re.search(r'default\s*=\s*"local"', mode_body), (
+        'skills_source_mode must default to "local"'
+    )
+    assert re.search(
+        r'contains\(\[\s*"local"\s*,\s*"git"\s*\]\s*,\s*var\.skills_source_mode\s*\)',
+        mode_body,
+    ), 'skills_source_mode validation must enforce contains(["local", "git"], var.skills_source_mode)'
+
+    assert re.search(r"default\s*=\s*true\b", var_blocks["enable_local_standalone_skills"])
+    assert re.search(r'default\s*=\s*"\.\./\.\./local-skills"', var_blocks["local_skills_dir"])
+    assert re.search(
+        r'default\s*=\s*"local-ops-toolkit"', var_blocks["local_skills_plugin_name"]
+    )
+    assert re.search(r'default\s*=\s*""', var_blocks["skills_repo_url"])
+    assert re.search(r'default\s*=\s*"main"', var_blocks["skills_repo_ref"])
+    assert re.search(r'default\s*=\s*""', var_blocks["skills_repo_subdir"])
+    assert re.search(r'default\s*=\s*""', var_blocks["skills_repo_token_env"])
+    assert re.search(
+        r'default\s*=\s*"central-repo-skills"', var_blocks["skills_repo_plugin_name"]
+    )
+    assert re.search(r"default\s*=\s*false\b", var_blocks["skills_per_skill_plugin"])
+
+    # Security guardrail: skills_repo_token_env accepts only an env var name, never raw tokens.
+    assert "validation" in var_blocks["skills_repo_token_env"]
+    assert "never" in var_blocks["skills_repo_token_env"].lower()
+    assert "validation" in var_blocks["skills_repo_subdir"]
+
+
 def test_apis_enabled() -> None:
     apis_hcl = _strip_hcl_comments((TF_CORE_DIR / "apis.tf").read_text(encoding="utf-8"))
     expected_apis = [
@@ -612,16 +661,53 @@ def test_agent_registry_specs_match_sample_workloads_and_size_limits() -> None:
     )
 
 
-def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke() -> None:
+def _assert_no_services_in_payload(obj: Any) -> None:
+    """Recursively verify any sync-plan JSON payload contains zero MCP/A2A services."""
+    if isinstance(obj, dict):
+        if "mcp_services" in obj:
+            assert obj["mcp_services"] == [], (
+                "skills_bootstrap.tf MUST NOT sync MCP services (owned by agent_registry_services.tf)"
+            )
+        if "agent_services" in obj:
+            assert obj["agent_services"] == [], (
+                "skills_bootstrap.tf MUST NOT sync A2A agent services (owned by agent_registry_services.tf)"
+            )
+        for value in obj.values():
+            _assert_no_services_in_payload(value)
+    elif isinstance(obj, list):
+        for item in obj:
+            _assert_no_services_in_payload(item)
+
+
+def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
+    tmp_path: Path,
+) -> None:
     skills_hcl = (TF_CORE_DIR / "skills_bootstrap.tf").read_text(encoding="utf-8")
     tf_data_blocks = _extract_hcl_blocks(skills_hcl, "resource", "terraform_data")
     assert len(tf_data_blocks) == 1
 
-    _, body = tf_data_blocks[0]
+    labels, body = tf_data_blocks[0]
+    assert labels == ["terraform_data", "bootstrap_starter_skills"]
     assert re.search(r"count\s*=\s*var\.enable_skills_bootstrap\s*\?\s*1\s*:\s*0", body)
     assert "triggers_replace" in body
+    for trigger_key in [
+        "skills_source_mode",
+        "local_skills_dir",
+        "local_skills_content_hash",
+        "skills_repo_url",
+        "skills_repo_ref",
+        "skills_repo_subdir",
+        "skills_repo_plugin_name",
+        "skills_per_skill_plugin",
+    ]:
+        assert re.search(rf"(?m)^\s*{re.escape(trigger_key)}\s*=", body), (
+            f"triggers_replace in skills_bootstrap.tf missing {trigger_key}"
+        )
+
     assert "filesha256(" in skills_hcl
-    assert "fileset(" in skills_hcl
+    assert "try(fileset(" in skills_hcl, (
+        "skills_bootstrap.tf must guard fileset(...) with try(...) so git mode never fails if local dirs are absent"
+    )
     assert 'repo_root = abspath("${path.module}/../..")' in skills_hcl
     assert re.search(r"working_dir\s*=\s*local\.repo_root", body), (
         "local-exec must set working_dir = local.repo_root to avoid ModuleNotFoundError"
@@ -629,11 +715,15 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke() ->
     assert re.search(r"PYTHONPATH\s*=\s*local\.repo_root", body), (
         "local-exec must set PYTHONPATH = local.repo_root to import tools.plugin_sync"
     )
-    assert "probe_mcp=False" in body
-    assert "plan.mcp_services.clear()" in body
-    assert "plan.agent_services.clear()" in body
-    assert "apply_sync_plan(" in body
+    assert "precondition" in body, (
+        "terraform_data.bootstrap_starter_skills should declare a lifecycle precondition for git mode skills_repo_url"
+    )
+    assert "-m tools.plugin_sync ingest" in body
+    assert "--only-skills" in body
+    assert "--skip-mcp-probe" in body
     assert "google_agent_registry_skill" in skills_hcl
+    assert "google_agent_registry_service" in skills_hcl
+    assert "agent_registry_services.tf" in skills_hcl
     assert "plugin-sync" in skills_hcl
     assert "gcloud" in skills_hcl
     assert "starter-marketplace/plugins/gcp-finops-toolkit" in skills_hcl
@@ -650,54 +740,249 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke() ->
     )
     assert help_proc.returncode == 0, f"tools.plugin_sync --help failed: {help_proc.stderr}"
 
-    # Smoke check 2: Execute the EXACT dedented local-exec heredoc from skills_bootstrap.tf in dry_run mode.
+    # Smoke check 2: Execute the EXACT dedented local-exec heredoc from skills_bootstrap.tf
+    # across Option 1 ("local") and Option 2 ("git") branches using a stubbed `.venv/bin/python`
+    # that records every CLI invocation verbatim.
     heredoc_match = re.search(r"command\s*=\s*<<-EOT\n(.*?)\n\s*EOT", body, re.DOTALL)
     assert heredoc_match is not None, "Could not locate <<-EOT command heredoc in skills_bootstrap.tf"
-    rendered_cmd = textwrap.dedent(heredoc_match.group(1)).replace(
-        "${local.repo_root}", str(REPO_ROOT)
+    fake_repo_root = tmp_path / "repo"
+    stub_python = fake_repo_root / ".venv" / "bin" / "python"
+    stub_python.parent.mkdir(parents=True, exist_ok=True)
+    stub_python.write_text(
+        f"#!{sys.executable}\n"
+        "import json, os, sys\n"
+        "with open(os.environ['STUB_LOG_FILE'], 'a', encoding='utf-8') as fh:\n"
+        "    fh.write(json.dumps(sys.argv[1:]) + '\\n')\n",
+        encoding="utf-8",
     )
-    assert "dry_run=False" in rendered_cmd
-    dry_run_cmd = rendered_cmd.replace("dry_run=False", "dry_run=True")
+    stub_python.chmod(0o755)
 
+    rendered_cmd = (
+        textwrap.dedent(heredoc_match.group(1))
+        .replace("${local.repo_root}", str(fake_repo_root))
+        .replace("$${", "${")
+    )
     spec = json.loads(WORKSHOP_SPEC_PATH.read_text(encoding="utf-8"))
-    run_env = {
-        **env,
-        "GCP_PROJECT_ID": spec["project_defaults"]["project_id"],
-        "GCP_LOCATION": spec["project_defaults"]["location"],
-        "AGENT_REGISTRY_BASE_URL": "https://agentregistry.googleapis.com/v1",
-        "SKILL_STAGING_BUCKET": "acme-agent-governance-agent-registry-skills",
-        "PLUGIN_DIR": str(STARTER_PLUGIN_DIR),
-        "MCP_SERVICE_ID": spec["sample_plugin"]["mcp_service_id"],
-        "AGENT_SERVICE_ID": spec["sample_plugin"]["agent_service_id"],
-        "CUSTOM_BOOTSTRAP_CMD": "",
-    }
-    exec_proc = subprocess.run(
-        ["/bin/bash", "-euo", "pipefail", "-c", dry_run_cmd],
+    fake_local_skills = tmp_path / "local-skills"
+    fake_local_skills.mkdir()
+
+    def _run_bootstrap(overrides: dict[str, str], log_name: str) -> tuple[subprocess.CompletedProcess[str], list[list[str]]]:
+        log_file = tmp_path / f"{log_name}.jsonl"
+        run_env = {
+            **env,
+            "STUB_LOG_FILE": str(log_file),
+            "GCP_PROJECT_ID": spec["project_defaults"]["project_id"],
+            "GCP_LOCATION": spec["project_defaults"]["location"],
+            "AGENT_REGISTRY_BASE_URL": "https://agentregistry.googleapis.com/v1",
+            "SKILL_STAGING_BUCKET": "acme-agent-governance-agent-registry-skills",
+            "SKILLS_SOURCE_MODE": "local",
+            "PLUGIN_DIR": str(STARTER_PLUGIN_DIR),
+            "ENABLE_LOCAL_STANDALONE_SKILLS": "true",
+            "LOCAL_SKILLS_DIR": str(fake_local_skills),
+            "LOCAL_SKILLS_PLUGIN_NAME": "local-ops-toolkit",
+            "SKILLS_REPO_URL": "",
+            "SKILLS_REPO_REF": "main",
+            "SKILLS_REPO_SUBDIR": "",
+            "SKILLS_REPO_TOKEN_ENV": "",
+            "SKILLS_REPO_PLUGIN_NAME": "central-repo-skills",
+            "SKILLS_PER_SKILL_PLUGIN": "false",
+            "MCP_SERVICE_ID": spec["sample_plugin"]["mcp_service_id"],
+            "AGENT_SERVICE_ID": spec["sample_plugin"]["agent_service_id"],
+            "CUSTOM_BOOTSTRAP_CMD": "",
+            **overrides,
+        }
+        proc = subprocess.run(
+            ["/bin/bash", "-euo", "pipefail", "-c", rendered_cmd],
+            cwd=REPO_ROOT,
+            env=run_env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        calls: list[list[str]] = []
+        if log_file.exists():
+            calls = [json.loads(line) for line in log_file.read_text(encoding="utf-8").splitlines() if line]
+        return proc, calls
+
+    # 2a. Option 1 (local): starter plugin + standalone local skills (grouped under local-ops-toolkit).
+    proc_local, calls_local = _run_bootstrap({}, "local_both")
+    assert proc_local.returncode == 0, f"local mode failed: {proc_local.stderr}"
+    assert len(calls_local) == 2
+    for call in calls_local:
+        assert call[:3] == ["-m", "tools.plugin_sync", "ingest"]
+        assert "--source-type" in call and call[call.index("--source-type") + 1] == "local"
+        assert "--only-skills" in call, "Every local-mode ingest call MUST pass --only-skills"
+        assert "--skip-mcp-probe" in call, "Every local-mode ingest call MUST pass --skip-mcp-probe"
+        assert "--target-state" in call and call[call.index("--target-state") + 1] == "TARGET_STATE_ACTIVE"
+        assert "--scanning-policy" in call and call[call.index("--scanning-policy") + 1] == "ENABLED_BLOCKING"
+    assert calls_local[0][calls_local[0].index("--path") + 1] == str(STARTER_PLUGIN_DIR)
+    assert calls_local[1][calls_local[1].index("--path") + 1] == str(fake_local_skills)
+    assert calls_local[1][calls_local[1].index("--plugin-name") + 1] == "local-ops-toolkit"
+    assert "--per-skill-plugin" not in calls_local[1]
+
+    # 2b. Option 1 (local) with --per-skill-plugin enabled.
+    proc_psp, calls_psp = _run_bootstrap({"SKILLS_PER_SKILL_PLUGIN": "true"}, "local_per_skill")
+    assert proc_psp.returncode == 0, f"local per-skill mode failed: {proc_psp.stderr}"
+    assert len(calls_psp) == 2
+    assert "--per-skill-plugin" in calls_psp[1]
+    assert "--only-skills" in calls_psp[1]
+
+    # 2c. Option 1 (local) with standalone skills disabled or directory absent.
+    proc_no_standalone, calls_no_standalone = _run_bootstrap(
+        {"ENABLE_LOCAL_STANDALONE_SKILLS": "false"}, "local_disabled_standalone"
+    )
+    assert proc_no_standalone.returncode == 0
+    assert len(calls_no_standalone) == 1
+
+    proc_missing_dir, calls_missing_dir = _run_bootstrap(
+        {"LOCAL_SKILLS_DIR": str(tmp_path / "does-not-exist")}, "local_missing_dir"
+    )
+    assert proc_missing_dir.returncode == 0
+    assert len(calls_missing_dir) == 1
+
+    # 2d. Option 2 (git): MUST fail fast when SKILLS_REPO_URL is empty or whitespace.
+    for case_name, bad_url in [("git_empty_url", ""), ("git_ws_url", "   ")]:
+        proc_bad, calls_bad = _run_bootstrap(
+            {"SKILLS_SOURCE_MODE": "git", "SKILLS_REPO_URL": bad_url}, case_name
+        )
+        assert proc_bad.returncode != 0, f"git mode must fail fast for SKILLS_REPO_URL={bad_url!r}"
+        assert calls_bad == []
+        assert "skills_repo_url" in proc_bad.stderr.lower()
+
+    # 2e. Option 2 (git): full arguments including --ref, --subdir, --git-token-env, --per-skill-plugin.
+    repo_url = "https://gitlab.example.com/ai-platform/agent-marketplace.git"
+    proc_git_full, calls_git_full = _run_bootstrap(
+        {
+            "SKILLS_SOURCE_MODE": "git",
+            "SKILLS_REPO_URL": repo_url,
+            "SKILLS_REPO_REF": "release/v1",
+            "SKILLS_REPO_SUBDIR": "plugins",
+            "SKILLS_REPO_TOKEN_ENV": "GITLAB_TOKEN",
+            "SKILLS_REPO_PLUGIN_NAME": "central-repo-skills",
+            "SKILLS_PER_SKILL_PLUGIN": "true",
+        },
+        "git_full",
+    )
+    assert proc_git_full.returncode == 0, f"git full mode failed: {proc_git_full.stderr}"
+    assert len(calls_git_full) == 1
+    git_call = calls_git_full[0]
+    assert git_call[:3] == ["-m", "tools.plugin_sync", "ingest"]
+    assert git_call[git_call.index("--source-type") + 1] == "git"
+    assert git_call[git_call.index("--repo-url") + 1] == repo_url
+    assert git_call[git_call.index("--ref") + 1] == "release/v1"
+    assert git_call[git_call.index("--subdir") + 1] == "plugins"
+    assert git_call[git_call.index("--git-token-env") + 1] == "GITLAB_TOKEN"
+    assert git_call[git_call.index("--plugin-name") + 1] == "central-repo-skills"
+    assert "--per-skill-plugin" in git_call
+    assert "--only-skills" in git_call, "git-mode ingest call MUST pass --only-skills"
+    assert "--skip-mcp-probe" in git_call, "git-mode ingest call MUST pass --skip-mcp-probe"
+
+    # 2f. Option 2 (git): minimal optional args omitted cleanly.
+    proc_git_min, calls_git_min = _run_bootstrap(
+        {"SKILLS_SOURCE_MODE": "git", "SKILLS_REPO_URL": repo_url}, "git_minimal"
+    )
+    assert proc_git_min.returncode == 0, f"git minimal mode failed: {proc_git_min.stderr}"
+    assert len(calls_git_min) == 1
+    assert "--subdir" not in calls_git_min[0]
+    assert "--git-token-env" not in calls_git_min[0]
+    assert "--per-skill-plugin" not in calls_git_min[0]
+    assert "--only-skills" in calls_git_min[0]
+    assert "--skip-mcp-probe" in calls_git_min[0]
+
+    # 2g. Custom command override bypasses default plugin_sync invocations.
+    proc_custom, calls_custom = _run_bootstrap(
+        {"CUSTOM_BOOTSTRAP_CMD": "echo custom-ok"}, "custom_cmd"
+    )
+    assert proc_custom.returncode == 0
+    assert proc_custom.stdout.strip() == "custom-ok"
+    assert calls_custom == []
+
+    # 2h. Unsupported mode fails fast.
+    proc_invalid_mode, calls_invalid_mode = _run_bootstrap(
+        {"SKILLS_SOURCE_MODE": "invalid"}, "invalid_mode"
+    )
+    assert proc_invalid_mode.returncode != 0
+    assert calls_invalid_mode == []
+
+    # Smoke check 3: When `tools.plugin_sync ingest` is registered, execute a real `--dry-run`
+    # with the exact Terraform flags to confirm CLI flag alignment and zero Service mutations.
+    ingest_help = subprocess.run(
+        [sys.executable, "-m", "tools.plugin_sync", "ingest", "--help"],
         cwd=REPO_ROOT,
-        env=run_env,
+        env=env,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert exec_proc.returncode == 0, (
-        f"skills_bootstrap.tf local-exec dry-run failed:\n"
-        f"stderr: {exec_proc.stderr}\nstdout: {exec_proc.stdout}"
-    )
+    if ingest_help.returncode == 0:
+        real_dry_run = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "tools.plugin_sync",
+                "ingest",
+                "--source-type",
+                "local",
+                "--path",
+                str(STARTER_PLUGIN_DIR),
+                "--registry-url",
+                "https://agentregistry.googleapis.com/v1",
+                "--project",
+                spec["project_defaults"]["project_id"],
+                "--location",
+                spec["project_defaults"]["location"],
+                "--target-state",
+                "TARGET_STATE_ACTIVE",
+                "--scanning-policy",
+                "ENABLED_BLOCKING",
+                "--only-skills",
+                "--skip-mcp-probe",
+                "--dry-run",
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert real_dry_run.returncode == 0, (
+            f"Real `tools.plugin_sync ingest --only-skills --dry-run` failed:\n"
+            f"stderr: {real_dry_run.stderr}\nstdout: {real_dry_run.stdout}"
+        )
+        payload = json.loads(real_dry_run.stdout)
+        _assert_no_services_in_payload(payload)
 
-    payload = json.loads(exec_proc.stdout)
-    assert payload["mcp_services"] == [], (
-        "skills_bootstrap.tf MUST NOT sync MCP services (owned by agent_registry_services.tf)"
+
+def test_tfvars_example_documents_both_skill_source_options() -> None:
+    tfvars_text = (TF_CORE_DIR / "terraform.tfvars.example").read_text(encoding="utf-8")
+    uncommented = _strip_hcl_comments(tfvars_text)
+
+    # Option 1 must be active by default.
+    assert re.search(r'(?m)^\s*skills_source_mode\s*=\s*"local"', uncommented), (
+        'terraform.tfvars.example must set skills_source_mode = "local" active by default'
     )
-    assert payload["agent_services"] == [], (
-        "skills_bootstrap.tf MUST NOT sync A2A agent services (owned by agent_registry_services.tf)"
+    assert re.search(r"(?m)^\s*enable_local_standalone_skills\s*=\s*true\b", uncommented)
+    assert re.search(r'(?m)^\s*local_skills_dir\s*=\s*"\.\./\.\./local-skills"', uncommented)
+    assert re.search(r'(?m)^\s*local_skills_plugin_name\s*=\s*"local-ops-toolkit"', uncommented)
+
+    # Option 2 must be clearly documented as a commented example (not overriding Option 1).
+    assert not re.search(r'(?m)^\s*skills_source_mode\s*=\s*"git"', uncommented), (
+        'Option 2 (skills_source_mode = "git") should be commented out by default in terraform.tfvars.example'
     )
-    skill_ids = [s["raw_skill_id"] for s in payload["skills"]]
-    assert sorted(skill_ids) == sorted(spec["sample_plugin"]["skills"])
-    for skill in payload["skills"]:
-        assert skill["private_skill_id"] == f"private-{skill['raw_skill_id']}"
-        meta = skill["frontmatter_metadata"]
-        assert meta["mcp_service_id"] == spec["sample_plugin"]["mcp_service_id"]
-        assert meta["agent_service_id"] == spec["sample_plugin"]["agent_service_id"]
+    for opt2_field in [
+        'skills_source_mode      = "git"',
+        "skills_repo_url",
+        "skills_repo_ref",
+        "skills_repo_subdir",
+        "skills_repo_token_env",
+        "skills_repo_plugin_name",
+    ]:
+        assert opt2_field in tfvars_text, (
+            f"terraform.tfvars.example must document Option 2 setting: {opt2_field}"
+        )
+    assert "Option 1" in tfvars_text
+    assert "Option 2" in tfvars_text
+    assert "NEVER put raw tokens in .tfvars" in tfvars_text
 
 
 def test_required_outputs_exported() -> None:

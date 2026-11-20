@@ -8,10 +8,15 @@ This document details the engineering architecture of the **Enterprise Agent Mar
 
 ```mermaid
 flowchart TB
-    subgraph DevAuthor["Authoring Plane (GitLab SoT)"]
-        REPO["starter-marketplace/plugins/gcp-finops-toolkit/<br/>plugin.json + .antigravity-plugin/ + skills/ + agents/ + rules/"]
-        PIPE[".gitlab-ci.yml (3 Stages)<br/>1. validate (5-IDE schemas + agy jq filter)<br/>2. package-and-sign (plugin_sync + KMS ECDSA P-256)<br/>3. register-registry (DRAFT on MR / ACTIVE on tag)"]
-        REPO --> PIPE
+    subgraph DevAuthor["Authoring & Dual-Source Ingestion Plane"]
+        OPT1["Option 1: Local Skills Path<br/>• local-skills/ (cloud-run-debugger, terraform-iam-auditor, incident-postmortem-writer)<br/>• starter-marketplace/plugins/gcp-finops-toolkit/"]
+        OPT2["Option 2: Centralized Git Repo (Pull Clone & Ingest)<br/>• Any GitLab / GitHub repo (--repo-url, --ref, --subdir, --git-token-env)<br/>• Shallow clone (--depth 1) + URL credential stripping + 40-char HEAD SHA"]
+        INGEST["Unified Ingest Engine (tools.plugin_sync ingest / sources.py)<br/>Auto-detects 5 layouts: single_plugin | multi_plugin | single_skill | standalone_skills | hybrid<br/>Validates <=1MB ZIP + injects frontmatter.metadata + optional KMS ECDSA P-256 Sign"]
+        PIPE["Push-Based GitLab CI (.gitlab-ci.yml — 3 Stages)<br/>1. validate (5-IDE schemas + agy jq filter)<br/>2. package-and-sign (plugin_sync + KMS ECDSA P-256)<br/>3. register-registry (DRAFT on MR / ACTIVE on tag)"]
+        OPT1 --> INGEST
+        OPT2 --> INGEST
+        OPT1 -.->|"Graduate to push CI"| PIPE
+        OPT2 -.->|"Graduate to push CI"| PIPE
     end
 
     subgraph GCPControl["Control & Governance Plane (Google Cloud)"]
@@ -38,6 +43,8 @@ flowchart TB
         ADK["Platform Agents (Google ADK)<br/>AgentRegistry + GCPSkillRegistry + SkillToolset"]
     end
 
+    INGEST -->|"Sign canonical digest"| KMS_SIGN
+    INGEST -->|"REST v1 (Service + Skill / --only-skills)"| AR
     PIPE -->|"Sign canonical digest"| KMS_SIGN
     PIPE -->|"REST v1 (Service + Skill)"| AR
     AR -->|"?alt=media (302 -> GCS signed URL)"| MW
@@ -49,6 +56,23 @@ flowchart TB
     MW -->|"call_remote_a2a_agent"| A2A_S
     GW --> AUDIT
 ```
+
+### Dual-Source Ingestion & Auto-Discovery (`tools/plugin_sync/sources.py`)
+
+Both **Option 1 (Local Skills)** and **Option 2 (Centralized Git Repo Clone & Ingest)** share the unified ingestion engine in [tools/plugin_sync/sources.py](../tools/plugin_sync/sources.py) and [tools/plugin_sync/cli.py](../tools/plugin_sync/cli.py) (`python -m tools.plugin_sync ingest`):
+
+| Auto-Detected Layout | Directory Pattern | Packaging Behavior |
+| :--- | :--- | :--- |
+| `single_plugin` | `<target>/plugin.json` | Decomposes skills + MCP/A2A services via `build_sync_plan()` (unless `--only-skills` is set) |
+| `multi_plugin` | `<target>/plugins/*/plugin.json` or `<target>/*/plugin.json` | Builds one `SyncPlan` per discovered `agent-plugins.org` plugin |
+| `single_skill` | `<target>/SKILL.md` | Packages one standalone `agentskills.io` skill under `--plugin-name` (or its folder name) |
+| `standalone_skills` | `<target>/skills/*/SKILL.md` or `<target>/*/SKILL.md` | Groups discovered skills under `--plugin-name` (default `local-ops-toolkit` for `local-skills/`), or emits 1 plugin per skill with `--per-skill-plugin` |
+| `hybrid` | Both plugin directories and standalone skill directories | Emits `SyncPlan`s for every discovered plugin **plus** bundled standalone skills in one run |
+
+Built-in security guardrails for Option 2 Git ingestion:
+- **Zero credential leakage**: `--git-token-env <ENV_VAR>` passes private Git tokens via origin-scoped ephemeral `GIT_CONFIG_*` `http.<origin>/.extraHeader` environment variables (never written to `.git/config`, CLI args, or error logs); `sanitize_repo_url()` strips any embedded `user:token@` before writing `frontmatter.metadata.source_repo`.
+- **Containment & archive safety**: `--subdir` rejects `..` traversal, absolute paths, and symlink escapes; Git hooks (`core.hooksPath=/dev/null`) and `ext::` remotes are disabled; every skill ZIP is validated through `build_skill_zip()` (≤ 1 MB, strictly one uppercase `SKILL.md`, zero symlinks).
+- **Terraform ownership boundary**: [terraform/core/skills_bootstrap.tf](../terraform/core/skills_bootstrap.tf) supports `skills_source_mode = "local" | "git"` and always passes `--only-skills --skip-mcp-probe` so `google_agent_registry_service` resources in [terraform/core/agent_registry_services.tf](../terraform/core/agent_registry_services.tf) are never overwritten.
 
 ### Component Ports & Defaults (`WORKSHOP_SPEC.json`)
 

@@ -17,10 +17,12 @@ Build a **governed, multi-IDE Enterprise Agent Marketplace** backed by **Google 
 
 ```mermaid
 flowchart LR
-    subgraph Authoring["1. Authoring SoT (GitLab)"]
-        GL["Polyglot Plugin Repo<br/>starter-marketplace/plugins/gcp-finops-toolkit"]
-        CI["GitLab CI (.gitlab-ci.yml)<br/>Schema + agy validate + KMS ECDSA P-256 Sign"]
-        GL --> CI
+    subgraph Authoring["1. Dual Skill Sources (Choose Option 1 or Option 2)"]
+        OPT1["Option 1: Local Skills Path<br/>local-skills/ (3 standalone skills)<br/>+ starter-marketplace/plugins/gcp-finops-toolkit"]
+        OPT2["Option 2: Centralized Git Repo<br/>Clone & Ingest (GitLab / GitHub)<br/>OR Push-Based GitLab CI (.gitlab-ci.yml)"]
+        ING["Unified Ingest (tools.plugin_sync)<br/>Auto-Detect Layout + Validate + Optional KMS Sign"]
+        OPT1 --> ING
+        OPT2 --> ING
     end
 
     subgraph Registry["2. Governed Runtime Catalog (Google Cloud Agent Registry v1)"]
@@ -43,8 +45,8 @@ flowchart LR
         AG["Google Antigravity"]
     end
 
-    CI -->|"tools.plugin_sync (DRAFT on MR, ACTIVE on tag)"| SK
-    CI -->|"Service CRUD / Terraform"| SV
+    ING -->|"tools.plugin_sync (DRAFT on MR, ACTIVE on tag/ingest)"| SK
+    ING -->|"Service CRUD / Terraform"| SV
     SK -->|"?alt=media (302 -> GCS signed URL)"| MW
     SV --> MW
     MW --> HS
@@ -57,6 +59,19 @@ flowchart LR
 
 ---
 
+## Two Skill Source Paths (Choose Option 1 or Option 2)
+
+This workshop supports **two first-class, equally supported ways** to populate Google Cloud Agent Registry (`v1`). Both paths feed the exact same governed catalog, Polyglot Middleware, 4-IDE installer (`tools.hub_sync`), and ADK platform agents:
+
+| Path | Best For | Source Content | Make Target / CLI Command | Terraform Bootstrap (`terraform/core/`) |
+| :--- | :--- | :--- | :--- | :--- |
+| **Option 1: Local Skills Path** *(Default)* | Classroom workshops, air-gapped demos, zero external GitLab/GitHub credentials | Pre-prepared standalone skills in [local-skills/](local-skills/README.md) (`local-ops-toolkit`) **+** full `agent-plugins.org` bundle in [starter-marketplace/](starter-marketplace/plugins/gcp-finops-toolkit/plugin.json) (`gcp-finops-toolkit`) | `make demo-sync-local`<br>`python -m tools.plugin_sync ingest --source-type local --path local-skills --plugin-name local-ops-toolkit` | `skills_source_mode = "local"`<br>(`enable_local_standalone_skills = true`, `local_skills_dir = "../../local-skills"`) |
+| **Option 2: Centralized Git Repo Path (Clone & Ingest)** | Customer Bring-Your-Own-Repo onboarding (GitLab / GitHub) without restructuring first | Any centralized Git repo — auto-detects `single_plugin`, `multi_plugin`, `single_skill`, `standalone_skills`, or `hybrid` layouts with exact 40-char `git_commit` provenance | `make demo-sync-repo` *(override `SKILLS_REPO_URL`, `SKILLS_REPO_REF`, `SKILLS_REPO_SUBDIR`, `SKILLS_REPO_TOKEN_ENV`)*<br>`python -m tools.plugin_sync ingest --source-type git --repo-url <url> --ref main` | `skills_source_mode = "git"`<br>(`skills_repo_url`, `skills_repo_ref`, `skills_repo_subdir`, `skills_repo_token_env`) |
+
+> **Graduating to Push-Based CI/CD:** Once a team validates its catalog with Option 1 or Option 2, promote to push-based GitLab CI ([starter-marketplace/.gitlab-ci.yml](starter-marketplace/.gitlab-ci.yml)) for automated MR `TARGET_STATE_DRAFT` quarantine and release-tag `TARGET_STATE_ACTIVE` publication (see [Lab 05](docs/labs/05-platform-agents-gitlab-sot.md)).
+
+---
+
 ## Curriculum Structure: Two Modular Workstreams
 
 This workshop is explicitly structured into **two independent workstreams**. Teams can run **Workstream A** for the complete platform & IDE marketplace build, run **Workstream B standalone** against either the local mock registry or any existing Google Cloud Agent Registry project, or combine both for a full-day enterprise blueprint.
@@ -66,8 +81,8 @@ This workshop is explicitly structured into **two independent workstreams**. Tea
 | Module | Lab Guide | Duration | Focus & Hands-On Artifacts |
 | :---: | :--- | :---: | :--- |
 | **00** | [Environment Setup](docs/labs/00-environment-setup.md) | 20 min | `.venv` verification, 5-minute offline smoke test (`mock_registry`), and optional `terraform/core` GCP deployment |
-| **01** | [Author a Polyglot Agent Plugin](docs/labs/01-author-agent-plugin.md) | 35 min | Authoring `gcp-finops-toolkit` (`agent-plugins.org` 1.0 + Antigravity `build-plugins` multi-tool coexistence, `rules/`, `assets/logo.svg`, `agy plugin validate --json` CI filter, `starter/lab01_plugin_skeleton/`) |
-| **02** | [Register Assets in Agent Registry](docs/labs/02-register-agent-registry.md) | 35 min | Decomposing plugins with `python -m tools.plugin_sync` into `private-` Skills, `TOOL_SPEC` MCP Server, `A2A_AGENT_CARD` Agent (empty top-level `interfaces`), and Endpoint via `v1` REST / `gcloud` / Terraform |
+| **01** | [Author a Polyglot Agent Plugin](docs/labs/01-author-agent-plugin.md) | 35 min | Authoring `gcp-finops-toolkit` (`agent-plugins.org` 1.0 + Antigravity `build-plugins` multi-tool coexistence, `rules/`, `assets/logo.svg`, `agy plugin validate --json` CI filter, `starter/lab01_plugin_skeleton/`) plus standalone skills in `local-skills/` |
+| **02** | [Register Assets in Agent Registry](docs/labs/02-register-agent-registry.md) | 35 min | Dual-source ingestion via `python -m tools.plugin_sync ingest` (**Option 1:** local `local-skills/` + `starter-marketplace/` via `make demo-sync-local`; **Option 2:** shallow-cloning a centralized GitLab/GitHub repo via `make demo-sync-repo`) plus `v1` REST, `gcloud`, and Terraform `skills_source_mode` |
 | **03** | [Build & Deploy Polyglot Middleware](docs/labs/03-build-deploy-middleware.md) | 40 min | Cloud Run Polyglot Middleware (`?alt=media` 302 redirect header stripping, single-bundle ZIP synthesis, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, Streamable HTTP `/mcp` gateway) |
 | **04** | [1-Command Multi-IDE Developer UX](docs/labs/04-ide-developer-experience.md) | 40 min | Zero-friction developer onboarding via `python -m tools.hub_sync` & Bootstrap `/mcp` across **Claude Code**, **OpenAI Codex**, **GitHub Copilot / VS Code**, and **Google Antigravity** (`agy plugin install`, `agy plugin list --json`, `agy --agent`) |
 | **05** | [Platform Agents & GitLab Dual-SoT](docs/labs/05-platform-agents-gitlab-sot.md) | 40 min | Direct ADK consumption (`AgentRegistry` + `GCPSkillRegistry` + `SkillToolset`) via `python -m platform_agent.adk_orchestrator` and GitLab CI/CD pipeline ([starter-marketplace/.gitlab-ci.yml](starter-marketplace/.gitlab-ci.yml)) |
@@ -107,8 +122,12 @@ make run-samples
 # Terminal 3 — Start the Polyglot Marketplace Middleware (port 8080)
 make run-middleware
 
-# Terminal 4 — Sync the starter plugin into Agent Registry, then hydrate all 4 IDEs into a demo HOME
-make demo-sync
+# Terminal 4 — Ingest skills into Agent Registry, then hydrate all 4 IDEs into a demo HOME
+# Option 1 (Recommended offline default): starter plugin + pre-prepared local-skills/
+make demo-sync-local
+# Or Option 1 (starter plugin only): make demo-sync
+# Or Option 2 (clone & ingest a centralized Git repo): make demo-sync-repo
+
 make demo-hub-sync
 ```
 
@@ -144,7 +163,8 @@ curl -fsSL http://127.0.0.1:8080/v1/marketplace/claude.json | .venv/bin/python -
 | [WORKSHOP_SPEC.json](WORKSHOP_SPEC.json) | Canonical ports (`8090`, `8091`, `8092`, `8080`), resource names, URNs, metadata keys, and Terraform outputs |
 | [Makefile](Makefile) | Developer & facilitator shortcuts (`test`, `test-e2e`, `validate-hcl`, `run-*`, `demo-*`, `tf-*-plan`) |
 | [starter-marketplace/](starter-marketplace/.gitlab-ci.yml) | Reference GitLab plugin repository (`gcp-finops-toolkit`) and 3-stage `.gitlab-ci.yml` sync pipeline |
-| [tools/plugin_sync/](tools/plugin_sync/cli.py) | CLI decomposing `agent-plugins.org` bundles into single-skill ZIPs, signing digests, and syncing to Agent Registry `v1` |
+| [local-skills/](local-skills/README.md) | Option 1 pre-prepared standalone `agentskills.io` skills (`cloud-run-debugger`, `terraform-iam-auditor`, `incident-postmortem-writer`) for zero-friction local ingestion |
+| [tools/plugin_sync/](tools/plugin_sync/cli.py) | CLI decomposing `agent-plugins.org` bundles and auto-discovering local or cloned Git skill repos (`sync` & `ingest`), signing digests, and registering into Agent Registry `v1` |
 | [mock_registry/](mock_registry/app.py) | Faithful local simulator of `agentregistry.googleapis.com/v1` (incl. `private-` prefixing, blocking scanner, `?alt=media` 302 strict header checks) |
 | [samples/](samples/mcp-server/app.py) | Runnable FinOps Streamable HTTP MCP server (`:8091`) and A2A v1.0 advisor agent (`:8092`) |
 | [middleware/](middleware/app/main.py) | Cloud Run Polyglot Middleware projecting 4 IDE marketplace feeds, deterministic 5-IDE ZIP bundles, and Streamable HTTP `/mcp` gateway |

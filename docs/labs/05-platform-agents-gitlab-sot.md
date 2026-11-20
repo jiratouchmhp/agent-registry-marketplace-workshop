@@ -99,6 +99,23 @@ Review [starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci
 | **3. `register-registry`** | `register:draft-mr` | Merge Requests | Uploads skills with `--target-state TARGET_STATE_DRAFT --scanning-policy ENABLED_BLOCKING`. Skills are **quarantined** while security scans run—developers never see unreviewed MR changes. |
 | **3. `register-registry`** | `register:active-release` | Semver Tags (`v*.*.*`) or manual on `main` | Promotes clean, signed revisions to `--target-state TARGET_STATE_ACTIVE`. |
 
+### Pull-Based Option 2 (`ingest --source-type git`) vs. Push-Based GitLab CI (`.gitlab-ci.yml`)
+
+These two mechanisms complement each other cleanly across a team's adoption lifecycle:
+- **Pull-based Option 2 (`python -m tools.plugin_sync ingest --source-type git` / `make demo-sync-repo` / Terraform `skills_source_mode = "git"`):** Ideal for Day-0 onboarding of an existing centralized GitLab or GitHub skills/plugins repository, Terraform environment bootstrapping, or scheduled catalog ingestion across repositories that have not yet adopted `.gitlab-ci.yml`. It auto-detects `agent-plugins.org` multi-plugin repos, standalone `skills/*/SKILL.md` repos, and hybrid layouts while recording exact sanitized `source_repo` and 40-char `git_commit` provenance.
+- **Push-based GitLab CI ([starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml)):** Target-state production governance triggered directly on Merge Requests and semver tags—enforcing 5-IDE schema + `agy plugin validate` gates, `TARGET_STATE_DRAFT` MR quarantine, keyless GCP Workload Identity Federation OIDC exchange, and Cloud KMS ECDSA P-256 signing before any release enters `TARGET_STATE_ACTIVE`.
+
+### Migrating `starter-marketplace/.gitlab-ci.yml` to a Standalone GitLab Repository
+
+[starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml) runs cleanly both inside this workshop monorepo and when copied into a standalone enterprise GitLab repository rooted at `starter-marketplace/`. Configure these four CI/CD variables when migrating to a standalone GitLab project:
+
+| GitLab CI Variable | Purpose | Example Value |
+| :--- | :--- | :--- |
+| `WORKSHOP_TOOLS_PACKAGE` | Pip spec, Artifact Registry Python wheel URL, or `git+https://` URL installing `schemas` and `tools.plugin_sync` when `pyproject.toml`/`tools/` are not in the standalone repo | `git+https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git@main` (or private Artifact Registry wheel) |
+| `PLUGINS_DIR` | Override the directory containing plugin folders; leave empty to auto-detect `plugins` (standalone repo) or `starter-marketplace/plugins` (monorepo) | `plugins` |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full GCP Workload Identity Provider resource path used for keyless GitLab OIDC (`GCP_OIDC_TOKEN`) → STS token exchange (zero static JSON keys!) | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/gitlab-pool/providers/gitlab-oidc` |
+| `GCP_SERVICE_ACCOUNT_EMAIL` | Least-privilege CI publisher service account impersonated via `iamcredentials.googleapis.com` (`roles/agentregistry.editor` + `roles/cloudkms.signerVerifier`) | `agent-registry-ci-publisher@<PROJECT_ID>.iam.gserviceaccount.com` |
+
 ### Step 4: Simulate the MR (`DRAFT`) → Release Tag (`ACTIVE`) Promotion Locally
 
 Test the exact commands from [starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml) against `mock_registry` (or live GCP by setting `AGENT_REGISTRY_BASE_URL` and `AGENT_REGISTRY_AUTH_TOKEN`):

@@ -9,9 +9,36 @@ middleware_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marke
 sample_mcp_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
 sample_a2a_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
 
-# Bootstrap standalone skills from starter-marketplace/plugins/gcp-finops-toolkit/
+# -----------------------------------------------------------------------------
+# Standalone Agent Registry Skills Bootstrapper (Dual-Source Ingestion)
+# Always passes --only-skills so agent_registry_services.tf remains the sole
+# Terraform owner of google_agent_registry_service resources.
+# Set enable_skills_bootstrap = false to manage skills exclusively from CI/CD.
+# -----------------------------------------------------------------------------
 enable_skills_bootstrap = true
-starter_plugin_dir      = "../../starter-marketplace/plugins/gcp-finops-toolkit"
+
+# Option 1 (Active by Default): Local Skills Path (zero external Git setup)
+# Ingests the starter plugin plus pre-prepared standalone local skills.
+skills_source_mode             = "local"
+starter_plugin_dir             = "../../starter-marketplace/plugins/gcp-finops-toolkit"
+enable_local_standalone_skills = true
+local_skills_dir               = "../../local-skills"
+local_skills_plugin_name       = "local-ops-toolkit"
+skills_per_skill_plugin        = false
+
+# Option 2 (Alternative): Centralized Git Repository Path (Clone & Ingest)
+# Uncomment the block below (and comment out Option 1's skills_source_mode = "local")
+# to shallow-clone and ingest an existing centralized GitLab or GitHub skills/plugins
+# repository. NEVER put raw tokens in .tfvars — set skills_repo_token_env to the
+# NAME of a local environment variable (for example, export GITLAB_TOKEN=...).
+#
+# skills_source_mode      = "git"
+# skills_repo_url         = "https://gitlab.example.com/ai-platform/agent-marketplace.git"
+# skills_repo_ref         = "main"
+# skills_repo_subdir      = "plugins"
+# skills_repo_token_env   = "GITLAB_TOKEN"
+# skills_repo_plugin_name = "central-repo-skills"
+# skills_per_skill_plugin = false
 
 # Secure by default: keep false in shared or production environments.
 # Set true ONLY in isolated workshop sandboxes for unauthenticated IDE testing.

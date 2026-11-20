@@ -20,7 +20,10 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import re
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -74,6 +77,8 @@ WORKSHOP_SPEC = json.loads((REPO_ROOT / "WORKSHOP_SPEC.json").read_text(encoding
 STARTER_PLUGIN_DIR = (
     REPO_ROOT / "starter-marketplace" / "plugins" / "gcp-finops-toolkit"
 )
+LOCAL_SKILLS_DIR = REPO_ROOT / "local-skills"
+HEX40_RE = re.compile(r"^[0-9a-f]{40}$")
 MCP_SERVER_APP_PATH = REPO_ROOT / "samples" / "mcp-server" / "app.py"
 A2A_AGENT_APP_PATH = REPO_ROOT / "samples" / "a2a-agent" / "app.py"
 
@@ -1346,4 +1351,385 @@ def test_e2e_kms_cross_tool_interop_and_hub_sync_lifecycle(
     assert not (temp_home / ".codex" / "agents" / "finops-advisor-agent.toml").exists()
     codex_mkt_final = json.loads(preseeded["codex_mkt"].read_text(encoding="utf-8"))
     assert [p["name"] for p in codex_mkt_final["plugins"]] == ["user-codex-plugin"]
+
+
+def _git_run(repo_dir: Path, *args: str) -> str:
+    """Execute a hermetic git command inside `repo_dir` without relying on global git config."""
+    env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "Workshop E2E",
+        "GIT_AUTHOR_EMAIL": "workshop-e2e@acme.example.com",
+        "GIT_COMMITTER_NAME": "Workshop E2E",
+        "GIT_COMMITTER_EMAIL": "workshop-e2e@acme.example.com",
+    }
+    proc = subprocess.run(
+        ["git", "-C", str(repo_dir), *args],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return proc.stdout.strip()
+
+
+def test_e2e_dual_skill_sources_local_and_cloned_git_repo(
+    live_workshop_stack: LiveWorkshopStack, tmp_path: Path
+) -> None:
+    """End-to-end verification of Option 1 (local-skills/) AND Option 2 (cloned Git repo).
+
+    Runs against live in-process `mock_registry` + `middleware` (`REQUIRE_KMS_SIGNATURE=true`)
+    + `tools.hub_sync`:
+      1. Option 1: Ingests `local-skills/` as `local-ops-toolkit` (3 skills, ECDSA P-256 signed).
+      2. Option 2: Creates a real temp local Git repo containing `central-security-checker/SKILL.md`,
+         commits it, and ingests via `tools.plugin_sync ingest --source-type git` as
+         `central-sec-toolkit` (ECDSA P-256 signed, real 40-char `git_commit`).
+      3. Verifies Middleware serves BOTH bundles across `/v1/catalog`, all 4 IDE marketplaces,
+         `/v1/plugins/{name}.zip`, and `POST /mcp` (`load_verified_skill`) with exact provenance.
+      4. Runs `hub_sync` into a temp `$HOME` and validates ALL generated Polyglot bundles &
+         4-IDE configs with `schemas.validators`.
+    """
+    stack = live_workshop_stack
+    registry_v1 = f"{stack.mock_registry_url}/v1"
+    runner = CliRunner()
+
+    # =========================================================================
+    # 1. Option 1: Ingest pre-prepared `local-skills/` as `local-ops-toolkit`
+    # =========================================================================
+    opt1_out_dir = tmp_path / "opt1_local_dist"
+    opt1_res = runner.invoke(
+        plugin_sync_cli,
+        [
+            "ingest",
+            "--source-type",
+            "local",
+            "--path",
+            str(LOCAL_SKILLS_DIR),
+            "--plugin-name",
+            "local-ops-toolkit",
+            "--registry-url",
+            registry_v1,
+            "--project",
+            PROJECT_ID,
+            "--location",
+            LOCATION,
+            "--target-state",
+            "TARGET_STATE_ACTIVE",
+            "--scanning-policy",
+            "ENABLED_BLOCKING",
+            "--sign-pem",
+            str(stack.private_key_pem_path),
+            "--kms-key-version",
+            KMS_KEY_VERSION,
+            "--output-dir",
+            str(opt1_out_dir),
+        ],
+    )
+    assert opt1_res.exit_code == 0, f"Option 1 local ingest failed:\n{opt1_res.output}"
+    opt1_summary = json.loads(opt1_res.output)
+    assert opt1_summary["source_type"] == "local"
+    assert opt1_summary["layout"] == "standalone_skills"
+    assert opt1_summary["plans_count"] == 1
+    assert opt1_summary["skills_count"] == 3
+    opt1_plan = opt1_summary["plans"][0]
+    assert opt1_plan["plugin_name"] == "local-ops-toolkit"
+    assert all(s["signed"] is True for s in opt1_plan["skills"])
+    assert {s["private_skill_id"] for s in opt1_plan["skills"]} == {
+        "private-cloud-run-debugger",
+        "private-terraform-iam-auditor",
+        "private-incident-postmortem-writer",
+    }
+
+    # =========================================================================
+    # 2. Option 2: Create a real temporary Git repo & ingest via `--source-type git`
+    # =========================================================================
+    tmp_git_repo = tmp_path / "central-skills-git-repo"
+    custom_skill_dir = tmp_git_repo / "skills" / "central-security-checker"
+    custom_skill_dir.mkdir(parents=True, exist_ok=True)
+    (custom_skill_dir / "SKILL.md").write_text(
+        "---\n"
+        "name: central-security-checker\n"
+        "description: Audit service configs for least-privilege IAM, Workload Identity Federation, and secret hygiene.\n"
+        "license: Apache-2.0\n"
+        "metadata:\n"
+        '  category: "security-governance"\n'
+        '  domain: "central-security"\n'
+        "---\n\n"
+        "# Central Security Checker\n\n"
+        "Inspect deployment manifests and IAM policies to verify Workload Identity Federation,\n"
+        "read-only Agent Registry runtime bindings, and zero hardcoded credentials.\n",
+        encoding="utf-8",
+    )
+    _git_run(tmp_git_repo, "init")
+    _git_run(tmp_git_repo, "checkout", "-B", "main")
+    _git_run(tmp_git_repo, "add", ".")
+    _git_run(tmp_git_repo, "commit", "-m", "Add centralized central-security-checker skill")
+    expected_commit = _git_run(tmp_git_repo, "rev-parse", "HEAD")
+    assert HEX40_RE.match(expected_commit), f"Expected 40-char commit SHA, got {expected_commit!r}"
+
+    opt2_out_dir = tmp_path / "opt2_git_dist"
+    opt2_res = runner.invoke(
+        plugin_sync_cli,
+        [
+            "ingest",
+            "--source-type",
+            "git",
+            "--repo-url",
+            str(tmp_git_repo),
+            "--ref",
+            "main",
+            "--plugin-name",
+            "central-sec-toolkit",
+            "--registry-url",
+            registry_v1,
+            "--project",
+            PROJECT_ID,
+            "--location",
+            LOCATION,
+            "--target-state",
+            "TARGET_STATE_ACTIVE",
+            "--scanning-policy",
+            "ENABLED_BLOCKING",
+            "--sign-pem",
+            str(stack.private_key_pem_path),
+            "--kms-key-version",
+            KMS_KEY_VERSION,
+            "--output-dir",
+            str(opt2_out_dir),
+        ],
+    )
+    assert opt2_res.exit_code == 0, f"Option 2 git ingest failed:\n{opt2_res.output}"
+    opt2_summary = json.loads(opt2_res.output)
+    assert opt2_summary["source_type"] == "git"
+    assert opt2_summary["layout"] == "standalone_skills"
+    assert opt2_summary["git_commit"] == expected_commit
+    assert opt2_summary["plans_count"] == 1
+    assert opt2_summary["skills_count"] == 1
+    opt2_plan = opt2_summary["plans"][0]
+    assert opt2_plan["plugin_name"] == "central-sec-toolkit"
+    assert len(opt2_plan["skills"]) == 1
+    assert opt2_plan["skills"][0]["private_skill_id"] == "private-central-security-checker"
+    assert opt2_plan["skills"][0]["signed"] is True
+
+    # =========================================================================
+    # 3. Verify Middleware (REQUIRE_KMS_SIGNATURE=true) serves BOTH toolkits
+    # =========================================================================
+    expected_plugins = ["central-sec-toolkit", "local-ops-toolkit"]
+    with httpx.Client(timeout=20.0) as client:
+        catalog = client.get(f"{stack.middleware_url}/v1/catalog").json()
+        assert catalog["rejectedSkills"] == []
+        assert [p["name"] for p in catalog["plugins"]] == expected_plugins
+
+        plugins_by_name = {p["name"]: p for p in catalog["plugins"]}
+        assert sorted(plugins_by_name["local-ops-toolkit"]["skills"]) == [
+            "cloud-run-debugger",
+            "incident-postmortem-writer",
+            "terraform-iam-auditor",
+        ]
+        assert plugins_by_name["central-sec-toolkit"]["skills"] == ["central-security-checker"]
+
+        assert {s["name"].rsplit("/", 1)[-1] for s in catalog["skills"]} == {
+            "private-cloud-run-debugger",
+            "private-terraform-iam-auditor",
+            "private-incident-postmortem-writer",
+            "private-central-security-checker",
+        }
+        assert all(s["kmsVerified"] is True for s in catalog["skills"])
+
+        # Validate all 4 IDE marketplace feeds serve both plugins and pass schemas.validators
+        claude_mkt = client.get(f"{stack.middleware_url}/v1/marketplace/claude.json").json()
+        copilot_mkt = client.get(f"{stack.middleware_url}/v1/marketplace/copilot.json").json()
+        codex_mkt = client.get(f"{stack.middleware_url}/v1/marketplace/codex.json").json()
+        ag_mkt = client.get(f"{stack.middleware_url}/v1/marketplace/antigravity.json").json()
+
+        assert validate_claude_marketplace(claude_mkt, is_remote_http=True).valid
+        assert validate_copilot_marketplace(copilot_mkt, is_remote_http=True).valid
+        assert validate_codex_marketplace(codex_mkt).valid
+        assert validate_antigravity_marketplace(ag_mkt).valid
+        for mkt in (claude_mkt, copilot_mkt, codex_mkt, ag_mkt):
+            assert [p["name"] for p in mkt["plugins"]] == expected_plugins
+
+        ag_sha_by_name = {p["name"]: p["source"]["sha256"] for p in ag_mkt["plugins"]}
+
+        # Download & inspect /v1/plugins/{name}.zip for BOTH bundles
+        local_zip_resp = client.get(f"{stack.middleware_url}/v1/plugins/local-ops-toolkit.zip")
+        assert local_zip_resp.status_code == 200
+        local_zip_sha = hashlib.sha256(local_zip_resp.content).hexdigest()
+        assert local_zip_resp.headers["x-bundle-sha256"] == local_zip_sha
+        assert ag_sha_by_name["local-ops-toolkit"] == local_zip_sha
+        with zipfile.ZipFile(io.BytesIO(local_zip_resp.content), mode="r") as zf:
+            local_members = set(zf.namelist())
+            assert "skills/cloud-run-debugger/SKILL.md" in local_members
+            assert "skills/cloud-run-debugger/references/triage-runbook.md" in local_members
+            assert "skills/terraform-iam-auditor/SKILL.md" in local_members
+            assert "skills/terraform-iam-auditor/references/least-privilege-checklist.md" in local_members
+            assert "skills/incident-postmortem-writer/SKILL.md" in local_members
+
+        central_zip_resp = client.get(f"{stack.middleware_url}/v1/plugins/central-sec-toolkit.zip")
+        assert central_zip_resp.status_code == 200
+        central_zip_sha = hashlib.sha256(central_zip_resp.content).hexdigest()
+        assert central_zip_resp.headers["x-bundle-sha256"] == central_zip_sha
+        assert ag_sha_by_name["central-sec-toolkit"] == central_zip_sha
+        with zipfile.ZipFile(io.BytesIO(central_zip_resp.content), mode="r") as zf:
+            central_skill_md = zf.read("skills/central-security-checker/SKILL.md").decode("utf-8")
+            central_fm, _central_body, central_err = parse_frontmatter(central_skill_md)
+            assert central_err is None and central_fm is not None
+            assert central_fm["metadata"]["plugin_name"] == "central-sec-toolkit"
+            assert central_fm["metadata"]["source_repo"] == str(tmp_git_repo)
+            assert central_fm["metadata"]["git_commit"] == expected_commit
+            assert central_fm["metadata"]["kms_key_version"] == KMS_KEY_VERSION
+            assert central_fm["metadata"]["kms_signature"]
+
+        # Verify POST /mcp (`load_verified_skill`) across all 4 skills + exact git_commit provenance
+        mw_mcp_url = f"{stack.middleware_url}/mcp"
+        for req_id, (skill_short, expected_heading) in enumerate(
+            (
+                ("cloud-run-debugger", "Cloud Run Debugger"),
+                ("terraform-iam-auditor", "Terraform IAM Auditor"),
+                ("incident-postmortem-writer", "Incident Postmortem Writer"),
+                ("central-security-checker", "Central Security Checker"),
+            ),
+            start=200,
+        ):
+            load_resp = client.post(
+                mw_mcp_url,
+                json={
+                    "jsonrpc": "2.0",
+                    "id": req_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "load_verified_skill",
+                        "arguments": {"skill_name": skill_short},
+                    },
+                },
+            ).json()
+            assert load_resp["result"]["isError"] is False, load_resp
+            structured = load_resp["result"]["structuredContent"]
+            assert structured["kmsVerified"] is True
+            assert structured["frontmatter"]["name"] == skill_short
+            assert expected_heading in structured["instructions"]
+            if skill_short == "central-security-checker":
+                assert structured["frontmatter"]["metadata"]["git_commit"] == expected_commit
+                assert structured["frontmatter"]["metadata"]["plugin_name"] == "central-sec-toolkit"
+            else:
+                assert structured["frontmatter"]["metadata"]["plugin_name"] == "local-ops-toolkit"
+
+    # =========================================================================
+    # 4. Run hub_sync into a temp $HOME & validate ALL bundles + 4-IDE configs
+    # =========================================================================
+    temp_home = tmp_path / "dual_sources_home"
+    temp_home.mkdir(parents=True, exist_ok=True)
+    preseeded = _preseed_user_home(temp_home)
+
+    hub_result = sync_hub(
+        middleware_url=stack.middleware_url,
+        home_dir=temp_home,
+        tools="all",
+        apply_vscode=True,
+        no_exec=True,
+    )
+    assert hub_result.catalog_complete is True
+    assert sorted(p.name for p in hub_result.plugins) == expected_plugins
+
+    hub_dir = temp_home / ".acme-agent-hub"
+    ag_schema = load_schema("antigravity_plugin_v1.schema.json")
+    assert ag_schema["additionalProperties"] is False
+
+    for plugin_name in expected_plugins:
+        extracted_dir = hub_dir / "plugins" / plugin_name
+        ag_plugin_dir = temp_home / ".gemini" / "config" / "plugins" / plugin_name
+        codex_plugin_link = temp_home / ".agents" / "plugins" / "plugins" / plugin_name
+
+        for label, validator in (
+            ("agent-plugins-1.0", validate_agent_plugin_bundle),
+            ("antigravity", validate_antigravity_bundle),
+            ("claude-code", validate_claude_plugin_bundle),
+            ("copilot", validate_copilot_plugin_bundle),
+            ("codex", validate_codex_plugin_bundle),
+        ):
+            res = validator(extracted_dir)
+            assert res.valid, f"Extracted {plugin_name} failed {label} validation: {res.errors}"
+
+        ag_res = validate_antigravity_bundle(ag_plugin_dir)
+        assert ag_res.valid, f"Installed Antigravity {plugin_name} failed validation: {ag_res.errors}"
+        ag_manifest = json.loads(
+            (ag_plugin_dir / ".antigravity-plugin" / "plugin.json").read_text(encoding="utf-8")
+        )
+        Draft202012Validator(ag_schema).validate(ag_manifest)
+
+        assert codex_plugin_link.is_symlink()
+        codex_res = validate_codex_plugin_bundle(codex_plugin_link)
+        assert codex_res.valid, f"Codex symlink {plugin_name} failed validation: {codex_res.errors}"
+
+    # Validate every generated marketplace catalog JSON across all 4 IDEs
+    for label, validator, path in (
+        ("hub/marketplace.json", validate_copilot_marketplace, hub_dir / "marketplace.json"),
+        (
+            "hub/.github/plugin/marketplace.json",
+            validate_copilot_marketplace,
+            hub_dir / ".github" / "plugin" / "marketplace.json",
+        ),
+        (
+            "hub/.claude-plugin/marketplace.json",
+            validate_claude_marketplace,
+            hub_dir / ".claude-plugin" / "marketplace.json",
+        ),
+        (
+            "hub/.agents/plugins/marketplace.json",
+            validate_codex_marketplace,
+            hub_dir / ".agents" / "plugins" / "marketplace.json",
+        ),
+        (
+            "home/.agents/plugins/marketplace.json",
+            validate_codex_marketplace,
+            preseeded["codex_mkt"],
+        ),
+        (
+            "hub/antigravity-marketplace.json",
+            validate_antigravity_marketplace,
+            hub_dir / "antigravity-marketplace.json",
+        ),
+    ):
+        res = validator(path)
+        assert res.valid, f"Generated {label} failed validation: {res.errors}"
+
+    # Verify all 4 IDE configs contain both bundles while preserving user-authored entries
+    claude_cfg = json.loads(preseeded["claude_settings"].read_text(encoding="utf-8"))
+    assert claude_cfg["enabledPlugins"]["user-helper@user-personal-marketplace"] is True
+    for plugin_name in expected_plugins:
+        assert claude_cfg["enabledPlugins"][f"{plugin_name}@acme-enterprise-marketplace"] is True
+
+    ag_mcp = json.loads(preseeded["ag_mcp"].read_text(encoding="utf-8"))
+    assert "variables" not in ag_mcp
+    assert ag_mcp["mcpServers"]["user-personal-mcp"]["url"] == "http://127.0.0.1:9999/mcp"
+    assert ag_mcp["mcpServers"]["agent-hub-gw"]["url"] == f"{stack.middleware_url}/mcp"
+    assert ag_mcp["mcpServers"]["agent-hub-gw"]["authProviderType"] == "google_credentials"
+
+    codex_cfg = tomllib.loads(preseeded["codex_config"].read_text(encoding="utf-8"))
+    assert codex_cfg["mcp_servers"]["user-codex-mcp"]["url"] == "http://127.0.0.1:9998/mcp"
+    assert codex_cfg["mcp_servers"]["agent-hub-gw"]["url"] == f"{stack.middleware_url}/mcp"
+    codex_home_mkt = json.loads(preseeded["codex_mkt"].read_text(encoding="utf-8"))
+    assert {p["name"] for p in codex_home_mkt["plugins"]} == {
+        "user-codex-plugin",
+        "local-ops-toolkit",
+        "central-sec-toolkit",
+    }
+    for plugin_name in expected_plugins:
+        agent_toml = temp_home / ".codex" / "agents" / f"{plugin_name}-advisor.toml"
+        assert agent_toml.is_file(), f"Missing synthesized Codex agent TOML: {agent_toml}"
+        parsed_agent = tomllib.loads(agent_toml.read_text(encoding="utf-8"))
+        assert parsed_agent["name"] == f"{plugin_name}-advisor"
+
+    vscode_cfg = json.loads(preseeded["vscode_settings"].read_text(encoding="utf-8"))
+    assert vscode_cfg["chat.pluginLocations"]["/tmp/user-custom-plugin"] is True
+    for plugin_name in expected_plugins:
+        extracted_path = str((hub_dir / "plugins" / plugin_name).resolve())
+        assert vscode_cfg["chat.pluginLocations"][extracted_path] is True
+
+    hub_status = get_hub_status(home_dir=temp_home)
+    assert hub_status["synced"] is True
+    assert hub_status["last_sync_complete"] is True
+    assert sorted(hub_status["plugins"].keys()) == expected_plugins
+    for plugin_name in expected_plugins:
+        assert hub_status["plugins"][plugin_name]["installed_on_disk"] is True
+
 

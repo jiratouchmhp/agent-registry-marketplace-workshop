@@ -9,7 +9,7 @@
 ## Learning Objectives
 
 By the end of this lab, you will:
-1. Understand why an enterprise plugin should be authored once in **Agent Plugins 1.0** (`https://agent-plugins.org/`) with **multi-tool coexistence** files for **Google Antigravity**, **Claude Code**, **VS Code / GitHub Copilot**, and **OpenAI Codex**.
+1. Understand why an enterprise plugin should be authored once in **Agent Plugins 1.0** (`https://agent-plugins.org/`) with **multi-tool coexistence** files for **Google Antigravity**, **Claude Code**, **VS Code / GitHub Copilot**, and **OpenAI Codex**—and when a lightweight standalone **`agentskills.io`** skill (like those in [local-skills/](../../local-skills/README.md)) is the better fit.
 2. Inspect the complete reference plugin [starter-marketplace/plugins/gcp-finops-toolkit/](../../starter-marketplace/plugins/gcp-finops-toolkit/plugin.json) and see how it satisfies all **7 Antigravity Pre-Publish rules**.
 3. Complete the hands-on exercise in [starter/lab01_plugin_skeleton/](../../starter/lab01_plugin_skeleton/plugin.json) until it passes both `validate_agent_plugin_bundle` and `validate_antigravity_bundle`.
 4. Run the official multi-tool `agy plugin validate --json` CI `jq` filter that tolerates expected cross-IDE files without masking real errors.
@@ -38,6 +38,38 @@ Each file serves a specific IDE/standard while sharing one unified `skills/` tre
 | [rules/AGENTS.md](../../starter-marketplace/plugins/gcp-finops-toolkit/rules/AGENTS.md) & [rules/finops-guardrails.md](../../starter-marketplace/plugins/gcp-finops-toolkit/rules/finops-guardrails.md) | **Google Antigravity** (root `AGENTS.md` is ignored) | `rules/finops-guardrails.md` uses `trigger: glob` with **comma-separated string** `globs: "**/*.sql, **/*.tf"` (NEVER a YAML array!). |
 | [hooks.json](../../starter-marketplace/plugins/gcp-finops-toolkit/hooks.json) & [scripts/finops-guard.sh](../../starter-marketplace/plugins/gcp-finops-toolkit/scripts/finops-guard.sh) | **Google Antigravity** | Named top-level group (`"policy-guard"`), **relative paths (`./scripts/finops-guard.sh`) ONLY** (never `${PLUGIN_ROOT}`), script permissions `0755`. |
 | [agents/finops-advisor.md](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor.md), [com.github.copilot/agents/finops-advisor.agent.md](../../starter-marketplace/plugins/gcp-finops-toolkit/com.github.copilot/agents/finops-advisor.agent.md), [agents/finops-advisor/agent-card.json](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor/agent-card.json) | **Antigravity / Claude Code**, **GitHub Copilot**, and **A2A v1.0** | Native subagent definitions (`name: finops-advisor` in the local authored repo) plus A2A v1.0 Agent Card (≤ 10 KB) registered in Agent Registry under Service ID `finops-advisor-agent` in Lab 02 (which the Middleware uses as the hydrated agent slug in Lab 04). |
+
+---
+
+## Step 1B: Standalone `agentskills.io` Skills (`local-skills/`) vs. Full `agent-plugins.org` Plugins
+
+Not every team needs MCP servers, A2A subagents, rules, and hooks on Day 1. For **Option 1 (Local Skills Path)**, this workshop ships **three pre-prepared, zero-manifest standalone skills** in [local-skills/](../../local-skills/README.md) (`<skill-name>/SKILL.md` with no `plugin.json` required):
+
+| Standalone Skill | Manifest & References | Purpose |
+| :--- | :--- | :--- |
+| **`cloud-run-debugger`** | [SKILL.md](../../local-skills/cloud-run-debugger/SKILL.md) + [references/triage-runbook.md](../../local-skills/cloud-run-debugger/references/triage-runbook.md) | Structured read-only triage for Cloud Run revision startup failures, probe timeouts, IAM invoker denials, and Cloud Logging error spikes. |
+| **`terraform-iam-auditor`** | [SKILL.md](../../local-skills/terraform-iam-auditor/SKILL.md) + [references/least-privilege-checklist.md](../../local-skills/terraform-iam-auditor/references/least-privilege-checklist.md) | Least-privilege audit of Terraform GCP IAM bindings (flags `roles/owner`/`roles/editor`, `allUsers`, and granting `roles/agentregistry.editor`/`admin` to autonomous agents). |
+| **`incident-postmortem-writer`** | [SKILL.md](../../local-skills/incident-postmortem-writer/SKILL.md) | Blameless SRE postmortem authoring workflow with UTC timelines, Five Whys root-cause analysis, and tracked action items. |
+
+### When to Author a Standalone Skill vs. a Full Polyglot Plugin
+
+| Authoring Format | Choose This When... | Required Files | How Middleware Serves It |
+| :--- | :--- | :--- | :--- |
+| **Standalone `agentskills.io` Skill** (`local-skills/<name>/`) | You want pure instructional runbooks, checklists, or prompt templates with minimal boilerplate (e.g., SRE runbooks, code-review guides, Terraform auditors) | Only `<skill-name>/SKILL.md` (frontmatter `name == <skill-name>`, uppercase `SKILL.md`) + optional `references/` or `scripts/` | `tools.plugin_sync ingest` groups standalone skills under `--plugin-name` (default `local-ops-toolkit`, or `--per-skill-plugin`), and the Polyglot Middleware automatically synthesizes all 5 IDE manifests on egress! |
+| **Full `agent-plugins.org` 1.0 Plugin** (`starter-marketplace/plugins/<name>/`) | You need to bundle skills together with **governed MCP servers** (`mcp.json` / `mcp_config.json`), **A2A subagents** (`agents/`), **Antigravity glob rules** (`rules/`), **client hooks** (`hooks.json`), or custom branding (`assets/logo.svg`) | Root `plugin.json`, `.antigravity-plugin/plugin.json`, `.claude-plugin/plugin.json`, `.codex-plugin/plugin.json`, MCP configs, `skills/` | `tools.plugin_sync` decomposes skills + MCP/A2A `Service` resources into Agent Registry, and Middleware re-assembles the linked plugin ZIP across all 4 IDE feeds. |
+
+Validate all 3 standalone local skills immediately:
+
+```bash
+.venv/bin/python - << 'EOF'
+from pathlib import Path
+from schemas.validators import validate_skill_md
+
+for skill_dir in sorted(p for p in Path("local-skills").iterdir() if p.is_dir()):
+    res = validate_skill_md(skill_dir / "SKILL.md", expected_name=skill_dir.name)
+    print(f"{skill_dir.name:28s} valid={res.valid} errors={res.errors}")
+EOF
+```
 
 ---
 

@@ -104,5 +104,41 @@
     "cmek_crypto_key_id",
     "signing_crypto_key_id",
     "audit_log_bucket_id"
-  ]
+  ],
+  "skill_sources": {
+    "supported_modes": [
+      "local",
+      "git"
+    ],
+    "default_mode": "local",
+    "local": {
+      "dir": "local-skills",
+      "plugin_name": "local-ops-toolkit",
+      "plugin_display_name": "Local Ops Toolkit",
+      "plugin_version": "1.0.0",
+      "skills": [
+        "cloud-run-debugger",
+        "terraform-iam-auditor",
+        "incident-postmortem-writer"
+      ]
+    },
+    "git": {
+      "default_repo_url": "https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git",
+      "default_ref": "main",
+      "default_subdir": "local-skills",
+      "default_plugin_name": "central-repo-skills",
+      "supported_layouts": [
+        "single_plugin",
+        "multi_plugin",
+        "single_skill",
+        "standalone_skills",
+        "hybrid"
+      ],
+      "clone_depth": 1,
+      "token_env_examples": [
+        "GITLAB_TOKEN",
+        "GITHUB_TOKEN"
+      ]
+    }
+  }
 }

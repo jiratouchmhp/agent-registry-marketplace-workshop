@@ -19,10 +19,17 @@ KMS_PUBLIC_KEY_PEM_PATH ?=
 SIGNING_KEY_PEM_PATH ?=
 HUB_DEMO_HOME ?= /tmp/acme-agent-hub-demo-home
 PLUGIN_DIR ?= starter-marketplace/plugins/gcp-finops-toolkit
+LOCAL_SKILLS_DIR ?= local-skills
+LOCAL_SKILLS_PLUGIN_NAME ?= local-ops-toolkit
+SKILLS_REPO_URL ?= https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git
+SKILLS_REPO_REF ?= main
+SKILLS_REPO_SUBDIR ?= local-skills
+SKILLS_REPO_PLUGIN_NAME ?= central-repo-skills
+SKILLS_REPO_TOKEN_ENV ?=
 TF_PLAN_ARGS ?=
 
 .PHONY: help test test-e2e validate-hcl run-mock run-samples run-middleware \
-	demo-sync demo-hub-sync tf-core-plan tf-sec-plan
+	demo-sync demo-sync-local demo-sync-repo demo-hub-sync tf-core-plan tf-sec-plan
 
 help:
 	@echo "Enterprise Agent Marketplace Workshop — Available Targets:"
@@ -33,6 +40,8 @@ help:
 	@echo "  make run-samples     Start FinOps MCP server (:8091) and A2A agent (:8092)"
 	@echo "  make run-middleware  Start Polyglot Marketplace Middleware on http://127.0.0.1:8080"
 	@echo "  make demo-sync       Sync gcp-finops-toolkit into Agent Registry (mock or live)"
+	@echo "  make demo-sync-local Option 1: Ingest starter plugin + local-skills/ ($(LOCAL_SKILLS_PLUGIN_NAME))"
+	@echo "  make demo-sync-repo  Option 2: Shallow-clone & ingest SKILLS_REPO_URL into Agent Registry"
 	@echo "  make demo-hub-sync   Hydrate local demo HOME ($(HUB_DEMO_HOME)) for all 4 IDEs"
 	@echo "  make tf-core-plan    Run terraform init & plan for terraform/core (Workstream A)"
 	@echo "  make tf-sec-plan     Run terraform init & plan for terraform/security_governance (Workstream B)"
@@ -94,6 +103,52 @@ demo-sync:
 		--target-state TARGET_STATE_ACTIVE \
 		--scanning-policy ENABLED_BLOCKING \
 		$$SIGN_FLAG
+
+demo-sync-local:
+	@set -eu; \
+	set -- \
+		--registry-url "$(AGENT_REGISTRY_BASE_URL)" \
+		--project "$(GCP_PROJECT_ID)" \
+		--location "$(GCP_LOCATION)" \
+		--target-state TARGET_STATE_ACTIVE \
+		--scanning-policy ENABLED_BLOCKING; \
+	if [ -n "$(SIGNING_KEY_PEM_PATH)" ]; then \
+		set -- "$$@" --sign-pem "$(SIGNING_KEY_PEM_PATH)"; \
+	fi; \
+	$(PYTHON) -m tools.plugin_sync ingest \
+		--source-type local \
+		--path "$(PLUGIN_DIR)" \
+		"$$@"; \
+	$(PYTHON) -m tools.plugin_sync ingest \
+		--source-type local \
+		--path "$(LOCAL_SKILLS_DIR)" \
+		--plugin-name "$(LOCAL_SKILLS_PLUGIN_NAME)" \
+		"$$@"
+
+demo-sync-repo:
+	@set -eu; \
+	set -- \
+		--source-type git \
+		--repo-url "$(SKILLS_REPO_URL)" \
+		--plugin-name "$(SKILLS_REPO_PLUGIN_NAME)" \
+		--registry-url "$(AGENT_REGISTRY_BASE_URL)" \
+		--project "$(GCP_PROJECT_ID)" \
+		--location "$(GCP_LOCATION)" \
+		--target-state TARGET_STATE_ACTIVE \
+		--scanning-policy ENABLED_BLOCKING; \
+	if [ -n "$(SKILLS_REPO_REF)" ]; then \
+		set -- "$$@" --ref "$(SKILLS_REPO_REF)"; \
+	fi; \
+	if [ -n "$(SKILLS_REPO_SUBDIR)" ]; then \
+		set -- "$$@" --subdir "$(SKILLS_REPO_SUBDIR)"; \
+	fi; \
+	if [ -n "$(SKILLS_REPO_TOKEN_ENV)" ]; then \
+		set -- "$$@" --git-token-env "$(SKILLS_REPO_TOKEN_ENV)"; \
+	fi; \
+	if [ -n "$(SIGNING_KEY_PEM_PATH)" ]; then \
+		set -- "$$@" --sign-pem "$(SIGNING_KEY_PEM_PATH)"; \
+	fi; \
+	$(PYTHON) -m tools.plugin_sync ingest "$$@"
 
 demo-hub-sync:
 	$(PYTHON) -m tools.hub_sync sync \

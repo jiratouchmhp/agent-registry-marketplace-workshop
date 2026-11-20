@@ -1,5 +1,17 @@
 """Public exports for tools.plugin_sync."""
 
+from tools.plugin_sync.sources import (
+    ClonedRepo,
+    DiscoveredTargets,
+    build_ingest_plans,
+    build_standalone_skills_plans,
+    clone_git_repository,
+    derive_default_plugin_name,
+    discover_ingest_targets,
+    ingest_source,
+    sanitize_kebab_name,
+    sanitize_repo_url,
+)
 from tools.plugin_sync.sync import (
     INLINE_ZIP_RECOMMENDED_BYTES,
     MAX_ARCHIVE_DEPTH,
@@ -33,6 +45,8 @@ from tools.plugin_sync.sync import (
 )
 
 __all__ = [
+    "ClonedRepo",
+    "DiscoveredTargets",
     "INLINE_ZIP_RECOMMENDED_BYTES",
     "MAX_ARCHIVE_DEPTH",
     "MAX_FILE_UNCOMPRESSED_BYTES",
@@ -47,15 +61,23 @@ __all__ = [
     "SkillArchiveError",
     "SyncPlan",
     "apply_sync_plan",
+    "build_ingest_plans",
     "build_skill_zip",
+    "build_standalone_skills_plans",
     "build_sync_plan",
     "canonical_private_skill_id",
+    "clone_git_repository",
     "compute_canonical_skill_digest",
     "compute_canonical_skill_payload",
     "compute_sha256_digest",
+    "derive_default_plugin_name",
+    "discover_ingest_targets",
     "fetch_mcp_tool_spec",
+    "ingest_source",
     "poll_operation",
     "raw_create_skill_id",
+    "sanitize_kebab_name",
+    "sanitize_repo_url",
     "sanitize_resource_id",
     "sign_digest_with_kms",
     "sign_digest_with_pem",
