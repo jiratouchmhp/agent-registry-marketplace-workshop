@@ -13,6 +13,20 @@ Build a **governed, multi-IDE Enterprise Agent Marketplace** backed by **Google 
 
 ---
 
+## Antigravity Workspace Skills (`.agents/skills/`)
+
+Opening this repository in **Google Antigravity** (App, CLI, or IDE) automatically discovers and loads all five workspace skills under `.agents/skills/` as `/<skill-name>` workflows with zero extra installation—keeping developer-assistance skills cleanly separate from the sample catalog payloads in [local-skills/](local-skills/README.md) and [starter-marketplace/](starter-marketplace/plugins/gcp-finops-toolkit/plugin.json) that you upload into Agent Registry.
+
+| Slash Command & Skill | Workshop Use | Active Development Use | Production Rollout Use |
+| :--- | :--- | :--- | :--- |
+| [`/agent-marketplace-workshop-guide`](.agents/skills/agent-marketplace-workshop-guide/SKILL.md) | Choose Workstream A (Labs 00–05) or standalone Workstream B (Labs 06–08), run pre-flight & 4-terminal local stack, coach `starter/` `# WORKSHOP-TODO` exercises, verify checkpoints | Pick Option 1 (`make demo-sync-local`) vs. Option 2 (`make demo-sync-repo`) and troubleshoot local mock or schema errors rapidly | Map Customer Use Case 3 questions to Terraform modules (`terraform/core/`, `terraform/security_governance/`) and preview live plans |
+| [`/polyglot-agent-plugin-authoring`](.agents/skills/polyglot-agent-plugin-authoring/SKILL.md) | Complete Lab 01 (`gcp-finops-toolkit`, `starter/lab01_plugin_skeleton/`, and `local-skills/` standalone skills) | Author & validate 5-IDE manifests (`plugin.json`, `.antigravity-plugin/plugin.json`, `mcp_config.json`, `SKILL.md`, `rules/`, `hooks.json`, A2A cards) via `schemas.validators` | Enforce all 7 Antigravity Pre-Publish checks and the `agy plugin validate --json` multi-tool `jq` gate in CI |
+| [`/agent-registry-v1-ingest-and-lifecycle`](.agents/skills/agent-registry-v1-ingest-and-lifecycle/SKILL.md) | Complete Lab 02 & Lab 05 ingestion against `:8090` or live GCP, plus Lab 06 lifecycle transitions | Use `tools.plugin_sync ingest` across all 5 auto-detected local/Git layouts, `private-` skill IDs, `TOOL_SPEC` / `A2A_AGENT_CARD` specs, and `--only-skills` ownership rules | Operate `gcloud agent-registry`, `terraform/core` (`skills_source_mode`), `ENABLED_BLOCKING` `Finding` triage, atomic `defaultRevision` rollbacks, and standalone GitLab CI |
+| [`/marketplace-middleware-and-ide-delivery`](.agents/skills/marketplace-middleware-and-ide-delivery/SKILL.md) | Complete Labs 03–05 (`middleware/`, `tools.hub_sync`, and `platform_agent.adk_orchestrator`) | Debug `?alt=media` 302 redirect header stripping, deterministic 5-IDE ZIP synthesis, `/mcp` (`load_verified_skill`), atomic `.sync-manifest.json` merges, and ADK/REST consumers | Build & deploy `polyglot-middleware` to Cloud Run, roll out 4-IDE workstation hydration (`--bootstrap-mcp-only` or full sync), and wire Vertex AI / ADK platform agents |
+| [`/agent-registry-security-and-prod-hardening`](.agents/skills/agent-registry-security-and-prod-hardening/SKILL.md) | Execute standalone Workstream B (Labs 06–08) offline against `mock_registry` or against an existing GCP project | Test Cloud KMS CMEK vs. `EC_SIGN_P256_SHA256` signing (`sign_and_verify.py`), `AuthProvider` + `Binding`, IAP v2 UAP CEL (`apply-uap.sh`), and `hooks.json` policy guards | Run the 8-gate Production Go-Live Readiness Checklist: hardened `.tfvars`, least-privilege IAM, Custom Org Policy, keyless GitLab OIDC/WIF, and locked WORM Cloud Audit Logs |
+
+---
+
 ## End-to-End Architecture Overview
 
 ```mermaid
@@ -162,6 +176,7 @@ curl -fsSL http://127.0.0.1:8080/v1/marketplace/claude.json | .venv/bin/python -
 | :--- | :--- |
 | [WORKSHOP_SPEC.json](WORKSHOP_SPEC.json) | Canonical ports (`8090`, `8091`, `8092`, `8080`), resource names, URNs, metadata keys, and Terraform outputs |
 | [Makefile](Makefile) | Developer & facilitator shortcuts (`test`, `test-e2e`, `validate-hcl`, `run-*`, `demo-*`, `tf-*-plan`) |
+| [.agents/skills/](.agents/skills/) | Auto-discovered Google Antigravity workspace skills (`/agent-marketplace-workshop-guide`, `/polyglot-agent-plugin-authoring`, `/agent-registry-v1-ingest-and-lifecycle`, `/marketplace-middleware-and-ide-delivery`, `/agent-registry-security-and-prod-hardening`) for workshop, dev, and production workflows |
 | [starter-marketplace/](starter-marketplace/.gitlab-ci.yml) | Reference GitLab plugin repository (`gcp-finops-toolkit`) and 3-stage `.gitlab-ci.yml` sync pipeline |
 | [local-skills/](local-skills/README.md) | Option 1 pre-prepared standalone `agentskills.io` skills (`cloud-run-debugger`, `terraform-iam-auditor`, `incident-postmortem-writer`) for zero-friction local ingestion |
 | [tools/plugin_sync/](tools/plugin_sync/cli.py) | CLI decomposing `agent-plugins.org` bundles and auto-discovering local or cloned Git skill repos (`sync` & `ingest`), signing digests, and registering into Agent Registry `v1` |
