@@ -7,7 +7,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 ## Gate 1: Infrastructure, Terraform State & Cloud Run (`terraform/core/`)
 
 - [ ] **No unauthenticated Cloud Run demo access**: `allow_unauthenticated_workshop_demo = false` in `terraform/core/terraform.tfvars`.
-  - *Check:* `gcloud run services get-iam-policy polyglot-middleware --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}"` returns **zero** `allUsers` or `allAuthenticatedUsers` bindings (repeat for `sample-mcp-server` and `sample-a2a-agent`).
+  - *Check:* `gcloud run services get-iam-policy polyglot-middleware --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION:-asia-southeast3}" --quiet` returns **zero** `allUsers` or `allAuthenticatedUsers` bindings (repeat for `sample-mcp-server` and `sample-a2a-agent`, plus `asia-southeast1` if `enable_secondary_region = true`).
 - [ ] **Deletion protection enabled**: `deletion_protection = true` in `terraform/core/terraform.tfvars` for all Cloud Run v2 services.
 - [ ] **Immutable pinned container digests**: `middleware_image`, `sample_mcp_image`, and `sample_a2a_image` pin `@sha256:...` digests in Artifact Registry (never `:latest`).
 - [ ] **Restricted ingress & availability**: Change `ingress = "INGRESS_TRAFFIC_ALL"` in `terraform/core/cloud_run.tf` to `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` (fronted by an HTTPS Load Balancer + IAP / Cloud Armor) or enforce Cloud Run IAM (`roles/run.invoker`) with OIDC ID tokens; raise `min_instance_count >= 1` for latency-sensitive middleware.
@@ -23,7 +23,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
   - *Check:*
     ```bash
     # 1. Project-level IAM check
-    gcloud projects get-iam-policy "${GCP_PROJECT_ID}" \
+    gcloud projects get-iam-policy "${GCP_PROJECT_ID}" --quiet \
       --flatten="bindings[].members" \
       --filter="bindings.members:agent-marketplace-middleware@" \
       --format="table(bindings.role)"
@@ -32,14 +32,14 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
     # 2. CryptoKey resource-level IAM check (terraform/security_governance/kms.tf binds KMS roles here)
     gcloud kms keys get-iam-policy skill-artifact-ecdsa-p256 \
       --keyring="agent-registry-skill-signing" \
-      --location="${GCP_LOCATION}" \
-      --project="${GCP_PROJECT_ID}"
+      --location="${GCP_LOCATION:-asia-southeast3}" \
+      --project="${GCP_PROJECT_ID}" --quiet
     # Confirm middleware SA has ONLY roles/cloudkms.publicKeyViewer (NEVER roles/cloudkms.signerVerifier).
     ```
 - [ ] **CI Publisher SA has zero admin privileges**: `agent-registry-ci-publisher@...` holds `roles/agentregistry.editor` + `roles/cloudkms.signerVerifier` + `roles/artifactregistry.writer` + bucket-level `roles/storage.objectUser` (never `roles/agentregistry.admin`).
 - [ ] **Runtime MCP/A2A workloads isolated**: Backing workloads run as dedicated SAs (e.g., `finops-sample-workloads@...`) with **zero** Agent Registry IAM and never fall back to the default Compute Engine SA.
 - [ ] **Platform Agents (ADK) least privilege**: Runtime agents hold only `roles/agentregistry.viewer`, `roles/agentidentity.user`, and `roles/iap.egressor` (never `editor`/`admin`).
-- [ ] **Per-`Skill` resource IAM verified**: Restricted skills grant `roles/agentregistry.viewer` only to approved teams/SAs (`gcloud agent-registry skills get-iam-policy private-<id> --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"`).
+- [ ] **Per-`Skill` resource IAM verified**: Restricted skills grant `roles/agentregistry.viewer` only to approved teams/SAs (`gcloud agent-registry skills get-iam-policy private-<id> --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --quiet`).
 
 ---
 
@@ -49,11 +49,11 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
   - *Check:*
     ```bash
     gcloud org-policies describe custom.requireAgentRegistrySkillScanning \
-      --project="${GCP_PROJECT_ID}" --effective
+      --project="${GCP_PROJECT_ID}" --effective --quiet
     # Must show: enforce: true
     ```
-- [ ] **Zero active skills with findings**: Every `STATE_ACTIVE` skill has `scanResult.scanState == "SUCCEEDED"`, `defaultRevisionFindingCount == 0`, and valid `source_repo` + 40-char `git_commit` metadata.
-- [ ] **Clear ownership boundary**: Set `enable_skills_bootstrap = false` in `terraform/core/terraform.tfvars` once GitLab CI owns skill releases (or keep `--only-skills` so Terraform `agent_registry_services.tf` remains sole owner of `google_agent_registry_service` resources).
+- [ ] **Zero active skills with findings**: Every `STATE_ACTIVE` skill in `skills_location` (`global` default for APAC, or `us`/`eu` for CMEK) has `scanResult.scanState == "SUCCEEDED"`, `defaultRevisionFindingCount == 0`, and valid `source_repo` + 40-char `git_commit` metadata; CI passes `--wait-for-scan` so idempotent re-deploys wait for `wait_for_revision_scan_completion()` before promoting `defaultRevision`.
+- [ ] **Clear ownership boundary**: Set `enable_skills_bootstrap = false` in `terraform/core/terraform.tfvars` once GitLab CI owns skill releases (or keep `--only-skills --skills-location global --wait-for-scan` so Terraform `agent_registry_services.tf` remains sole owner of regional `google_agent_registry_service` resources).
 
 ---
 
@@ -62,17 +62,17 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 - [ ] **CMEK configured before first skill (if required by compliance)**:
   - Key ring in `us` (for `us` skills) or **`europe`** (for `eu` skills); P4SA (`service-<NUM>@gcp-sa-agentregistry.iam.gserviceaccount.com`) holds `roles/cloudkms.cryptoKeyEncrypterDecrypter`.
   - `SkillEncryptionSpec` attached cleanly while location held zero skills (`enable_cmek_spec = true`).
-- [ ] **Fail-closed signature verification active**: `require_kms_signature = true` (`REQUIRE_KMS_SIGNATURE=true`) on `polyglot-middleware`, configured with `KMS_SIGNING_KEY_VERSION` or a mounted trusted `KMS_PUBLIC_KEY_PEM_PATH`.
-  - *Check:* `curl -fsSL "${MIDDLEWARE_URL}/healthz"` returns `"requireKmsSignature": true`.
+- [ ] **Fail-closed signature verification active**: `require_kms_signature = true` (`REQUIRE_KMS_SIGNATURE=true`) on `polyglot-middleware`, configured with `KMS_SIGNING_KEY_VERSION` or a mounted trusted `KMS_PUBLIC_KEY_PEM_PATH` (regional `EC_SIGN_P256_SHA256` key in `asia-southeast3` / `asia-southeast1`).
+  - *Check:* `curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" "${MIDDLEWARE_URL}/health"` returns `"requireKmsSignature": true` and `"skillsLocation": "global"` (or `"us"`/`"eu"`). *(Always probe `/health` or `/v1/health` externally on Cloud Run since Google Frontend reserves `/healthz`.)*
 - [ ] **Negative tamper test passed**: Uploading an unsigned skill or modifying 1 byte of a signed skill results in rejection inside `GET /v1/catalog` (`rejectedSkills[]`) and fails `sign_and_verify.py verify` with non-zero exit code.
 
 ---
 
 ## Gate 5: Runtime Gateway, Auth Manager Bindings & IAP v2 UAP
 
-- [ ] **AuthProvider hardened**: `google_agent_identity_auth_provider` sets `enable_pkce = true`, minimal `allowed_scopes`, explicit `blocked_scopes` (blocking directory admin scopes), and reads `client_secret` from Secret Manager / `TF_VAR_auth_provider_client_secret` (never committed `.tfvars`).
+- [ ] **AuthProvider hardened**: `google_agent_identity_auth_provider` (`auth_provider_location = "asia-southeast1"` in APAC) sets `enable_pkce = true`, minimal `allowed_scopes`, explicit `blocked_scopes` (blocking directory admin scopes), and reads `client_secret` from Secret Manager / `TF_VAR_auth_provider_client_secret` (never committed `.tfvars`).
 - [ ] **Binding IAM filtering verified**: `google_agent_registry_binding` includes required `auth_provider_binding`; verified that `bindings:fetchAvailable` returns the binding only for callers with `roles/agentidentity.user`.
-- [ ] **Agent Gateway attached**: `google_network_services_agent_gateway` runs `CLIENT_TO_AGENT` with `registries` pointing to `//agentregistry.googleapis.com/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}`, and `roles/iap.egressor` is bound to short projected resource IDs (`mcp_server_resource_id`, `a2a_agent_resource_id`).
+- [ ] **Agent Gateway attached (where regionally available)**: `google_network_services_agent_gateway` (`enable_agent_gateway = true`, `agent_gateway_location = "us-central1"` or `"europe-west1"`) runs `CLIENT_TO_AGENT` with `registries` pointing to `//agentregistry.googleapis.com/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}`, and `roles/iap.egressor` is bound to short projected resource IDs (`mcp_server_resource_id`, `a2a_agent_resource_id`).
 - [ ] **IAP v2 UAP baked in `DRY_RUN`, then enforced**:
   - `apply-uap.sh --validate-only` passed with `principal://` callers (zero URNs or `spiffe://`).
   - Ran BigQuery Query 5.3 (`DRY_RUN` readiness) for 7–14 days confirming `would_deny_calls == 0` for all legitimate read-only tools.
@@ -88,7 +88,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
     ```bash
     # Audits existing terraform.tfvars files (ignores # and // comment lines; exits non-zero on any match)
     bash -euo pipefail -c '
-      pattern="(allow_unauthenticated_workshop_demo[[:space:]]*=[[:space:]]*true|deletion_protection[[:space:]]*=[[:space:]]*false|require_kms_signature[[:space:]]*=[[:space:]]*false|auth_provider_client_secret[[:space:]]*=|glpat-|ghp_|AKIA|PRIVATE KEY)"
+      pattern="(allow_unauthenticated_workshop_demo[[:space:]]*=[[:space:]]*true|deletion_protection[[:space:]]*=[[:space:]]*false|require_kms_signature[[:space:]]*=[[:space:]]*false|lock_audit_bucket[[:space:]]*=[[:space:]]*false|auth_provider_client_secret[[:space:]]*=|glpat-|ghp_|AKIA|PRIVATE KEY)"
       checked=0; failed=0
       for f in terraform/core/terraform.tfvars terraform/security_governance/terraform.tfvars; do
         [ -f "$f" ] || continue
@@ -112,8 +112,8 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 ## Gate 7: WORM Audit Logging & SIEM Alerting
 
 - [ ] **Dual `ADMIN_READ` Data Access enabled**: Verified on **both** `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com`.
-  - *Check:* `gcloud projects get-iam-policy "${GCP_PROJECT_ID}" --format=json | jq '.auditConfigs[] | select(.service=="agentregistry.googleapis.com" or .service=="apphubendpoint.googleapis.com")'`.
-- [ ] **Locked WORM bucket active**: `agent-governance-audit` has `locked: true`, `analyticsEnabled: true`, and compliance-approved `retentionDays` (`gcloud logging buckets describe agent-governance-audit --location="${GCP_LOCATION}" --project="${GCP_PROJECT_ID}"`).
+  - *Check:* `gcloud projects get-iam-policy "${GCP_PROJECT_ID}" --format=json --quiet | jq '.auditConfigs[] | select(.service=="agentregistry.googleapis.com" or .service=="apphubendpoint.googleapis.com")'`.
+- [ ] **Locked WORM bucket active**: Set `lock_audit_bucket = true` in production so `agent-governance-audit` has `locked: true`, `analyticsEnabled: true`, and compliance-approved `retentionDays` (`gcloud logging buckets describe agent-governance-audit --location="${GCP_LOCATION:-asia-southeast3}" --project="${GCP_PROJECT_ID}" --quiet`).
 - [ ] **Log sink healthy**: `agent-governance-audit-sink` `writerIdentity` holds `roles/logging.bucketWriter` and test events appear in BigQuery Log Analytics (`_AllLogs`).
 - [ ] **Log-based alerts wired to SIEM / On-Call**:
   1. Attempted scan downgrade (`scanningConfig.policy="DISABLED"`).

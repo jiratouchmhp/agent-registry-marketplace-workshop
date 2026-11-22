@@ -27,12 +27,13 @@ What are you trying to do?
 ├── Modify or debug Polyglot Middleware endpoints, ?alt=media downloads, Polyglot ZIPs, or /mcp
 │   └── Inspect middleware/app/{main,config,registry_client,polyglot_builder,mcp_gateway,security_verifier}.py
 │       -> See references/middleware-runtime-and-mcp-gateway.md
-├── Build & deploy polyglot-middleware (and sample MCP/A2A workloads) to Cloud Run
-│   └── Build with Cloud Build --config (repo root context) + terraform/core/cloud_run.tf
+├── Build & deploy polyglot-middleware (and sample MCP/A2A workloads) to Cloud Run (Zero Local Docker!)
+│   ├── No-Terraform track -> `scripts/deploy_gcp.sh --project <ID> --primary-region asia-southeast3 [--enable-secondary]` (`make gcp-deploy`)
+│   └── Full IaC track -> Stage 1 `scripts/build_images_cloudbuild.sh` (`cloudbuild/*.yaml`) -> Stage 2 `terraform/core/cloud_run.tf`
 │       -> See references/middleware-runtime-and-mcp-gateway.md
 ├── Roll out governed plugins or /mcp gateway to developer workstations (4 IDEs)
-│   ├── Full local Polyglot hydration (Claude Code, Copilot/VS Code, Codex, Antigravity)
-│   │   └── Run `python -m tools.hub_sync sync --tools all` + `status`
+│   ├── Full local Polyglot hydration + Bangkok -> Singapore failover
+│   │   └── Run `python -m tools.hub_sync sync --middleware-url <bkk> --fallback-middleware-url <sg> --tools all` + `status`
 │   └── Zero-disk MCP-only onboarding (dynamic load_verified_skill without local ZIPs)
 │       └── Run `python -m tools.hub_sync sync --bootstrap-mcp-only`
 │       -> See references/hub-sync-and-adk-consumption.md
@@ -53,13 +54,14 @@ What are you trying to do?
 
 | # | Do This | Not That | Why |
 |---|---|---|---|
-| **1** | Follow `?alt=media` 3xx redirects manually (`follow_redirects=False`) and **strip `Authorization` and all `x-goog-*` headers** before fetching the `Location` URL. | Rely on `httpx(..., follow_redirects=True)` forwarding `x-goog-user-project`, `x-goog-api-client`, or `Authorization`. | `GetSkillRevision?alt=media` returns HTTP 302 to a short-lived GCS signed URL (simulated by `mock_registry` at `/scotty-signed/{token}`). Leaking Google API headers breaks the URL signature and returns **HTTP 403**. |
-| **2** | Keep client `HUB_AUTH_TOKEN` separate from upstream Agent Registry OAuth2 (`AGENT_REGISTRY_AUTH_TOKEN` or automatic GCE/Cloud Run metadata server → `gcloud` ADC fallback). | Pass `HUB_AUTH_TOKEN` as the upstream Agent Registry Bearer token. | `HUB_AUTH_TOKEN` is the developer's Cloud Run invoker ID token (`gcloud auth print-identity-token`). `middleware/app/registry_client.py` acquires upstream GCP OAuth2 independently as `middleware_sa` (`roles/agentregistry.viewer` only). |
+| **1** | Follow `?alt=media` 3xx redirects manually (`follow_redirects=False`): **preserve `Authorization` strictly on live same-origin `/download/...` redirects without signed-URL tokens**, and **strip `Authorization` and all `x-goog-*` headers** on all cross-origin and signed-URL (`/scotty-signed/`, `X-Goog-Signature`) hops. | Rely on `httpx(..., follow_redirects=True)` forwarding headers everywhere, OR unconditionally strip `Authorization` on live same-origin `/download/v1/` redirects. | Live Agent Registry redirects `?alt=media` (`302`) to authenticated same-origin `https://agentregistry.googleapis.com/download/v1/...` (stripping `Authorization` causes `401 CREDENTIALS_MISSING`), while cross-origin/signed GCS URLs (and local mock `/scotty-signed/{token}`) return **HTTP 403** if `Authorization` or `x-goog-*` headers leak. |
+| **2** | Keep client `HUB_AUTH_TOKEN` separate from upstream Agent Registry OAuth2 (`AGENT_REGISTRY_AUTH_TOKEN` or automatic GCE/Cloud Run metadata server → `gcloud` ADC fallback). | Pass `HUB_AUTH_TOKEN` as the upstream Agent Registry Bearer token. | `HUB_AUTH_TOKEN` is the developer's Cloud Run invoker ID token (`gcloud auth print-identity-token --quiet`). `middleware/app/registry_client.py` acquires upstream GCP OAuth2 independently as `middleware_sa` (`roles/agentregistry.viewer` only). |
 | **3** | Serve `load_verified_skill` via our Middleware `POST /mcp` gateway (`middleware/app/mcp_gateway.py`). | Point developer IDEs exclusively at `https://agentregistry.googleapis.com/mcp`. | Google Cloud's built-in Remote MCP server returns skill *metadata only* and cannot download `?alt=media` ZIP bytes. Middleware `/mcp` fetches, verifies `scanState`/`findings==0`/SHA-256/KMS P-256, and returns attested `SKILL.md` instructions. |
 | **4** | Distribute plugins to GitLab enterprises via Middleware HTTP ZIPs + `tools.hub_sync` local Polyglot hydration + `/mcp`. | Build a Virtual Git Smart-HTTP server alone as the sole distribution mechanism. | Antigravity `agy plugin install <url>` hardcodes `github.com` remote URLs only, VS Code Web & Codex Enterprise Admin require GitHub, and Claude Code HTTP marketplaces forbid relative `./` sources. Local Polyglot hydration works across all 4 IDEs with zero GitHub dependency. |
 | **5** | Preserve ownership-tracked `.sync-manifest.json` atomic merges in `tools.hub_sync` and prune **only** on clean full syncs. | Overwrite IDE dotfiles wholesale or prune entries after partial fetches / `--bootstrap-mcp-only`. | `tools/hub_sync/hydration.py` validates every ZIP in memory before touching disk, writes via `NamedTemporaryFile` → `fsync` → `os.replace`, preserves user-authored MCP servers and `disabled`/`disabledTools` toggles, and skips pruning on errors or bootstrap mode. |
 | **6** | Install `google-adk[a2a,agent-identity,mcp]>=1.29.0`, call `CredentialManager.register_auth_provider(GcpAuthProvider())`, set `GCP_PROJECT_ID`/`AGENT_REGISTRY_BASE_URL` explicitly, and omit `searchType` on `agents:search`/`mcpServers:search`. | Install bare `google-adk`, skip `GcpAuthProvider`, assume `GOOGLE_CLOUD_*` overrides `GCP_*`, or pass `searchType` to non-skill searches. | Missing extras raise `ImportError`; skipping `GcpAuthProvider()` breaks `Binding` auto-resolution; `adk_orchestrator.py` prioritizes `GCP_PROJECT_ID`/`GCP_LOCATION`/`AGENT_REGISTRY_BASE_URL` over `GOOGLE_CLOUD_*`/`AGENT_REGISTRY_ENDPOINT`; and only `skills:search` accepts `searchType`. |
-| **7** | Build `middleware/Dockerfile` from repo root using `gcloud builds submit --config=... .` (or `docker build -f middleware/Dockerfile .`). | Run `gcloud builds submit --tag ... middleware/` or pass a nonexistent `--file` flag. | `middleware/Dockerfile` copies both `schemas/` and `middleware/` from repo root, and `gcloud builds submit --tag` only reads a root `Dockerfile` with no `--file` flag. |
+| **7** | Build images remotely using the checked-in `cloudbuild/*.yaml` configs (`scripts/build_images_cloudbuild.sh` or `scripts/deploy_gcp.sh`) with `--region=asia-southeast3` and `--default-buckets-behavior=regional-user-owned-bucket`. | Run `gcloud builds submit --tag ... middleware/`, write throwaway `/tmp/cloudbuild-*.yaml` heredocs, pass a nonexistent `--file` flag, or require local Docker. | `middleware/Dockerfile` copies both `schemas/` and `middleware/` from repo root; checked-in `cloudbuild/{middleware,sample-mcp-server,sample-a2a-agent}.yaml` enforce `CLOUD_LOGGING_ONLY` + `_IMAGE_URI` with zero local Docker. |
+| **8** | Keep the verified live APAC split (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `INCLUDE_PUBLIC_SKILLS=false` filtering strictly to `private-*`, regional `Services` in `asia-southeast3`/`asia-southeast1`), probe **`/health`** (or `/v1/health`) externally on Cloud Run, and target `finops-advisor-agent` explicitly on live `agents[]`. | Point live standalone `Skills` at single-region `asia-southeast3`, probe `/healthz` externally on `https://*.run.app`, or assume `agents[0]` is your custom A2A agent. | Google Frontend (GFE) intercepts external `/healthz` with HTML `404`; live Agent Registry lists Google Workspace Agent ahead of `finops-advisor-agent` and nests `card.content.supportedInterfaces` (`mcp_gateway.py` handles both); `CatalogService.build_snapshot()` bounds concurrency with `Semaphore(8)`. |
 
 ---
 
@@ -83,30 +85,29 @@ curl -fsSL -D - http://127.0.0.1:8080/v1/plugins/gcp-finops-toolkit.zip -o /tmp/
   | grep -i "x-bundle-sha256"
 ```
 
-**Live GCP Production Mode** (Cloud Build + `terraform/core/cloud_run.tf`):
+**Live GCP Production Mode — Zero Local Docker (Bangkok `asia-southeast3` Primary + Optional Singapore `asia-southeast1` Secondary):**
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
-export GCP_LOCATION="us-central1"
-export AR_PREFIX="${GCP_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/agent-marketplace"
+export GCP_LOCATION="asia-southeast3"
 
-cat <<EOF > /tmp/cloudbuild-middleware.yaml
-steps:
-  - name: "gcr.io/cloud-builders/docker"
-    args: ["build", "-f", "middleware/Dockerfile", "-t", "${AR_PREFIX}/polyglot-middleware:1.0.0", "."]
-images: ["${AR_PREFIX}/polyglot-middleware:1.0.0"]
-EOF
+# Track 2 (Zero-Terraform): deploy Bangkok primary + optional Singapore secondary in one command
+# scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}"
+# make gcp-destroy  GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 
-gcloud builds submit --project="${GCP_PROJECT_ID}" --config=/tmp/cloudbuild-middleware.yaml .
+# Track 3 (Terraform + Zero-Docker Cloud Build):
+# Stage 1 — Build all 3 images remotely via checked-in cloudbuild/*.yaml (before terraform apply!)
+scripts/build_images_cloudbuild.sh \
+  --project "${GCP_PROJECT_ID}" --region "${GCP_LOCATION}" --repo "agent-marketplace" --tag "1.0.0"
 
-# cloud_run.tf defaults middleware_image to :latest; pass the built tag (or immutable @sha256:... digest in prod)
-# via TF_VAR_middleware_image or terraform/core/terraform.tfvars
-export TF_VAR_middleware_image="${AR_PREFIX}/polyglot-middleware:1.0.0"
+# Stage 2 — Deploy Cloud Run workloads, Agent Registry services, and scanned skills
+export TF_VAR_middleware_image="${GCP_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/agent-marketplace/polyglot-middleware:1.0.0"
 make tf-core-plan && terraform -chdir=terraform/core apply
 
 export HUB_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw middleware_url)"
-curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
-  "${HUB_MIDDLEWARE_URL}/healthz" | .venv/bin/python -m json.tool
+curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" \
+  "${HUB_MIDDLEWARE_URL}/health" | .venv/bin/python -m json.tool
 ```
 
 ### 2. Exercise Streamable HTTP `/mcp` Gateway
@@ -114,7 +115,7 @@ curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token)" \
 ```bash
 MCP_URL="${HUB_MIDDLEWARE_URL:-http://127.0.0.1:8080}/mcp"
 # For IAM-protected Cloud Run (allow_unauthenticated_workshop_demo = false), set:
-#   export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token)"
+#   export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token --quiet)"
 AUTH_HDR=(); if [ -n "${HUB_AUTH_TOKEN:-}" ]; then AUTH_HDR=(-H "Authorization: Bearer ${HUB_AUTH_TOKEN}"); fi
 
 # 1. Handshake (-i prints the Mcp-Session-Id response header)
@@ -145,12 +146,16 @@ make demo-hub-sync
   --middleware-url http://127.0.0.1:8080 --home /tmp/acme-agent-hub-bootstrap-home --tools all --bootstrap-mcp-only --no-exec
 ```
 
-**Live GCP Production Mode** (authenticated Cloud Run Middleware into real developer `$HOME`):
+**Live GCP Production Mode** (authenticated Cloud Run Middleware into real developer `$HOME` with Bangkok → Singapore failover):
 
 ```bash
 export HUB_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw middleware_url)"
-export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token)"
-.venv/bin/python -m tools.hub_sync sync --middleware-url "${HUB_MIDDLEWARE_URL}" --tools all
+export HUB_FALLBACK_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw secondary_middleware_url)"
+export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token --quiet)"
+.venv/bin/python -m tools.hub_sync sync \
+  --middleware-url "${HUB_MIDDLEWARE_URL}" \
+  ${HUB_FALLBACK_MIDDLEWARE_URL:+--fallback-middleware-url "${HUB_FALLBACK_MIDDLEWARE_URL}"} \
+  --tools all
 .venv/bin/python -m tools.hub_sync status --json
 ```
 
@@ -162,17 +167,20 @@ export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token)"
 
 # Local Workshop Mode (--mode rest against mock_registry :8090)
 AGENT_REGISTRY_BASE_URL="http://127.0.0.1:8090/v1" GCP_PROJECT_ID="acme-agent-governance" \
-GCP_LOCATION="us-central1" REQUIRE_KMS_SIGNATURE="false" \
+GCP_LOCATION="asia-southeast3" REQUIRE_KMS_SIGNATURE="false" \
 .venv/bin/python -m platform_agent.adk_orchestrator \
   --mode rest --skill-query "cost anomaly" --mcp-query "finops" --agent-query "finops"
 
 # Live GCP Production Mode (--mode adk; requires pip install -r platform_agent/requirements.txt)
-export GCP_PROJECT_ID="<your-gcp-project-id>" GCP_LOCATION="us-central1"
+# Verified live split: regional Services (asia-southeast3) + shared standalone Skills (global)
+export GCP_PROJECT_ID="<your-gcp-project-id>" GCP_LOCATION="asia-southeast3"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
 export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
 export GOOGLE_CLOUD_PROJECT="${GCP_PROJECT_ID}" GOOGLE_CLOUD_LOCATION="${GCP_LOCATION}"
 export AGENT_REGISTRY_ENDPOINT="${AGENT_REGISTRY_BASE_URL}"
 .venv/bin/python -m platform_agent.adk_orchestrator \
-  --mode adk --project-id "${GCP_PROJECT_ID}" --location "${GCP_LOCATION}" --base-url "${AGENT_REGISTRY_BASE_URL}"
+  --mode adk --project-id "${GCP_PROJECT_ID}" --location "${GCP_LOCATION}" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" --base-url "${AGENT_REGISTRY_BASE_URL}"
 ```
 
 ---
@@ -192,7 +200,7 @@ Run these checks before merging middleware, `hub_sync`, or `platform_agent` chan
    ```
    *Pass criteria:* Full ingest → mock registry → live Middleware → `hub_sync` → `platform_agent` tests pass with 0 failures.
 3. **Live runtime smoke verification (local or Cloud Run):**
-   - `GET /healthz` returns `{"status": "ok", ...}` with expected `projectId`, `location`, and `requireKmsSignature`.
+   - `GET /health` (or `/v1/health` on live Cloud Run; `/healthz` locally on `127.0.0.1`) returns `{"status": "ok", ...}` with expected `projectId`, `location`/`region`, `skillsLocation` (`global` on live GCP), and `requireKmsSignature`.
    - `GET /v1/catalog` lists expected plugins with 64-hex `sha256` and zero unexpected `rejectedSkills`.
    - `POST /mcp` `load_verified_skill` returns `isError: false` with `instructions` and `sha256`.
    - `.venv/bin/python -m tools.hub_sync status --home "${HUB_DEMO_HOME:-/tmp/acme-agent-hub-demo-home}" --json` (omit `--home` for live `$HOME`) reports `synced: true`, all plugins `installed_on_disk: true`, and all 4 IDE configs `wired: true` and `exists: true`.

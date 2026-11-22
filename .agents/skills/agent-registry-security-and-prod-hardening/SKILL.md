@@ -63,8 +63,8 @@ What security or production hardening task are you tackling?
 | **3** | Treat **CMEK (`SkillEncryptionSpec`)** (symmetric `ENCRYPT_DECRYPT` at rest, strictly `us`→`us` or `eu`→`europe` KMS, **zero-skills precondition**, P4SA needs `roles/cloudkms.cryptoKeyEncrypterDecrypter`) separately from **Asymmetric Signing (`EC_SIGN_P256_SHA256`)** (CI signs canonical digest; middleware verifies via `KMS_SIGNING_KEY_VERSION` or `KMS_PUBLIC_KEY_PEM_PATH`). | Assuming CMEK signs skill artifacts, creating an EU CMEK key in `eu` instead of `europe`, or enabling `enable_cmek_spec = true` on a location with existing skills. | Agent Registry does **not** natively sign skills; CMEK only encrypts at rest. `SkillEncryptionSpec` rejects `eu` KMS location names (must be `europe`) and returns `FAILED_PRECONDITION` if even one skill exists in the target multi-region. |
 | **4** | Always include `auth_provider_binding { auth_provider, scopes, continue_uri }` on `google_agent_registry_binding`, and grant calling agents `roles/agentidentity.user` on the referenced `AuthProvider`. | Omitting `auth_provider_binding` in Terraform or forgetting `roles/agentidentity.user` when debugging empty `bindings:fetchAvailable` responses. | `auth_provider_binding` is **Required** in `hashicorp/google >= 7.39.0`. At runtime, `GET .../bindings:fetchAvailable` silently filters out any binding whose `AuthProvider` the caller lacks `roles/agentidentity.user` on. |
 | **5** | Use **Resource Names** (`projects/...`, `//networkservices.googleapis.com/...`) for IAM/IAP/Gateway targets, **`principal://` / `principalSet://`** for agent callers, and enable IAP UAP enforcement by **removing** `iamEnforcementMode`. | Putting URNs (`urn:...`) or raw `spiffe://` URIs in IAM/IAP/Gateway policies, or setting `iamEnforcementMode = "ENFORCED"`. | URNs are valid only for discovery and `Binding` source/target; `spiffe://` returns `INVALID_ARGUMENT`; the IAP API validator rejects any explicit `iamEnforcementMode` value other than `"DRY_RUN"`. |
-| **6** | Explicitly enable `ADMIN_READ` Data Access logs on **both** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com`, routed into a `locked = true` WORM Cloud Logging bucket. | Relying on Admin Activity logs alone or enabling `ADMIN_READ` only on `agentregistry.googleapis.com`. | Data Access (`ADMIN_READ`) is disabled by default; without both services you lose forensic visibility into skill downloads, discovery queries, and App Hub backing-workload resolution. Remember `locked = true` is **irreversible**. |
-| **7** | Inject OAuth secrets via `TF_VAR_auth_provider_client_secret` / Secret Manager, pass private Git tokens via `--git-token-env` (`skills_repo_token_env`), and authenticate GitLab CI via keyless **OIDC → GCP WIF**. | Putting OAuth client secrets, Git tokens, or static GCP service account JSON keys into `.tfvars`, CLI URLs, or repository files. | Secrets in `.tfvars` or Git URLs leak into VCS history, Terraform state/logs, and `SKILL.md` provenance metadata; keyless WIF (`sts.googleapis.com` + `iamcredentials.googleapis.com`) eliminates static key rotation risk. |
+| **6** | Explicitly enable `ADMIN_READ` Data Access logs on **both** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com`, and set `lock_audit_bucket = true` in production (`false` only in ephemeral sandboxes for clean teardown). | Relying on Admin Activity logs alone, enabling `ADMIN_READ` only on `agentregistry.googleapis.com`, or locking a sandbox bucket before teardown. | Data Access (`ADMIN_READ`) is disabled by default; without both services you lose forensic visibility into skill downloads, discovery queries, and App Hub resolution. `lock_audit_bucket = true` (`locked = true`) is **irreversible** once applied. |
+| **7** | Follow the verified live APAC regional split: regional `Services`/`Bindings`/Audit Bucket & KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`) in **Bangkok (`asia-southeast3`)** (and optional Singapore `asia-southeast1`), standalone `Skills` & per-`Skill` IAM in **`global`** (or `us`/`eu` for CMEK), `auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false` (currently GA in `us-central1`/`europe-west1`), and inject secrets via `TF_VAR_auth_provider_client_secret` / `--git-token-env` / keyless GitLab OIDC WIF. | Putting live standalone `Skills` or `auth_provider_location` in `asia-southeast3`, enabling Agent Gateway in unsupported APAC regions, or committing OAuth client secrets, Git tokens, or static GCP JSON keys into `.tfvars`. | Live Agent Registry hosts standalone `Skills` only in `global`/`us`/`eu`; `agentidentity.googleapis.com` is GA in Singapore (`asia-southeast1`), not Bangkok (`asia-southeast3`); Network Services Agent Gateway is GA in `us-central1`/`europe-west1`; keyless WIF eliminates static credential rotation risk. |
 
 ---
 
@@ -75,8 +75,9 @@ What security or production hardening task are you tackling?
 ```bash
 cp terraform/security_governance/terraform.tfvars.example \
    terraform/security_governance/terraform.tfvars
-# Populate project_id, location, middleware_sa_email, ci_publisher_sa_email,
-# mcp_server_resource_id/urn, and a2a_agent_resource_id/urn.
+# APAC defaults: location = "asia-southeast3" (Bangkok), auth_provider_location = "asia-southeast1" (Singapore),
+# enable_agent_gateway = false (GA in us-central1/europe-west1), lock_audit_bucket = false (set true in prod!).
+# Populate project_id, middleware_sa_email, ci_publisher_sa_email, mcp_server_resource_id/urn, a2a_agent_resource_id/urn.
 # Keep enable_cmek_spec = false unless the target `us` or `eu` location has ZERO skills.
 
 export TF_VAR_auth_provider_client_secret="<oauth-client-secret-from-secret-manager>"
@@ -103,14 +104,15 @@ REQUIRE_KMS_SIGNATURE=true KMS_PUBLIC_KEY_PEM_PATH=/tmp/kms-demo/public.pem make
 export KMS_SIGNING_KEY_VERSION="$(terraform -chdir=terraform/security_governance output -raw signing_crypto_key_id)/cryptoKeyVersions/1"
 
 # 1. Dry-run first (packages & signs locally without mutating live Agent Registry)
-#    Use `ingest --only-skills` when terraform/core/agent_registry_services.tf owns Services
-#    (`sync` does not expose `--only-skills`).
+#    Use `ingest --only-skills --skills-location global` when terraform/core/agent_registry_services.tf owns Services
+#    (`sync` does not expose `--only-skills`; live standalone Skills live in global, or us/eu for CMEK).
 .venv/bin/python -m tools.plugin_sync ingest \
   --source-type local --path starter-marketplace/plugins/gcp-finops-toolkit \
   --registry-url "https://agentregistry.googleapis.com/v1" \
-  --project "${GCP_PROJECT_ID}" --location "${GCP_LOCATION}" \
+  --project "${GCP_PROJECT_ID}" --location "${GCP_LOCATION:-asia-southeast3}" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
   --target-state TARGET_STATE_DRAFT --scanning-policy ENABLED_BLOCKING \
-  --kms-key-version "${KMS_SIGNING_KEY_VERSION}" --only-skills --skip-mcp-probe --dry-run
+  --kms-key-version "${KMS_SIGNING_KEY_VERSION}" --wait-for-scan --only-skills --skip-mcp-probe --dry-run
 
 # 2. Remove `--dry-run` to upload signed DRAFT skills (or use `sync` when CI owns Services too)
 # 3. Export public PEM (or configure KMS_SIGNING_KEY_VERSION directly on Cloud Run middleware):
@@ -138,11 +140,11 @@ bash security-governance/iap-uap/apply-uap.sh \
 ### 4. Grant Per-`Skill` Resource-Level IAM (Live GCP Mode)
 
 ```bash
-# Always use the auto-prefixed `private-<skill-id>` resource name!
+# Always use the auto-prefixed `private-<skill-id>` name AND live Skills location (`global`, or `us`/`eu` for CMEK)!
 gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
   --member="serviceAccount:agent-marketplace-middleware@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/agentregistry.viewer"
+  --role="roles/agentregistry.viewer" --quiet
 ```
 
 ### 5. Pre-Production `.tfvars` & Org Policy Audit
@@ -150,7 +152,7 @@ gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage 
 ```bash
 # Audit existing production .tfvars files (ignores # and // comments; exits non-zero on any match)
 bash -euo pipefail -c '
-  pattern="(allow_unauthenticated_workshop_demo[[:space:]]*=[[:space:]]*true|deletion_protection[[:space:]]*=[[:space:]]*false|require_kms_signature[[:space:]]*=[[:space:]]*false|auth_provider_client_secret[[:space:]]*=|glpat-|ghp_|AKIA|PRIVATE KEY)"
+  pattern="(allow_unauthenticated_workshop_demo[[:space:]]*=[[:space:]]*true|deletion_protection[[:space:]]*=[[:space:]]*false|require_kms_signature[[:space:]]*=[[:space:]]*false|lock_audit_bucket[[:space:]]*=[[:space:]]*false|auth_provider_client_secret[[:space:]]*=|glpat-|ghp_|AKIA|PRIVATE KEY)"
   checked=0; failed=0
   for f in terraform/core/terraform.tfvars terraform/security_governance/terraform.tfvars; do
     [ -f "$f" ] || continue
@@ -167,7 +169,7 @@ bash -euo pipefail -c '
 
 # Verify effective Org Policy enforcement on a live GCP project
 gcloud org-policies describe custom.requireAgentRegistrySkillScanning \
-  --project="${GCP_PROJECT_ID}" --effective
+  --project="${GCP_PROJECT_ID}" --effective --quiet
 ```
 
 ---

@@ -10,12 +10,19 @@ exposes metadata only and has NO `?alt=media` skill download tool:
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import io
 import json
+import os
+import shutil
+import subprocess
+import time
 import uuid
 import zipfile
-from pathlib import PurePosixPath
+from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib.parse import urlparse
 
 import httpx
 
@@ -23,6 +30,11 @@ from middleware.app.registry_client import AgentRegistryClient, RegistryClientEr
 from middleware.app.security_verifier import SecurityVerifier, extract_skill_md_from_zip
 
 MCP_PROTOCOL_VERSION = "2025-03-26"
+GCE_METADATA_IDENTITY_URL = (
+    "http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/identity"
+)
+ID_TOKEN_REFRESH_SKEW_SECONDS = 60.0
+DEFAULT_ID_TOKEN_TTL_SECONDS = 300.0
 
 MCP_TOOLS: list[dict[str, Any]] = [
     {
@@ -158,6 +170,39 @@ def _basename(resource_name: str) -> str:
     return resource_name.rsplit("/", 1)[-1] if "/" in resource_name else resource_name
 
 
+def _extract_cloud_run_audience(
+    endpoint_url: str, extra_iam_hosts: frozenset[str] = frozenset()
+) -> str | None:
+    """Return the OIDC audience origin if endpoint_url targets an IAM-protected Cloud Run service."""
+    parsed = urlparse(endpoint_url)
+    scheme = (parsed.scheme or "").lower()
+    hostname = (parsed.hostname or "").lower()
+    if scheme != "https" or not hostname or not parsed.netloc:
+        return None
+    if hostname.endswith(".run.app") or hostname in extra_iam_hosts:
+        return f"{scheme}://{parsed.netloc}"
+    return None
+
+
+def _parse_jwt_expiry_monotonic(token: str) -> float:
+    """Compute a monotonic expiry timestamp from a JWT's 'exp' claim (best-effort)."""
+    parts = token.split(".")
+    if len(parts) == 3:
+        try:
+            payload_b64 = parts[1]
+            padding = "=" * (-len(payload_b64) % 4)
+            claims = json.loads(
+                base64.urlsafe_b64decode(payload_b64 + padding).decode("utf-8")
+            )
+            exp = float(claims.get("exp", 0))
+            remaining = exp - time.time() - ID_TOKEN_REFRESH_SKEW_SECONDS
+            if remaining > 10.0:
+                return time.monotonic() + remaining
+        except (ValueError, TypeError, KeyError, UnicodeDecodeError):
+            pass
+    return time.monotonic() + DEFAULT_ID_TOKEN_TTL_SECONDS
+
+
 class McpGateway:
     """Handles Streamable HTTP JSON-RPC 2.0 MCP requests backed by Agent Registry."""
 
@@ -168,11 +213,101 @@ class McpGateway:
         verifier: SecurityVerifier,
         catalog_loader: Callable[[], Awaitable[dict[str, Any]]],
         a2a_transport: httpx.AsyncBaseTransport | None = None,
+        metadata_identity_url: str = GCE_METADATA_IDENTITY_URL,
+        metadata_transport: httpx.AsyncBaseTransport | None = None,
+        enable_id_token_fallback: bool | None = None,
+        a2a_iam_hosts: tuple[str, ...] | list[str] | set[str] | None = None,
     ) -> None:
         self.registry_client = registry_client
         self.verifier = verifier
         self.catalog_loader = catalog_loader
         self.a2a_transport = a2a_transport
+        self._metadata_identity_url = metadata_identity_url
+        self._metadata_transport = metadata_transport
+        self._enable_id_token_fallback = (
+            enable_id_token_fallback
+            if enable_id_token_fallback is not None
+            else (a2a_transport is None or metadata_transport is not None)
+        )
+        env_hosts = [
+            h.strip().lower()
+            for h in os.getenv("A2A_IAM_HOSTS", "").split(",")
+            if h.strip()
+        ]
+        extra_hosts = [h.strip().lower() for h in (a2a_iam_hosts or ()) if str(h).strip()]
+        self._a2a_iam_hosts: frozenset[str] = frozenset(env_hosts + extra_hosts)
+        self._id_token_cache: dict[str, tuple[str, float]] = {}
+        self._id_token_lock = asyncio.Lock()
+
+    async def _fetch_metadata_identity_token(self, audience: str) -> tuple[str, float] | None:
+        """Fetch an OIDC Identity Token for a Cloud Run target audience from the metadata server."""
+        try:
+            async with httpx.AsyncClient(
+                timeout=2.0,
+                transport=self._metadata_transport,
+            ) as meta_client:
+                resp = await meta_client.get(
+                    self._metadata_identity_url,
+                    params={"audience": audience, "format": "full"},
+                    headers={"Metadata-Flavor": "Google"},
+                )
+            if resp.status_code != 200:
+                return None
+            token = resp.text.strip()
+            if not token:
+                return None
+            return token, _parse_jwt_expiry_monotonic(token)
+        except (httpx.HTTPError, ValueError, TypeError):
+            return None
+
+    async def _fetch_gcloud_identity_token(self, audience: str) -> tuple[str, float] | None:
+        """Fallback for local workstations invoking live IAM-protected Cloud Run A2A services."""
+
+        def _run_gcloud() -> str:
+            gcloud_bin = shutil.which("gcloud") or str(Path.home() / ".local" / "bin" / "gcloud")
+            for cmd in (
+                [gcloud_bin, "auth", "print-identity-token", f"--audiences={audience}", "--quiet"],
+                [gcloud_bin, "auth", "print-identity-token", "--quiet"],
+            ):
+                try:
+                    proc = subprocess.run(
+                        cmd,
+                        capture_output=True,
+                        text=True,
+                        check=False,
+                        timeout=5,
+                    )
+                except (FileNotFoundError, subprocess.SubprocessError, OSError):
+                    continue
+                if proc.returncode == 0 and proc.stdout.strip():
+                    return proc.stdout.strip()
+            return ""
+
+        token = await asyncio.to_thread(_run_gcloud)
+        if not token:
+            return None
+        return token, _parse_jwt_expiry_monotonic(token)
+
+    async def _get_cloud_run_id_token(self, audience: str) -> str:
+        """Resolve and cache an OIDC Identity Token for an IAM-protected Cloud Run A2A service."""
+        now = time.monotonic()
+        cached = self._id_token_cache.get(audience)
+        if cached is not None and now < cached[1]:
+            return cached[0]
+
+        async with self._id_token_lock:
+            now = time.monotonic()
+            cached = self._id_token_cache.get(audience)
+            if cached is not None and now < cached[1]:
+                return cached[0]
+
+            fetched = await self._fetch_metadata_identity_token(audience)
+            if fetched is None and self._metadata_transport is None:
+                fetched = await self._fetch_gcloud_identity_token(audience)
+            if fetched is not None:
+                self._id_token_cache[audience] = fetched
+                return fetched[0]
+            return ""
 
     async def handle_jsonrpc(self, body: Any) -> dict[str, Any] | None:
         """Process a single JSON-RPC 2.0 message. Returns None for notifications."""
@@ -398,7 +533,11 @@ class McpGateway:
             base = _basename(full_name)
             disp = str(ag.get("displayName", ""))
             urn = str(ag.get("agentId", ""))
-            if agent_name in (full_name, base, disp, urn):
+            if (
+                agent_name in (full_name, base, disp, urn)
+                or base.endswith(f":{agent_name}")
+                or urn.endswith(f":{agent_name}")
+            ):
                 target_agent = ag
                 break
 
@@ -412,8 +551,30 @@ class McpGateway:
                 endpoint_url = str(iface["url"]).strip()
                 break
         if not endpoint_url:
+            for proto in target_agent.get("protocols") or []:
+                if isinstance(proto, dict):
+                    for iface in proto.get("interfaces") or []:
+                        if isinstance(iface, dict) and iface.get("url"):
+                            endpoint_url = str(iface["url"]).strip()
+                            break
+                if endpoint_url:
+                    break
+        if not endpoint_url:
             card = target_agent.get("card") or {}
-            for iface in card.get("supportedInterfaces") or []:
+            card_content = card.get("content") if isinstance(card, dict) else None
+            if isinstance(card_content, str):
+                try:
+                    card_content = json.loads(card_content)
+                except Exception:
+                    card_content = None
+            candidates = (
+                (card.get("supportedInterfaces") or []) if isinstance(card, dict) else []
+            ) + (
+                (card_content.get("supportedInterfaces") or [])
+                if isinstance(card_content, dict)
+                else []
+            )
+            for iface in candidates:
                 if isinstance(iface, dict) and iface.get("url"):
                     endpoint_url = str(iface["url"]).strip()
                     break
@@ -434,6 +595,16 @@ class McpGateway:
                 }
             },
         }
+        req_headers: dict[str, str] = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        audience = _extract_cloud_run_audience(endpoint_url, self._a2a_iam_hosts)
+        if audience and self._enable_id_token_fallback:
+            id_token = await self._get_cloud_run_id_token(audience)
+            if id_token:
+                req_headers["Authorization"] = f"Bearer {id_token}"
+
         try:
             async with httpx.AsyncClient(
                 timeout=30.0, transport=self.a2a_transport
@@ -441,7 +612,7 @@ class McpGateway:
                 resp = await client.post(
                     endpoint_url,
                     json=a2a_payload,
-                    headers={"Content-Type": "application/json", "Accept": "application/json"},
+                    headers=req_headers,
                 )
         except httpx.HTTPError as exc:
             return {

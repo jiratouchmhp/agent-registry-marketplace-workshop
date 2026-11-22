@@ -19,38 +19,43 @@ flowchart TB
         OPT2 -.->|"Graduate to push CI"| PIPE
     end
 
-    subgraph GCPControl["Control & Governance Plane (Google Cloud)"]
-        AR["Google Cloud Agent Registry v1<br/>(Local: mock_registry :8090)<br/>• Skills (private-*) + Immutable SkillRevisions<br/>• Services -> McpServer / Agent / Endpoint<br/>• Bindings + Findings + Publishers"]
-        KMS_CMEK["Cloud KMS Symmetric Key (us/europe)<br/>SkillEncryptionSpec (Encryption at Rest)"]
-        KMS_SIGN["Cloud KMS Asymmetric Key (EC_SIGN_P256_SHA256)<br/>CI: signerVerifier | Middleware: publicKeyViewer"]
+    subgraph GCPControl["Control & Governance Plane (Verified Live Regional Split)"]
+        AR_SK["Agent Registry Standalone Skills (global — or us/eu CMEK)<br/>(Local mock: :8090)<br/>• private-* Skills (auto-filtered; Google 1P excluded)<br/>• Immutable SkillRevisions + ENABLED_BLOCKING Findings"]
+        AR_SV["Agent Registry Regional Services & Bindings<br/>Bangkok (asia-southeast3) Primary / Singapore (asia-southeast1) DR<br/>• Services -> McpServer / A2A v1.0 Agent / Endpoint<br/>• Bindings + AuthProvider (asia-southeast1)"]
+        KMS_CMEK["Cloud KMS Symmetric Key (us/europe)<br/>SkillEncryptionSpec (CMEK for us/eu Skills only)"]
+        KMS_SIGN["Cloud KMS Asymmetric Key (EC_SIGN_P256_SHA256)<br/>Bangkok (asia-southeast3) / Singapore (asia-southeast1)<br/>CI: signerVerifier | Middleware: publicKeyViewer"]
         ORGPOL["Org Policy Custom Constraint<br/>Deny scanningConfig.policy == DISABLED"]
-        AUDIT["Locked WORM Cloud Logging Bucket<br/>Admin Activity + ADMIN_READ + Gateway Requests"]
-        AR --- KMS_CMEK
-        AR --- ORGPOL
-        AR --> AUDIT
+        AUDIT["Cloud Logging Audit Bucket (asia-southeast3; lock_audit_bucket=true in prod)<br/>Admin Activity + ADMIN_READ + Gateway Requests"]
+        AR_SK --- KMS_CMEK
+        AR_SK --- ORGPOL
+        AR_SK --> AUDIT
+        AR_SV --> AUDIT
     end
 
-    subgraph RuntimeServe["Serving & Distribution Plane"]
-        MW["Polyglot Middleware (Cloud Run :8080)<br/>• GET /v1/catalog<br/>• GET /v1/marketplace/{claude,copilot,codex,antigravity}.json<br/>• GET /v1/plugins/{name}.zip<br/>• POST /mcp (Streamable HTTP JSON-RPC 2.0)"]
+    subgraph RuntimeServe["Serving & Distribution Plane (Zero-Docker Cloud Build -> Cloud Run)"]
+        MW["Polyglot Middleware (Cloud Run :8080)<br/>Bangkok (asia-southeast3) + Singapore (asia-southeast1)<br/>Shares global Skills (private-*) + regional Services<br/>• GET /health & /v1/health (GFE reserves /healthz)<br/>• GET /v1/catalog (Semaphore(8) verification)<br/>• GET /v1/marketplace/{claude,copilot,codex,antigravity}.json<br/>• GET /v1/plugins/{name}.zip | POST /mcp"]
         MCP_S["FinOps Sample MCP Server (:8091)<br/>get_billing_summary (readOnly)<br/>analyze_bq_query (readOnly)<br/>delete_idle_dataset (destructive)"]
-        A2A_S["FinOps Sample A2A v1.0 Agent (:8092)<br/>/.well-known/agent-card.json + /a2a"]
-        GW["Network Services Agent Gateway<br/>+ IAP v2 UAP (CEL tool annotations)"]
+        A2A_S["FinOps Sample A2A v1.0 Agent (:8092)<br/>/.well-known/agent-card.json<br/>JSONRPC: /a2a | HTTP+JSON: /a2a/http"]
+        GW["Network Services Agent Gateway (enable_agent_gateway=false in APAC;<br/>GA in us-central1 / europe-west1) + IAP v2 UAP (CEL)"]
     end
 
     subgraph Consumers["Consumption Plane"]
-        HUB["tools.hub_sync (1-Command CLI)<br/>Ownership-Tracked Hydration"]
+        HUB["tools.hub_sync (1-Command CLI)<br/>Ownership-Tracked Hydration + --fallback-middleware-url"]
         IDES["Developer IDEs / CLIs<br/>Claude Code | Copilot/VS Code | Codex | Antigravity"]
-        ADK["Platform Agents (Google ADK)<br/>AgentRegistry + GCPSkillRegistry + SkillToolset"]
+        ADK["Platform Agents (Google ADK)<br/>AgentRegistry (regional) + GCPSkillRegistry (global) + SkillToolset"]
     end
 
     INGEST -->|"Sign canonical digest"| KMS_SIGN
-    INGEST -->|"REST v1 (Service + Skill / --only-skills)"| AR
+    INGEST -->|"REST v1 Skills (global, --wait-for-scan)"| AR_SK
+    INGEST -->|"REST v1 Services (regional)"| AR_SV
     PIPE -->|"Sign canonical digest"| KMS_SIGN
-    PIPE -->|"REST v1 (Service + Skill)"| AR
-    AR -->|"?alt=media (302 -> GCS signed URL)"| MW
+    PIPE -->|"REST v1 Skills (global) & Services (regional)"| AR_SK
+    AR_SK -->|"?alt=media (302: same-origin /download/ auth vs cross-origin strip)"| MW
+    AR_SV -->|"Regional MCP/A2A discovery"| MW
     KMS_SIGN -->|"Public Key PEM"| MW
     MW --> HUB --> IDES
-    AR -->|"Direct v1 REST / ADK"| ADK
+    AR_SK -->|"Direct v1 REST / ADK (global Skills)"| ADK
+    AR_SV -->|"Direct v1 REST / ADK (regional Services)"| ADK
     ADK --> GW --> MCP_S
     ADK --> GW --> A2A_S
     MW -->|"call_remote_a2a_agent"| A2A_S
@@ -72,16 +77,28 @@ Both **Option 1 (Local Skills)** and **Option 2 (Centralized Git Repo Clone & In
 Built-in security guardrails for Option 2 Git ingestion:
 - **Zero credential leakage**: `--git-token-env <ENV_VAR>` passes private Git tokens via origin-scoped ephemeral `GIT_CONFIG_*` `http.<origin>/.extraHeader` environment variables (never written to `.git/config`, CLI args, or error logs); `sanitize_repo_url()` strips any embedded `user:token@` before writing `frontmatter.metadata.source_repo`.
 - **Containment & archive safety**: `--subdir` rejects `..` traversal, absolute paths, and symlink escapes; Git hooks (`core.hooksPath=/dev/null`) and `ext::` remotes are disabled; every skill ZIP is validated through `build_skill_zip()` (≤ 1 MB, strictly one uppercase `SKILL.md`, zero symlinks).
-- **Terraform ownership boundary**: [terraform/core/skills_bootstrap.tf](../terraform/core/skills_bootstrap.tf) supports `skills_source_mode = "local" | "git"` and always passes `--only-skills --skip-mcp-probe` so `google_agent_registry_service` resources in [terraform/core/agent_registry_services.tf](../terraform/core/agent_registry_services.tf) are never overwritten.
+- **Terraform ownership boundary**: [terraform/core/skills_bootstrap.tf](../terraform/core/skills_bootstrap.tf) supports `skills_source_mode = "local" | "git"`, targets `var.skills_location` (default `"global"`), and always passes `--only-skills --skip-mcp-probe --wait-for-scan` so `google_agent_registry_service` resources in [terraform/core/agent_registry_services.tf](../terraform/core/agent_registry_services.tf) are never overwritten.
+- **Async live scan completion, re-deploy race protection & quota headers**: When targeting live `https://agentregistry.googleapis.com/v1`, `tools.plugin_sync` automatically attaches `x-goog-user-project` and `--wait-for-scan` polls both initial `STATE_DRAFT` → `STATE_ACTIVE` transitions **and** new `SkillRevision` `scanState` completion (`wait_for_revision_scan_completion()`) before `PATCH`ing `defaultRevision` on idempotent re-deploys under `ENABLED_BLOCKING` (preventing `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results`).
+
+### APAC Multi-Region Split & Failover (Bangkok Primary + Singapore Secondary + `global` Skills)
+
+Live GCP deployments use a **verified regional split** across both Track 2 (`scripts/deploy_gcp.sh --primary-region asia-southeast3 --skills-location global --enable-secondary`) and Track 3 (`terraform/core` with checked-in zero-Docker `cloudbuild/*.yaml` configs built first via `scripts/build_images_cloudbuild.sh`):
+- **Regional (Bangkok `asia-southeast3` Primary + Singapore `asia-southeast1` Secondary/DR):** Cloud Run v2 workloads (`polyglot-middleware`, `sample-mcp-server`, `sample-a2a-agent`), Cloud Build, Artifact Registry, Cloud Storage, and **Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`)**.
+- **Shared Multi-Region (`global` default for APAC, or `us`/`eu` for CMEK):** **Agent Registry Standalone `Skills`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `var.skills_location = "global"`). Skills are ingested **once** in `global` and read seamlessly by both Bangkok primary and Singapore secondary Middleware instances. Because live `locations/global/skills` also exposes built-in Google first-party skills, Middleware (`INCLUDE_PUBLIC_SKILLS=false` default) and `platform_agent` (`only_private_skills=True` default) automatically filter to **`private-*`** skills, and `CatalogService.build_snapshot()` bounds concurrent verification with `asyncio.Semaphore(8)` for responsive catalog builds even with 20+ private skills.
+- **Workstation failover:** On developer laptops, `tools.hub_sync sync --middleware-url <bangkok-url> --fallback-middleware-url <singapore-url>` fails over seamlessly if Bangkok is unreachable.
+
+See [Attendee Quickstart & APAC Regional Matrix](attendee-quickstart.md) for the complete Workstream A + Workstream B availability table (`auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false` in APAC because Agent Gateway is currently `us-central1`/`europe-west1`, regional KMS asymmetric signing `EC_SIGN_P256_SHA256` in `asia-southeast3`/`asia-southeast1` vs. multi-region CMEK in `us`/`eu`, and `lock_audit_bucket = false` in sandboxes vs. `true` in production).
 
 ### Component Ports & Defaults (`WORKSHOP_SPEC.json`)
 
 | Service | Module / Directory | Local Port | Key Endpoints |
 | :--- | :--- | :---: | :--- |
-| **Mock Agent Registry (`v1`)** | [mock_registry/app.py](../mock_registry/app.py) | `8090` | `/v1/projects/{p}/locations/{l}/{services,agents,mcpServers,endpoints,skills,bindings,findings,publishers}`, `/scotty-signed/{token}`, `/_mock/reset` |
-| **Sample FinOps MCP Server** | [samples/mcp-server/app.py](../samples/mcp-server/app.py) | `8091` | `/healthz`, `POST /mcp` (`get_billing_summary`, `analyze_bq_query`, `delete_idle_dataset`) |
-| **Sample FinOps A2A Agent** | [samples/a2a-agent/app.py](../samples/a2a-agent/app.py) | `8092` | `/healthz`, `GET /.well-known/agent-card.json`, `POST /a2a`, `GET /a2a/tasks/{task_id}` |
-| **Polyglot Marketplace Middleware** | [middleware/app/main.py](../middleware/app/main.py) | `8080` | `/healthz`, `/v1/catalog`, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, `/v1/plugins/{plugin_name}.zip`, `POST /mcp` |
+| **Mock Agent Registry (`v1`)** | [mock_registry/app.py](../mock_registry/app.py) | `8090` | `/healthz`, `/v1/projects/{p}/locations/{l}/{services,agents,mcpServers,endpoints,skills,bindings,findings,publishers}`, `/scotty-signed/{token}`, `/_mock/reset` |
+| **Sample FinOps MCP Server** | [samples/mcp-server/app.py](../samples/mcp-server/app.py) | `8091` | `/health`, `/healthz`, `POST /mcp` (`get_billing_summary`, `analyze_bq_query`, `delete_idle_dataset`) |
+| **Sample FinOps A2A Agent** | [samples/a2a-agent/app.py](../samples/a2a-agent/app.py) | `8092` | `/health`, `/healthz`, `GET /.well-known/agent-card.json`, `POST /a2a` (`JSONRPC`), `POST /a2a/http` (`HTTP+JSON`), `GET /a2a/tasks/{task_id}` |
+| **Polyglot Marketplace Middleware** | [middleware/app/main.py](../middleware/app/main.py) | `8080` | `/health`, `/v1/health`, `/healthz`, `/v1/catalog`, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, `/v1/plugins/{plugin_name}.zip`, `POST /mcp` |
+
+> **Live Cloud Run Health & A2A Notes:** (1) Google Frontend (GFE) reserves `/healthz` on external `*.run.app` requests (returning HTML `404` before reaching the container), so external probes always call **`/health`** (or `/v1/health` on Middleware). (2) Live Agent Registry `v1` A2A `AgentCard` validation rejects legacy v0.x `capabilities.stateTransitionHistory` and duplicate URLs across `supportedInterfaces`, so `samples/a2a-agent` serves `JSONRPC` on `/a2a` and `HTTP+JSON` on `/a2a/http`, and `middleware/app/mcp_gateway.py` resolves both `card.supportedInterfaces` and live `card.content.supportedInterfaces`.
 
 ---
 
@@ -111,36 +128,40 @@ graph TD
 
 ## 3. Critical `?alt=media` HTTP 302 Redirect & Verification Pipeline
 
-Downloading a `SkillRevision` archive from Agent Registry `v1` is a **two-hop cross-origin flow** that breaks naive HTTP clients (`follow_redirects=True` forwarding Google headers to GCS signed URLs causes HTTP 403/400 rejection). Both [middleware/app/registry_client.py](../middleware/app/registry_client.py) and [platform_agent/rest_consumer.py](../platform_agent/rest_consumer.py) implement explicit redirect handling and fail-closed cryptographic verification:
+Downloading a `SkillRevision` archive from Agent Registry `v1` involves an explicit HTTP 302 redirect flow with **two distinct redirect modes** that naive HTTP clients get wrong:
+1. **Live same-origin Scotty download redirect**: `GET https://agentregistry.googleapis.com/v1/.../revisions/{rev}?alt=media` returns **HTTP 302** to `https://agentregistry.googleapis.com/download/v1/.../revisions/{rev}?alt=media` (same origin, authenticated download endpoint with no signed-URL query tokens). Unconditionally stripping `Authorization` on this hop causes **HTTP 401 `CREDENTIALS_MISSING`**.
+2. **Cross-origin or signed-URL redirect** (e.g., `storage.googleapis.com` signed URL, `X-Goog-Signature` query params, or local mock `/scotty-signed/{token}`): Forwarding `Authorization` or any `x-goog-*` header (`x-goog-user-project`, `x-goog-api-client`) causes **HTTP 403/400** rejection!
+
+Both [middleware/app/registry_client.py](../middleware/app/registry_client.py) and [platform_agent/rest_consumer.py](../platform_agent/rest_consumer.py) disable automatic redirects (`follow_redirects=False`) and preserve auth **strictly** on same-origin `/download/...` redirects without signed-URL tokens while stripping `Authorization` and all `x-goog-*` headers on every cross-origin or signed-URL hop:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant Client as Middleware / ADK Consumer
-    participant AR as Agent Registry v1<br/>(agentregistry.googleapis.com)
-    participant GCS as Signed GCS Endpoint<br/>(storage.googleapis.com / /scotty-signed)
+    participant AR as Agent Registry v1<br/>(agentregistry.googleapis.com/v1)
+    participant DL as Download Target<br/>(same-origin /download/v1 OR<br/>signed GCS / /scotty-signed)
     participant Verifier as SecurityVerifier<br/>(SHA-256 + KMS P-256)
 
-    Client->>AR: GET /v1/.../skills/private-cost-anomaly-triage/revisions/rev1<br/>Headers: Authorization: Bearer ..., x-goog-user-project, x-goog-api-client
+    Client->>AR: GET /v1/projects/{p}/locations/global/skills/private-cost-anomaly-triage/revisions/rev1<br/>Headers: Authorization: Bearer ..., x-goog-user-project, x-goog-api-client
     AR-->>Client: 200 OK {sha256Hash, scanResult: {scanState: "SUCCEEDED", findings: []}}
 
     Client->>Verifier: check_metadata_policy(skill, revision)
     Note over Verifier: Gate 1: state in (STATE_ACTIVE, STATE_DEPRECATED)<br/>Gate 2: scanState in (SUCCEEDED, DISABLED) & findings == 0
 
     Client->>AR: GET /v1/.../revisions/rev1?alt=media (follow_redirects=False)<br/>Headers: Authorization, x-goog-user-project, x-goog-api-client
-    AR-->>Client: 302 Found -> Location: https://storage.googleapis.com/...signed-url...
+    AR-->>Client: 302 Found -> Location: /download/v1/...?alt=media OR signed GCS URL
 
-    Note over Client: CRITICAL: Strip Authorization AND ALL x-goog-* headers<br/>before issuing the redirect hop!
+    Note over Client: Same-origin /download/... (no signed params): PRESERVE auth<br/>Cross-origin OR signed URL (/scotty-signed/, X-Goog-Signature):<br/>STRIP Authorization AND ALL x-goog-* headers!
 
-    Client->>GCS: GET <signed-url> (clean headers — NO Authorization, NO x-goog-*)
-    GCS-->>Client: 200 OK (application/zip bytes)
+    Client->>DL: GET <redirect-location> (policy-filtered headers)
+    DL-->>Client: 200 OK (application/zip bytes)
 
     Client->>Verifier: verify_skill_package(skill, revision, zip_bytes)
     Note over Verifier: Gate 3: hmac.compare_digest(sha256(zip_bytes), revision.sha256Hash)<br/>Gate 4 (when REQUIRE_KMS_SIGNATURE=true):<br/>Verify SKILL.md metadata.kms_signature (ECDSA P-256) over canonical payload
     Verifier-->>Client: VerificationResult(approved=True, kms_verified=True)
 ```
 
-> **Local Workshop Fidelity:** [mock_registry/app.py](../mock_registry/app.py) simulates this exact behavior via `/scotty-signed/{token}`, returning **HTTP 403** if any `x-goog-*` or `Authorization` header leaks onto the redirect target!
+> **Local Workshop Fidelity:** [mock_registry/app.py](../mock_registry/app.py) simulates the signed-URL redirect via `/scotty-signed/{token}`, returning **HTTP 403** if any `x-goog-*` or `Authorization` header leaks onto the redirect target, while [scripts/validate_live_gcp.sh](../scripts/validate_live_gcp.sh) verifies the live same-origin `/download/v1/` redirect and SHA-256 hash directly against `https://agentregistry.googleapis.com/v1`!
 
 ---
 
@@ -176,8 +197,8 @@ flowchart TB
     P1["Plane 1: Authoring & Supply Chain<br/>• 5-IDE schema validation + agy jq filter in GitLab CI<br/>• Cloud KMS Asymmetric Signing (EC_SIGN_P256_SHA256)<br/>• CI SA: roles/cloudkms.signerVerifier"]
     P2["Plane 2: Registry Admission & Storage<br/>• TARGET_STATE_DRAFT quarantine on MR<br/>• ENABLED_BLOCKING scanner (SECRET & VULNERABILITY Findings)<br/>• Org Policy Custom Constraint denying DISABLED scanning<br/>• Native CMEK (SkillEncryptionSpec in us/eu, zero-skills precondition)"]
     P3["Plane 3: Egress Verification & Least Privilege<br/>• Middleware & Platform Agents: roles/agentregistry.viewer ONLY<br/>• Middleware KMS access: roles/cloudkms.publicKeyViewer ONLY<br/>• SHA-256 + ECDSA P-256 verification before serving or loading"]
-    P4["Plane 4: Runtime Tool & Credential Governance<br/>• Agent Identity AuthProvider + Agent Registry Binding (fetchAvailable IAM filter)<br/>• Network Services Agent Gateway (CLIENT_TO_AGENT) + roles/iap.egressor<br/>• IAP v2 UAP CEL: read_only_hint ALLOW / destructive_hint DENY<br/>• Optional client-side Antigravity hooks.json PreToolUse/PostToolUse guard"]
-    P5["Plane 5: Immutable Forensic Audit<br/>• Admin Activity + ADMIN_READ Data Access (agentregistry & apphubendpoint)<br/>• Agent Gateway request logs + IAP egressViaIAP decisions + KMS logs<br/>• Locked WORM Cloud Logging Bucket + BigQuery Log Analytics SQL"]
+    P4["Plane 4: Runtime Tool & Credential Governance<br/>• Agent Identity AuthProvider (asia-southeast1 in APAC) + Binding (fetchAvailable IAM filter)<br/>• Network Services Agent Gateway (us-central1/europe-west1; enable_agent_gateway toggle) + roles/iap.egressor<br/>• IAP v2 UAP CEL: read_only_hint ALLOW / destructive_hint DENY<br/>• Optional client-side Antigravity hooks.json PreToolUse/PostToolUse guard"]
+    P5["Plane 5: Immutable Forensic Audit<br/>• Admin Activity + ADMIN_READ Data Access (agentregistry & apphubendpoint)<br/>• Agent Gateway request logs + IAP egressViaIAP decisions + KMS logs<br/>• Cloud Logging Bucket (lock_audit_bucket=false in sandboxes, true for WORM prod) + BigQuery Log Analytics SQL"]
 
     P1 --> P2 --> P3 --> P4 --> P5
 ```

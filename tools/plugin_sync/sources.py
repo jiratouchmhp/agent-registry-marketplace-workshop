@@ -743,6 +743,7 @@ def build_standalone_skills_plans(
     git_commit: str = "unknown",
     project: str,
     location: str,
+    skills_location: str | None = None,
     target_state: str = "TARGET_STATE_ACTIVE",
     scanning_policy: str = "ENABLED_BLOCKING",
     per_skill_plugin: bool = False,
@@ -802,6 +803,11 @@ def build_standalone_skills_plans(
                 git_commit=git_commit,
                 project=project,
                 location=location,
+                skills_location=(
+                    skills_location.strip()
+                    if isinstance(skills_location, str) and skills_location.strip()
+                    else None
+                ),
                 target_state=target_state,
                 scanning_policy=scanning_policy,
                 skills=[packaged],
@@ -827,6 +833,11 @@ def build_standalone_skills_plans(
         git_commit=git_commit,
         project=project,
         location=location,
+        skills_location=(
+            skills_location.strip()
+            if isinstance(skills_location, str) and skills_location.strip()
+            else None
+        ),
         target_state=target_state,
         scanning_policy=scanning_policy,
     )
@@ -911,6 +922,7 @@ def build_ingest_plans(
     *,
     project: str,
     location: str,
+    skills_location: str | None = None,
     plugin_name: str | None = None,
     plugin_display_name: str | None = None,
     plugin_version: str = "1.0.0",
@@ -941,6 +953,7 @@ def build_ingest_plans(
             p_dir,
             project=project,
             location=location,
+            skills_location=skills_location,
             target_state=target_state,
             scanning_policy=scanning_policy,
             source_repo=effective_plugin_source_repo or None,
@@ -974,6 +987,7 @@ def build_ingest_plans(
                 git_commit=git_commit,
                 project=project,
                 location=location,
+                skills_location=skills_location,
                 target_state=target_state,
                 scanning_policy=scanning_policy,
                 per_skill_plugin=per_skill_plugin,
@@ -1008,7 +1022,8 @@ def ingest_source(
     only_skills: bool = False,
     registry_url: str = "https://agentregistry.googleapis.com/v1",
     project: str,
-    location: str = "us-central1",
+    location: str = "asia-southeast3",
+    skills_location: str | None = None,
     target_state: str = "TARGET_STATE_ACTIVE",
     scanning_policy: str = "ENABLED_BLOCKING",
     source_repo: str | None = None,
@@ -1023,6 +1038,9 @@ def ingest_source(
     clone_timeout: int = 60,
     http_client: httpx.Client | None = None,
     poll_interval: float = 0.2,
+    wait_for_scan: bool = False,
+    scan_timeout: float = 90.0,
+    scan_poll_interval: float = 3.0,
 ) -> dict[str, Any]:
     """Orchestrate Option 1 (local) or Option 2 (git) skill/plugin ingestion into Agent Registry."""
     normalized_type = source_type.strip().lower()
@@ -1050,6 +1068,11 @@ def ingest_source(
     cleaned_token_env = (
         git_token_env.strip() if isinstance(git_token_env, str) and git_token_env.strip() else None
     )
+    cleaned_skills_location = (
+        skills_location.strip()
+        if isinstance(skills_location, str) and skills_location.strip()
+        else None
+    )
 
     if normalized_type == "local":
         if cleaned_repo_url is not None:
@@ -1069,6 +1092,7 @@ def ingest_source(
             discovered,
             project=project,
             location=location,
+            skills_location=cleaned_skills_location,
             plugin_name=default_standalone_name,
             plugin_display_name=cleaned_display_name,
             plugin_version=plugin_version,
@@ -1111,6 +1135,7 @@ def ingest_source(
                 discovered,
                 project=project,
                 location=location,
+                skills_location=cleaned_skills_location,
                 plugin_name=default_standalone_name,
                 plugin_display_name=cleaned_display_name,
                 plugin_version=plugin_version,
@@ -1154,6 +1179,9 @@ def ingest_source(
                 output_dir=plan_out_dir,
                 http_client=http_client,
                 poll_interval=poll_interval,
+                wait_for_scan=wait_for_scan,
+                scan_timeout=scan_timeout,
+                scan_poll_interval=scan_poll_interval,
             )
         )
 
@@ -1166,6 +1194,7 @@ def ingest_source(
         "only_skills": only_skills,
         "project": project,
         "location": location,
+        "skills_location": cleaned_skills_location or location,
         "registry_url": registry_url.rstrip("/"),
         "plans_count": len(plan_results),
         "skills_count": sum(len(p["skills"]) for p in plan_results),

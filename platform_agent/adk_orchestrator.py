@@ -83,6 +83,8 @@ class OrchestratorConfig:
 
     project_id: str = DEFAULT_PROJECT_ID
     location: str = DEFAULT_LOCATION
+    skills_location: str | None = None
+    only_private_skills: bool = True
     mode: Literal["adk", "rest"] = "rest"
     model: str = DEFAULT_MODEL
     agent_name: str = DEFAULT_AGENT_NAME
@@ -110,6 +112,23 @@ class OrchestratorConfig:
     def parent(self) -> str:
         return f"projects/{self.project_id}/locations/{self.location}"
 
+    @property
+    def effective_skills_location(self) -> str:
+        cleaned = (self.skills_location or "").strip()
+        if cleaned:
+            return cleaned
+        if "googleapis.com" in self.registry_base_url.lower() and self.location not in (
+            "global",
+            "us",
+            "eu",
+        ):
+            return "global"
+        return self.location
+
+    @property
+    def skills_parent(self) -> str:
+        return f"projects/{self.project_id}/locations/{self.effective_skills_location}"
+
     @classmethod
     def from_env(
         cls,
@@ -133,6 +152,13 @@ class OrchestratorConfig:
             or DEFAULT_LOCATION
         )
         base_url = os.environ.get("AGENT_REGISTRY_BASE_URL", DEFAULT_REGISTRY_BASE_URL)
+        skills_location = (
+            os.environ.get("AGENT_REGISTRY_SKILLS_LOCATION", "").strip() or None
+        )
+        include_public_skills = (
+            os.environ.get("INCLUDE_PUBLIC_SKILLS", "false").strip().lower()
+            in {"1", "true", "yes"}
+        )
         require_sig = (
             os.environ.get("REQUIRE_KMS_SIGNATURE", "false").strip().lower()
             in {"1", "true", "yes"}
@@ -142,6 +168,8 @@ class OrchestratorConfig:
         return cls(
             project_id=project_id,
             location=location,
+            skills_location=skills_location,
+            only_private_skills=not include_public_skills,
             mode=resolved_mode,
             model=os.environ.get("PLATFORM_AGENT_MODEL", DEFAULT_MODEL),
             registry_base_url=base_url,
@@ -214,7 +242,9 @@ def build_adk_agent_config(
             "base_url": cfg.registry_base_url.rstrip("/"),
             "project_id": cfg.project_id,
             "location": cfg.location,
+            "skills_location": cfg.effective_skills_location,
             "parent": cfg.parent,
+            "skills_parent": cfg.skills_parent,
         },
         "auth_manager": {
             "registration_call": "CredentialManager.register_auth_provider(GcpAuthProvider())",
@@ -245,6 +275,7 @@ def build_adk_agent_config(
             "skill_registry": {
                 "import_path": "google.adk.integrations.skill_registry.GCPSkillRegistry",
                 "toolset_import_path": "google.adk.tools.skill_toolset.SkillToolset",
+                "location": cfg.effective_skills_location,
                 "search_type": "SEMANTIC",
                 "filter": cfg.skill_filter,
                 "media_download_redirect_strips_headers": [
@@ -394,7 +425,9 @@ def build_live_adk_agent(
     if cfg.registry_base_url:
         os.environ["AGENT_REGISTRY_ENDPOINT"] = cfg.registry_base_url.rstrip("/")
     try:
-        skill_registry = sk_reg_cls(project_id=cfg.project_id, location=cfg.location)
+        skill_registry = sk_reg_cls(
+            project_id=cfg.project_id, location=cfg.effective_skills_location
+        )
     finally:
         if cfg.registry_base_url:
             if prev_endpoint is None:
@@ -452,6 +485,8 @@ class PlatformAgentOrchestrator:
         async with PlatformAgentConsumer(
             project_id=self.config.project_id,
             location=self.config.location,
+            skills_location=self.config.effective_skills_location,
+            only_private_skills=self.config.only_private_skills,
             base_url=self.config.registry_base_url,
             access_token=self.config.access_token,
             kms_public_key_pem=kms_pem,
@@ -490,6 +525,16 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--project-id", default=None)
     parser.add_argument("--location", default=None)
+    parser.add_argument(
+        "--skills-location",
+        default=None,
+        help="Agent Registry location for standalone Skills (e.g. global, us, eu; defaults to global on live googleapis.com).",
+    )
+    parser.add_argument(
+        "--include-public-skills",
+        action="store_true",
+        help="Include built-in first-party Google skills alongside private-* enterprise skills.",
+    )
     parser.add_argument("--base-url", default=None)
     parser.add_argument("--skill-query", default="")
     parser.add_argument("--mcp-query", default="")
@@ -520,6 +565,10 @@ def main(argv: list[str] | None = None) -> int:
         overrides["project_id"] = args.project_id
     if args.location is not None:
         overrides["location"] = args.location
+    if args.skills_location is not None:
+        overrides["skills_location"] = args.skills_location
+    if args.include_public_skills:
+        overrides["only_private_skills"] = False
     if args.base_url is not None:
         overrides["registry_base_url"] = args.base_url
     if args.source_agent_urn is not None:

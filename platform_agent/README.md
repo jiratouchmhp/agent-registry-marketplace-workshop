@@ -56,11 +56,11 @@ python -m platform_agent.adk_orchestrator --mode adk --print-config
 # Discover approved skills, MCP servers, A2A agents, and bindings from local mock-registry
 AGENT_REGISTRY_BASE_URL="http://127.0.0.1:8090/v1" \
 GCP_PROJECT_ID="acme-agent-governance" \
-GCP_LOCATION="us-central1" \
+GCP_LOCATION="asia-southeast3" \
 python -m platform_agent.adk_orchestrator \
   --mode rest \
   --skill-query "cost anomaly" \
-  --source-agent-urn "urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent"
+  --source-agent-urn "urn:agent:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-advisor-agent"
 ```
 
 ---
@@ -75,20 +75,24 @@ python -m platform_agent.adk_orchestrator \
    - `roles/agentregistry.viewer` (read-only discovery & `?alt=media` download of active skills)
    - `roles/agentidentity.user` (credential retrieval from bound Auth Manager `AuthProvider` resources)
    - `roles/iap.egressor` (when routing through Agent Gateway + IAP v2 UAP)
-3. Build the live ADK `LlmAgent`:
+3. Build the live ADK `LlmAgent` (regional `Services` in Bangkok `asia-southeast3` or Singapore `asia-southeast1`, shared standalone `Skills` in `global` — or `us`/`eu` for CMEK):
    ```bash
-   export GOOGLE_CLOUD_PROJECT="acme-agent-governance"
-   export GOOGLE_CLOUD_LOCATION="us-central1"
-   export AGENT_REGISTRY_ENDPOINT="https://agentregistry.googleapis.com/v1"
-   python -m platform_agent.adk_orchestrator --mode adk
+   export GCP_PROJECT_ID="acme-agent-governance"
+   export GCP_LOCATION="asia-southeast3"
+   export AGENT_REGISTRY_SKILLS_LOCATION="global"
+   export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
+   export GOOGLE_CLOUD_PROJECT="${GCP_PROJECT_ID}"
+   export GOOGLE_CLOUD_LOCATION="${GCP_LOCATION}"
+   export AGENT_REGISTRY_ENDPOINT="${AGENT_REGISTRY_BASE_URL}"
+   python -m platform_agent.adk_orchestrator --mode adk --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}"
    ```
 
 ---
 
 ## Critical Agent Registry `v1` Engineering Gotchas
 
-1. **Skill ID `private-` auto-prefixing**: Creating `skillId=cost-anomaly-triage` produces `projects/{p}/locations/{l}/skills/private-cost-anomaly-triage`. Subsequent `GET`/`PATCH`/`DELETE` calls must use `private-cost-anomaly-triage` (see `PlatformAgentConsumer.private_skill_name()`).
-2. **`?alt=media` HTTP 302 redirect header stripping**: `GetSkillRevision?alt=media` redirects to a short-lived GCS signed URL (or `/scotty-signed/{token}` in the local workshop `mock_registry`). `PlatformAgentConsumer.download_skill_archive()` follows redirects explicitly with `follow_redirects=False` and strips all `x-goog-*` headers (`x-goog-user-project`, `x-goog-api-client`) and `Authorization` on every redirect hop—both cross-origin and same-origin—so signed-URL validation always succeeds.
+1. **Skill ID `private-` auto-prefixing & verified live regional split**: On live Google Cloud Agent Registry `v1`, standalone `Skills` live in **`global`** (default for APAC — or `us`/`eu` for CMEK) while `Services` (`McpServer`, `Agent`, `Endpoint`) run regionally in **Bangkok (`asia-southeast3`)** and **Singapore (`asia-southeast1`)**. Creating `skillId=cost-anomaly-triage` produces `projects/{p}/locations/global/skills/private-cost-anomaly-triage`; `PlatformAgentConsumer` automatically defaults `skills_location="global"` for `googleapis.com` and filters to `private-*` enterprise skills (`only_private_skills=True`) so Google first-party skills do not pollute discovery.
+2. **`?alt=media` HTTP 302 redirect header handling**: Live `GetSkillRevision?alt=media` redirects (`302`) to a same-origin authenticated Scotty endpoint (`https://agentregistry.googleapis.com/download/v1/...`), where stripping `Authorization` causes `401 CREDENTIALS_MISSING`, whereas cross-origin or signed-URL redirects (`storage.googleapis.com`, `X-Goog-Signature`, or mock `/scotty-signed/{token}`) return `403` if `Authorization` or `x-goog-*` headers leak. `PlatformAgentConsumer.download_skill_archive()` follows redirects explicitly (`follow_redirects=False`), preserving auth **strictly** on same-origin `/download/...` redirects without signed-URL tokens while stripping `Authorization` and all `x-goog-*` headers on every cross-origin or signed-URL hop.
 3. **Search API asymmetry**: `skills:search` supports `searchType: "SEMANTIC" | "KEYWORD"` plus `filter="state=ACTIVE AND defaultRevisionFindingCount=0"`. `agents:search` and `mcpServers:search` are keyword/prefix only (`{"searchString": "..."}`, no `searchType`).
 4. **Project scoping for Standalone Skills**: Standalone `Skill` resources are strictly project-scoped and do not roll up across folder/org management boundaries—platform agents must target the project where approved skills are published.
 5. **KMS Encryption vs. KMS Signing (Fail-Closed)**: Native `SkillEncryptionSpec` (CMEK in `us`/`eu`) provides encryption at rest only; cryptographic provenance signing uses a Cloud KMS `EC_SIGN_P256_SHA256` asymmetric key verified by `PlatformAgentConsumer.fetch_and_extract_skill(..., verify_kms_signature=True)`. Setting `REQUIRE_KMS_SIGNATURE=true` without `KMS_PUBLIC_KEY_PEM_PATH` fails closed with `SkillSignatureError`.

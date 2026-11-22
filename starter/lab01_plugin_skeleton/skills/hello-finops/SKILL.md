@@ -30,7 +30,7 @@ inside a Polyglot multi-IDE plugin bundle.
    - `mcp.json` (Agent Plugins 1.0 MCP config with NO `${ENV_VAR}` expansion in remote url/headers)
    - `.claude-plugin/plugin.json` and `.mcp.json` (Claude Code)
    - `.codex-plugin/plugin.json` (OpenAI Codex)
-   - `rules/AGENTS.md` and `rules/sql-guard.md` (`trigger: glob`, comma-separated `globs: "**/*.sql, **/*.tf"`)
+   - `rules/AGENTS.md` and `rules/finops-guardrails.md` (`trigger: glob`, comma-separated `globs: "**/*.sql, **/*.tf"`)
    - `hooks.json` (named top-level group using relative `./scripts/...` paths) + `chmod 0755 scripts/*.sh`
 4. Verify your bundle passes `schemas.validate_antigravity_bundle("starter/lab01_plugin_skeleton")`!
 -->

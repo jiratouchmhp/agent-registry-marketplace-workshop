@@ -128,11 +128,14 @@ def _match_service_resource(ref: str, items: list[dict[str, Any]]) -> dict[str, 
     if not needle:
         return None
     for item in items:
-        if item.get("name") == needle or item.get("sourceService") == needle:
+        name = str(item.get("name", ""))
+        source_svc = str(item.get("sourceService", ""))
+        urn = str(item.get("mcpServerId") or item.get("agentId") or "")
+        if needle in (name, source_svc, urn):
             return item
-        if _resource_basename(str(item.get("name", ""))) == needle:
+        if _resource_basename(name) == needle or _resource_basename(source_svc) == needle:
             return item
-        if _resource_basename(str(item.get("sourceService", ""))) == needle:
+        if any(val.endswith(f":{needle}") for val in (name, urn) if val):
             return item
     return None
 
@@ -279,6 +282,8 @@ def _build_mcp_entries(
         if not url:
             continue
         raw_id = _resource_basename(str(srv.get("name", "mcp-server")))
+        if ":" in raw_id:
+            raw_id = raw_id.rsplit(":", 1)[-1]
         _register(raw_id, url)
 
     # Always expose the governed Middleware MCP gateway (for load_verified_skill & catalog search)
@@ -547,11 +552,18 @@ def _build_single_bundle(
         )
 
     for agent_doc in agents_to_render:
-        agent_slug = sanitize_kebab_name(_resource_basename(str(agent_doc.get("name", "advisor"))))
+        raw_agent_id = _resource_basename(str(agent_doc.get("name", "advisor")))
+        if ":" in raw_agent_id:
+            raw_agent_id = raw_agent_id.rsplit(":", 1)[-1]
+        agent_slug = sanitize_kebab_name(raw_agent_id)
         agent_desc = str(
             agent_doc.get("description") or f"Governed specialist agent for {display_name}."
         ).strip()
-        agent_ifaces = agent_doc.get("interfaces") or []
+        agent_ifaces = list(agent_doc.get("interfaces") or [])
+        if not agent_ifaces:
+            for proto in agent_doc.get("protocols") or []:
+                if isinstance(proto, dict):
+                    agent_ifaces.extend(proto.get("interfaces") or [])
         endpoint_line = (
             f"- Remote A2A endpoint: `{agent_ifaces[0]['url']}`\n"
             if agent_ifaces and isinstance(agent_ifaces[0], dict) and agent_ifaces[0].get("url")

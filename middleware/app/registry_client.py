@@ -10,8 +10,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -46,6 +48,44 @@ def normalize_sha256_hex(raw: Any) -> str:
     return cleaned
 
 
+def _url_origin(url: httpx.URL) -> tuple[str, str, int | None]:
+    """Return normalized (scheme, host, effective_port) for origin comparison."""
+    scheme = url.scheme.lower()
+    host = (url.host or "").lower()
+    port = url.port
+    if port is None:
+        port = 443 if scheme == "https" else (80 if scheme == "http" else None)
+    return (scheme, host, port)
+
+
+def should_preserve_auth_on_redirect(
+    initial_url: str | httpx.URL, next_url: str | httpx.URL
+) -> bool:
+    """Return True ONLY for same-origin Google API media download redirects (/download/...).
+
+    Live Google Cloud Agent Registry returns HTTP 302 from
+    `https://agentregistry.googleapis.com/v1/.../revisions/<rev>?alt=media` to
+    `https://agentregistry.googleapis.com/download/v1/.../revisions/<rev>?alt=media`,
+    which is the same-origin authenticated Scotty media download endpoint.
+
+    For ALL cross-origin redirects (such as GCS signed URLs on storage.googleapis.com)
+    and ALL signed-URL redirects (`/scotty-signed/` or query params `X-Goog-Signature`,
+    `Signature`, `GoogleAccessId`, `X-Goog-Credential`), this returns False so that
+    `Authorization` and all `x-goog-*` headers are strictly stripped.
+    """
+    src = httpx.URL(str(initial_url))
+    dst = httpx.URL(str(next_url))
+    if _url_origin(src) != _url_origin(dst):
+        return False
+    lower_path = (dst.path or "").lower()
+    if "/scotty-signed/" in lower_path:
+        return False
+    query_keys = {k.lower() for k in dst.params.keys()}
+    if query_keys & {"x-goog-signature", "signature", "googleaccessid", "x-goog-credential"}:
+        return False
+    return lower_path.startswith("/download/")
+
+
 def strip_google_redirect_headers(headers: dict[str, str]) -> dict[str, str]:
     """Strip all x-goog-* and Authorization headers before following a signed GCS redirect."""
     return {
@@ -53,6 +93,28 @@ def strip_google_redirect_headers(headers: dict[str, str]) -> dict[str, str]:
         for k, v in headers.items()
         if not k.lower().startswith("x-goog-") and k.lower() != "authorization"
     }
+
+
+def is_private_skill(skill: dict[str, Any]) -> bool:
+    """Return True when an Agent Registry Skill belongs to the private enterprise publisher.
+
+    Live Google Cloud Agent Registry ``locations/global/skills`` returns 100+ built-in
+    first-party Google skills (e.g., ``cloud.google.com-*``, ``discoveryengine.googleapis.com-*``).
+    Private enterprise skills always have resource IDs prefixed with ``private-`` (and may omit
+    ``publisher`` on live v1 responses).
+    """
+    name = str(skill.get("name", "")).strip()
+    short_id = name.rsplit("/", 1)[-1] if name else ""
+    if short_id.startswith("private-"):
+        return True
+    publisher = str(skill.get("publisher", "")).strip().lower()
+    if publisher and (
+        publisher == "private"
+        or publisher.endswith("/publishers/private")
+        or publisher == "publisher_tier_private"
+    ):
+        return True
+    return False
 
 
 class AgentRegistryClient:
@@ -64,6 +126,8 @@ class AgentRegistryClient:
         base_url: str,
         project_id: str,
         location: str,
+        skills_location: str | None = None,
+        only_private_skills: bool = True,
         auth_token: str = "",
         quota_project: str | None = None,
         timeout: float = 30.0,
@@ -75,6 +139,14 @@ class AgentRegistryClient:
         self.base_url = base_url.rstrip("/")
         self.project_id = project_id
         self.location = location
+        cleaned_skills_loc = skills_location.strip() if isinstance(skills_location, str) else ""
+        if cleaned_skills_loc:
+            self.skills_location = cleaned_skills_loc
+        elif self._is_googleapis and location not in ("global", "us", "eu"):
+            self.skills_location = "global"
+        else:
+            self.skills_location = location
+        self.only_private_skills = only_private_skills
         self.auth_token = auth_token.strip()
         self.quota_project = quota_project or project_id
         self._timeout = timeout
@@ -94,6 +166,10 @@ class AgentRegistryClient:
     @property
     def parent(self) -> str:
         return f"projects/{self.project_id}/locations/{self.location}"
+
+    @property
+    def skills_parent(self) -> str:
+        return f"projects/{self.project_id}/locations/{self.skills_location}"
 
     @property
     def _is_googleapis(self) -> bool:
@@ -142,9 +218,10 @@ class AgentRegistryClient:
         """Fallback for local workstations calling live googleapis.com via gcloud ADC."""
 
         def _run_gcloud() -> str:
+            gcloud_bin = shutil.which("gcloud") or str(Path.home() / ".local" / "bin" / "gcloud")
             for cmd in (
-                ["gcloud", "auth", "application-default", "print-access-token"],
-                ["gcloud", "auth", "print-access-token"],
+                [gcloud_bin, "auth", "application-default", "print-access-token", "--quiet"],
+                [gcloud_bin, "auth", "print-access-token", "--quiet"],
             ):
                 try:
                     proc = subprocess.run(
@@ -260,16 +337,38 @@ class AgentRegistryClient:
     # Skills & SkillRevisions
     # ------------------------------------------------------------------
 
-    async def list_skills(self, filter_expr: str = "") -> list[dict[str, Any]]:
-        params = {"filter": filter_expr} if filter_expr else None
-        data = await self._request_json("GET", f"{self.parent}/skills", params=params)
-        return list(data.get("skills", []))
+    async def list_skills(
+        self,
+        filter_expr: str = "",
+        *,
+        page_size: int = 200,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        skills: list[dict[str, Any]] = []
+        page_token = ""
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"pageSize": page_size}
+            if filter_expr:
+                params["filter"] = filter_expr
+            if page_token:
+                params["pageToken"] = page_token
+            data = await self._request_json("GET", f"{self.skills_parent}/skills", params=params)
+            page_items = data.get("skills", [])
+            if isinstance(page_items, list):
+                skills.extend(page_items)
+            next_token = str(data.get("nextPageToken") or "").strip()
+            if not next_token or next_token == page_token:
+                break
+            page_token = next_token
+        if self.only_private_skills:
+            return [s for s in skills if isinstance(s, dict) and is_private_skill(s)]
+        return skills
 
     async def get_skill(self, skill_name_or_id: str) -> dict[str, Any]:
         path = (
             skill_name_or_id
             if skill_name_or_id.startswith("projects/")
-            else f"{self.parent}/skills/{skill_name_or_id}"
+            else f"{self.skills_parent}/skills/{skill_name_or_id}"
         )
         return await self._request_json("GET", path)
 
@@ -280,22 +379,39 @@ class AgentRegistryClient:
         search_type: str = "KEYWORD",
         filter_expr: str = "",
         page_size: int = 50,
+        max_pages: int = 20,
     ) -> list[dict[str, Any]]:
-        body: dict[str, Any] = {
-            "searchString": search_string,
-            "searchType": search_type,
-            "pageSize": page_size,
-        }
-        if filter_expr:
-            body["filter"] = filter_expr
-        data = await self._request_json("POST", f"{self.parent}/skills:search", json_body=body)
-        return list(data.get("skills", []))
+        skills: list[dict[str, Any]] = []
+        page_token = ""
+        for _ in range(max_pages):
+            body: dict[str, Any] = {
+                "searchString": search_string,
+                "searchType": search_type,
+                "pageSize": page_size,
+            }
+            if filter_expr:
+                body["filter"] = filter_expr
+            if page_token:
+                body["pageToken"] = page_token
+            data = await self._request_json(
+                "POST", f"{self.skills_parent}/skills:search", json_body=body
+            )
+            page_items = data.get("skills", [])
+            if isinstance(page_items, list):
+                skills.extend(page_items)
+            next_token = str(data.get("nextPageToken") or "").strip()
+            if not next_token or next_token == page_token:
+                break
+            page_token = next_token
+        if self.only_private_skills:
+            return [s for s in skills if isinstance(s, dict) and is_private_skill(s)]
+        return skills
 
     async def list_skill_revisions(self, skill_name_or_id: str) -> list[dict[str, Any]]:
         path = (
             skill_name_or_id
             if skill_name_or_id.startswith("projects/")
-            else f"{self.parent}/skills/{skill_name_or_id}"
+            else f"{self.skills_parent}/skills/{skill_name_or_id}"
         )
         data = await self._request_json("GET", f"{path}/revisions")
         return list(data.get("skillRevisions", []))
@@ -338,9 +454,12 @@ class AgentRegistryClient:
             follow_redirects=False,
         )
 
-        # Manually follow 3xx signed GCS redirects while stripping all x-goog-* & Authorization.
+        # Manually follow 3xx redirects:
+        # - Same-origin Google API /download/... hops keep Authorization & x-goog-* headers.
+        # - Cross-origin redirects & signed GCS URLs strip ALL x-goog-* & Authorization headers.
         hops = 0
-        current_url = str(resp.request.url)
+        initial_request_url = str(resp.request.url)
+        current_url = initial_request_url
         current_headers = dict(initial_headers)
         while resp.status_code in (301, 302, 303, 307, 308):
             hops += 1
@@ -355,14 +474,17 @@ class AgentRegistryClient:
                     f"{revision_name}"
                 )
             next_url = urljoin(current_url, location)
-            clean_headers = strip_google_redirect_headers(current_headers)
+            if should_preserve_auth_on_redirect(initial_request_url, next_url):
+                next_headers = dict(current_headers)
+            else:
+                next_headers = strip_google_redirect_headers(current_headers)
             resp = await client.get(
                 next_url,
-                headers=clean_headers,
+                headers=next_headers,
                 follow_redirects=False,
             )
             current_url = str(resp.request.url)
-            current_headers = clean_headers
+            current_headers = next_headers
 
         if resp.status_code != 200:
             try:

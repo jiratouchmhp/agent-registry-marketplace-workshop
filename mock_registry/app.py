@@ -473,7 +473,15 @@ def _validate_and_project_service(
                     "INVALID_ARGUMENT",
                     "A2A_AGENT_CARD content must include a non-empty 'supportedInterfaces' list.",
                 )
+            caps = card.get("capabilities")
+            if isinstance(caps, dict) and "stateTransitionHistory" in caps:
+                raise GoogleApiError(
+                    400,
+                    "INVALID_ARGUMENT",
+                    "Invalid A2A v1.0 Agent Card content: unknown capabilities field 'stateTransitionHistory'.",
+                )
             projected_interfaces = []
+            seen_urls: set[str] = set()
             for idx, item in enumerate(supported):
                 if (
                     not isinstance(item, dict)
@@ -485,9 +493,17 @@ def _validate_and_project_service(
                         "INVALID_ARGUMENT",
                         f"A2A_AGENT_CARD supportedInterfaces[{idx}].url must be a non-empty string.",
                     )
+                iface_url = item["url"].strip()
+                if iface_url in seen_urls:
+                    raise GoogleApiError(
+                        400,
+                        "INVALID_ARGUMENT",
+                        f"Duplicate interface url found in agent card: {iface_url}",
+                    )
+                seen_urls.add(iface_url)
                 projected_interfaces.append(
                     {
-                        "url": item["url"].strip(),
+                        "url": iface_url,
                         "protocolBinding": item.get("protocolBinding", "JSONRPC"),
                     }
                 )

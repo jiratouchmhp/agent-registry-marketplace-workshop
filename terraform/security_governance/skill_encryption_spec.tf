@@ -39,9 +39,10 @@ resource "terraform_data" "skill_encryption_spec" {
       echo "[PRE-FLIGHT] Checking zero-skills precondition for location '$SKILL_CMEK_LOCATION' (KMS location '$KMS_LOCATION')..."
       echo "WARNING: Agent Registry rejects SkillEncryptionSpec updates with FAILED_PRECONDITION if ANY Skill exists in '$SKILL_CMEK_LOCATION'."
 
-      TOKEN="$(gcloud auth print-access-token)"
+      TOKEN="$(gcloud auth print-access-token --quiet)"
       EXISTING_SKILLS="$(curl -fsSL \
         -H "Authorization: Bearer $TOKEN" \
+        -H "x-goog-user-project: $GCP_PROJECT_ID" \
         "https://agentregistry.googleapis.com/v1/projects/$GCP_PROJECT_ID/locations/$SKILL_CMEK_LOCATION/skills?pageSize=1")"
 
       if echo "$EXISTING_SKILLS" | grep -q '"skills"'; then
@@ -52,14 +53,16 @@ resource "terraform_data" "skill_encryption_spec" {
 
       # Prefer gcloud CLI if the alpha agent-registry skill-encryption-spec group is installed;
       # otherwise fall back to the verified v1alpha REST PATCH endpoint.
-      if gcloud alpha agent-registry skill-encryption-spec update --help >/dev/null 2>&1; then
+      if gcloud alpha agent-registry skill-encryption-spec update --help --quiet >/dev/null 2>&1; then
         gcloud alpha agent-registry skill-encryption-spec update \
           --project="$GCP_PROJECT_ID" \
           --location="$SKILL_CMEK_LOCATION" \
-          --kms-key="$KMS_CRYPTO_KEY_ID"
+          --kms-key="$KMS_CRYPTO_KEY_ID" \
+          --quiet
       else
         curl -fsSL -X PATCH \
           -H "Authorization: Bearer $TOKEN" \
+          -H "x-goog-user-project: $GCP_PROJECT_ID" \
           -H "Content-Type: application/json" \
           -d "{\"cryptoKeyName\": \"$KMS_CRYPTO_KEY_ID\"}" \
           "https://agentregistry.googleapis.com/v1alpha/projects/$GCP_PROJECT_ID/locations/$SKILL_CMEK_LOCATION/skillEncryptionSpec?updateMask=cryptoKeyName"

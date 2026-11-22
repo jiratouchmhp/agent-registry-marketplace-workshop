@@ -28,7 +28,7 @@ By the end of this lab, you will:
 | :--- | :--- | :--- |
 | **What It Protects Against** | Storage key sovereignty & crypto-shredding of stored Skill archives in Google Cloud | Compromised registry credentials, rogue uploads bypassing CI, or payload tampering in transit/storage |
 | **Cloud KMS Key Purpose & Algorithm** | `ENCRYPT_DECRYPT` (`GOOGLE_SYMMETRIC_ENCRYPTION`, 90-day rotation) | `ASYMMETRIC_SIGN` (`EC_SIGN_P256_SHA256`) |
-| **Mandatory Location Rule** | **Multi-region ONLY:** Skills in `us` → KMS key in **`us`**; Skills in `eu` → KMS key in **`europe`**! | Regional (e.g. `us-central1`) |
+| **Mandatory Location Rule** | **Multi-region ONLY:** Skills in `us` → KMS key in **`us`**; Skills in `eu` → KMS key in **`europe`**! *(In APAC where standalone Skills live in `global` and compute/Services run in `asia-southeast3`/`asia-southeast1`, rely on Google-managed encryption at rest + regional Asymmetric Signing.)* | Regional — natively supported in **Bangkok (`asia-southeast3`)** and **Singapore (`asia-southeast1`)**, signing skills stored in `global`, `us`, or `eu`! |
 | **Zero-Skills Precondition** | `PATCH .../skillEncryptionSpec` **fails with `FAILED_PRECONDITION`** if **any** Skill already exists in that multi-region | None — can be enabled or key-rotated anytime |
 | **Least-Privilege IAM** | P4SA (`service-<NUM>@gcp-sa-agentregistry.iam.gserviceaccount.com`) → `roles/cloudkms.cryptoKeyEncrypterDecrypter` | CI Publisher SA → `roles/cloudkms.signerVerifier`<br>Middleware SA → **`roles/cloudkms.publicKeyViewer` ONLY** |
 
@@ -40,8 +40,10 @@ Inspect [terraform/security_governance/kms.tf](../../terraform/security_governan
 
 1. Notice how `kms.tf` provisions **two separate key rings**:
    - `agent-registry-skill-cmek` in `var.cmek_location` (`"us"` or `"europe"`) with key `agent-registry-skills-at-rest` (`ENCRYPT_DECRYPT`) granted to the Agent Registry P4SA (`roles/cloudkms.cryptoKeyEncrypterDecrypter`).
-   - `agent-registry-skill-signing` in `var.location` (`"us-central1"`) with key `skill-artifact-ecdsa-p256` (`ASYMMETRIC_SIGN`, `EC_SIGN_P256_SHA256`).
+   - `agent-registry-skill-signing` in `var.location` (`"asia-southeast3"` — Bangkok primary) with key `skill-artifact-ecdsa-p256` (`ASYMMETRIC_SIGN`, `EC_SIGN_P256_SHA256`).
 2. Notice how `skill_encryption_spec.tf` defaults `enable_cmek_spec = false` and runs a **pre-flight zero-skills check** (`GET .../locations/{us|eu}/skills?pageSize=1`) before invoking `gcloud alpha agent-registry skill-encryption-spec update` (or `PATCH .../v1alpha/.../skillEncryptionSpec?updateMask=cryptoKeyName`), preventing unexpected `FAILED_PRECONDITION` errors on populated locations.
+
+> **Workstream B APAC Regional Split Note:** On live Google Cloud Agent Registry `v1`, standalone `Skills` live in **`global`** (APAC default) or **`us` / `eu`** (required for native CMEK `SkillEncryptionSpec`). For **Bangkok (`asia-southeast3`)** primary and **Singapore (`asia-southeast1`)** secondary deployments, keep `skills_location = "global"` and `enable_cmek_spec = false` (Google-managed encryption at rest protects stored archives) and enforce **Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`)** regionally in `asia-southeast3` / `asia-southeast1` for cryptographic supply-chain provenance and tamper rejection. Also set `auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false` (Agent Gateway is currently `us-central1`/`europe-west1`), and `lock_audit_bucket = false` (sandbox) in `terraform/security_governance/terraform.tfvars`!
 
 ### Live GCP Mode — Provision KMS & Optionally Attach CMEK
 
@@ -78,7 +80,7 @@ terraform -chdir=terraform/security_governance output signing_crypto_key_id
    .venv/bin/python -m tools.plugin_sync sync \
      --plugin-dir starter-marketplace/plugins/gcp-finops-toolkit \
      --project acme-agent-governance \
-     --location us-central1 \
+     --location asia-southeast3 \
      --output-dir /tmp/kms-demo/unsigned \
      --skip-mcp-probe \
      --dry-run
@@ -130,13 +132,17 @@ export KMS_SIGNING_KEY_VERSION="$(terraform -chdir=terraform/security_governance
   --kms-key-version "${KMS_SIGNING_KEY_VERSION}" \
   --output /tmp/kms-demo/cloud-kms-public.pem
 
-# 2. Sign & sync directly from CI using Cloud KMS :asymmetricSign (requires roles/cloudkms.signerVerifier)
-.venv/bin/python -m tools.plugin_sync sync \
-  --plugin-dir starter-marketplace/plugins/gcp-finops-toolkit \
+# 2. Sign & sync standalone Skills directly from CI into global (or us/eu) using Cloud KMS :asymmetricSign (requires roles/cloudkms.signerVerifier)
+.venv/bin/python -m tools.plugin_sync ingest \
+  --source-type local \
+  --path starter-marketplace/plugins/gcp-finops-toolkit \
   --registry-url "https://agentregistry.googleapis.com/v1" \
   --project "<your-gcp-project-id>" \
-  --location "us-central1" \
+  --location "asia-southeast3" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
   --kms-key-version "${KMS_SIGNING_KEY_VERSION}" \
+  --wait-for-scan \
+  --only-skills \
   --skip-mcp-probe
 ```
 
@@ -174,7 +180,7 @@ with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
     zf.writestr("rogue-unsigned-skill/SKILL.md", "---\nname: rogue-unsigned-skill\ndescription: Unsigned direct upload.\n---\n# Rogue Skill\n")
 
 resp = httpx.post(
-    "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/us-central1/skills",
+    "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3/skills",
     params={"skillId": "rogue-unsigned-skill"},
     json={
         "displayName": "Rogue Unsigned Skill",
@@ -211,6 +217,7 @@ curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
 | `FAILED_PRECONDITION` when enabling `SkillEncryptionSpec` | One or more Skills already exist in the target `us` or `eu` location | Delete all skills in that multi-region (with `?force=true`) before updating `SkillEncryptionSpec`, or provision CMEK on a fresh project/location first. |
 | `KMS key location mismatch` for EU skills | Created CMEK key ring in `eu` instead of `europe` | Cloud KMS uses **`europe`** for Agent Registry skills in **`eu`** (see `var.cmek_location` validation in [terraform/security_governance/variables.tf](../../terraform/security_governance/variables.tf)). |
 | Middleware rejects ALL skills with `Failed to load trusted KMS public key` | `REQUIRE_KMS_SIGNATURE=true` without `KMS_PUBLIC_KEY_PEM_PATH`, `KMS_PUBLIC_KEY_PEM`, or `KMS_SIGNING_KEY_VERSION` | Always provide the trusted ECDSA P-256 public key PEM (or set `KMS_SIGNING_KEY_VERSION` on Cloud Run so Middleware fetches `/publicKey` directly via `roles/cloudkms.publicKeyViewer`) when `REQUIRE_KMS_SIGNATURE=true` (fail-closed by design). |
+| `400 FAILED_PRECONDITION` promoting a freshly re-signed revision under `ENABLED_BLOCKING` | Patched `defaultRevision` before the new `SkillRevision` async scan (~10s) completed | Always pass `--wait-for-scan` so `tools/plugin_sync/sync.py` (`wait_for_revision_scan_completion()`) waits for `scanState == "SUCCEEDED"` before promoting `defaultRevision`. |
 
 ---
 

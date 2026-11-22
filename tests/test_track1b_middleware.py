@@ -2182,3 +2182,404 @@ def test_middleware_oauth_decoupling_metadata_server_and_kms_public_key_fetch(
     assert "signature verification FAILED" in (bad_res.rejection_reason or "")
     assert kms_calls == 1
     assert kms_meta_calls == 1
+
+
+def test_middleware_bangkok_defaults_healthz_and_running_scan_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify Bangkok/Singapore MiddlewareSettings, /healthz metadata, and RUNNING scan rejection text."""
+    for env_key in ("GCP_LOCATION", "GCP_SECONDARY_LOCATION", "AGENT_REGISTRY_LOCATION"):
+        monkeypatch.delenv(env_key, raising=False)
+
+    default_cfg = MiddlewareSettings.from_env()
+    assert default_cfg.gcp_location == "asia-southeast3"
+    assert default_cfg.gcp_secondary_location == "asia-southeast1"
+    assert default_cfg.agent_registry_location == ""
+    assert default_cfg.effective_registry_location == "asia-southeast3"
+
+    monkeypatch.setenv("GCP_LOCATION", "asia-southeast1")
+    monkeypatch.setenv("GCP_SECONDARY_LOCATION", "asia-southeast3")
+    monkeypatch.setenv("AGENT_REGISTRY_LOCATION", "asia-southeast3")
+    override_cfg = MiddlewareSettings.from_env()
+    assert override_cfg.gcp_location == "asia-southeast1"
+    assert override_cfg.gcp_secondary_location == "asia-southeast3"
+    assert override_cfg.effective_registry_location == "asia-southeast3"
+
+    # Mock Agent Registry returning a STATE_DRAFT skill whose security scan is still RUNNING
+    seen_paths: list[str] = []
+
+    def _running_scan_handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append(request.url.path)
+        if request.url.path.endswith("/skills"):
+            return httpx.Response(
+                200,
+                json={
+                    "skills": [
+                        {
+                            "name": "projects/acme-agent-governance/locations/asia-southeast3/skills/private-scanning-skill",
+                            "state": "STATE_DRAFT",
+                            "targetState": "TARGET_STATE_ACTIVE",
+                            "defaultRevision": "projects/acme-agent-governance/locations/asia-southeast3/skills/private-scanning-skill/revisions/rev-1",
+                        }
+                    ]
+                },
+            )
+        if request.url.path.endswith("/revisions/rev-1"):
+            return httpx.Response(
+                200,
+                json={
+                    "name": "projects/acme-agent-governance/locations/asia-southeast3/skills/private-scanning-skill/revisions/rev-1",
+                    "scanResult": {"scanState": "RUNNING", "findings": []},
+                },
+            )
+        if request.url.path.endswith("/mcpServers"):
+            return httpx.Response(200, json={"mcpServers": []})
+        if request.url.path.endswith("/agents"):
+            return httpx.Response(200, json={"agents": []})
+        return httpx.Response(404)
+
+    mw_app = create_middleware_app(
+        settings=MiddlewareSettings(
+            agent_registry_base_url="http://mock-ar.local/v1",
+            gcp_project_id="acme-agent-governance",
+            gcp_location="asia-southeast1",
+            gcp_secondary_location="asia-southeast3",
+            agent_registry_location="asia-southeast3",
+            require_kms_signature=False,
+        ),
+        registry_transport=httpx.MockTransport(_running_scan_handler),
+    )
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
+        ) as client:
+            hz = await client.get("/healthz")
+            assert hz.status_code == 200
+            body = hz.json()
+            assert body["location"] == "asia-southeast1"
+            assert body["region"] == "asia-southeast1"
+            assert body["secondaryRegion"] == "asia-southeast3"
+            assert body["agentRegistryLocation"] == "asia-southeast3"
+
+            cat = (await client.get("/v1/catalog")).json()
+            assert len(cat["rejectedSkills"]) == 1
+            reason = cat["rejectedSkills"][0]["reason"]
+            assert "STATE_DRAFT" in reason
+            assert "RUNNING" in reason
+            assert "15 seconds" in reason
+
+    asyncio.run(_run())
+    # Verify AgentRegistryClient used effective_registry_location (asia-southeast3)
+    assert any("/locations/asia-southeast3/skills" in p for p in seen_paths)
+
+
+def test_mcp_gateway_cloud_run_a2a_oidc_identity_token_auth() -> None:
+    """McpGateway fetches and caches a GCE metadata OIDC ID token for https://*.run.app A2A endpoints."""
+    import time
+
+    cloud_run_origin = "https://sample-a2a-agent-abc123.asia-southeast3.run.app"
+    cloud_run_a2a_url = f"{cloud_run_origin}/a2a"
+    local_a2a_url = "http://127.0.0.1:8092/a2a"
+
+    jwt_header = base64.urlsafe_b64encode(json.dumps({"alg": "RS256"}).encode()).decode().rstrip("=")
+    jwt_payload = (
+        base64.urlsafe_b64encode(json.dumps({"exp": int(time.time()) + 3600}).encode())
+        .decode()
+        .rstrip("=")
+    )
+    fake_id_token = f"{jwt_header}.{jwt_payload}.fakesig"
+
+    meta_calls: list[tuple[str, str | None]] = []
+    a2a_auth_headers: list[str | None] = []
+
+    def _registry_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/agents"):
+            return httpx.Response(
+                200,
+                json={
+                    "agents": [
+                        {
+                            "name": "projects/acme-agent-governance/locations/asia-southeast3/agents/finops-advisor-agent",
+                            "displayName": "GCP FinOps Advisor",
+                            "interfaces": [{"url": cloud_run_a2a_url, "protocolBinding": "JSONRPC"}],
+                        },
+                        {
+                            "name": "projects/acme-agent-governance/locations/asia-southeast3/agents/local-a2a-agent",
+                            "displayName": "Local A2A Agent",
+                            "interfaces": [{"url": local_a2a_url, "protocolBinding": "JSONRPC"}],
+                        },
+                    ]
+                },
+            )
+        return httpx.Response(200, json={"skills": [], "mcpServers": [], "agents": []})
+
+    def _metadata_handler(request: httpx.Request) -> httpx.Response:
+        assert request.headers.get("metadata-flavor") == "Google"
+        meta_calls.append((str(request.url), request.url.params.get("audience")))
+        assert request.url.params.get("audience") == cloud_run_origin
+        assert request.url.params.get("format") == "full"
+        return httpx.Response(200, text=fake_id_token)
+
+    def _a2a_handler(request: httpx.Request) -> httpx.Response:
+        auth_hdr = request.headers.get("authorization")
+        a2a_auth_headers.append(auth_hdr)
+        if str(request.url) == cloud_run_a2a_url:
+            if auth_hdr != f"Bearer {fake_id_token}":
+                return httpx.Response(401, text="Unauthorized: missing Cloud Run OIDC ID token")
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": "1", "result": {"status": {"state": "completed"}}},
+            )
+        if str(request.url) == local_a2a_url:
+            assert auth_hdr is None, f"Unexpected Authorization header for local HTTP A2A: {auth_hdr}"
+            return httpx.Response(
+                200,
+                json={"jsonrpc": "2.0", "id": "2", "result": {"status": {"state": "completed"}}},
+            )
+        return httpx.Response(404)
+
+    mw_app = create_middleware_app(
+        settings=MiddlewareSettings(
+            agent_registry_base_url="http://mock-ar.local/v1",
+            gcp_project_id="acme-agent-governance",
+            gcp_location="asia-southeast3",
+            require_kms_signature=False,
+        ),
+        registry_transport=httpx.MockTransport(_registry_handler),
+        a2a_transport=httpx.MockTransport(_a2a_handler),
+        metadata_transport=httpx.MockTransport(_metadata_handler),
+    )
+
+    async def _run() -> None:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
+        ) as client:
+            for req_id in (1, 2):
+                r = await client.post(
+                    "/mcp",
+                    json={
+                        "jsonrpc": "2.0",
+                        "id": req_id,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "call_remote_a2a_agent",
+                            "arguments": {"agent_name": "finops-advisor-agent", "task": "Check billing"},
+                        },
+                    },
+                )
+                assert r.status_code == 200
+                res = r.json()["result"]
+                assert res["isError"] is False, res
+                assert res["structuredContent"]["response"]["result"]["status"]["state"] == "completed"
+
+            # Local HTTP A2A agent should NOT trigger metadata OIDC token fetch
+            r_local = await client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "call_remote_a2a_agent",
+                        "arguments": {"agent_name": "local-a2a-agent", "task": "Local ping"},
+                    },
+                },
+            )
+            assert r_local.status_code == 200
+            assert r_local.json()["result"]["isError"] is False
+
+    asyncio.run(_run())
+    # Metadata server was queried ONCE (token cached across calls 1 & 2, skipped for local HTTP)
+    assert len(meta_calls) == 1
+    assert a2a_auth_headers == [f"Bearer {fake_id_token}", f"Bearer {fake_id_token}", None]
+
+
+def test_middleware_global_skills_pagination_private_filter_and_regional_services(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live googleapis.com skills auto-route to global, paginate across nextPageToken, filter built-in first-party skills, and link regional Bangkok/Singapore services."""
+    for env_key in (
+        "AGENT_REGISTRY_BASE_URL",
+        "GCP_LOCATION",
+        "AGENT_REGISTRY_LOCATION",
+        "AGENT_REGISTRY_SKILLS_LOCATION",
+        "INCLUDE_PUBLIC_SKILLS",
+    ):
+        monkeypatch.delenv(env_key, raising=False)
+
+    # 1. Local mock URL preserves regional skills_location (100% backward compat)
+    local_cfg = MiddlewareSettings.from_env()
+    assert local_cfg.include_public_skills is False
+    assert local_cfg.effective_skills_location == "asia-southeast3"
+
+    # 2. Live googleapis.com with single-region location auto-defaults effective_skills_location to global
+    monkeypatch.setenv("AGENT_REGISTRY_BASE_URL", "https://agentregistry.googleapis.com/v1")
+    live_cfg = MiddlewareSettings.from_env()
+    assert live_cfg.effective_registry_location == "asia-southeast3"
+    assert live_cfg.effective_skills_location == "global"
+
+    # 3. Explicit AGENT_REGISTRY_SKILLS_LOCATION and INCLUDE_PUBLIC_SKILLS env vars override cleanly
+    monkeypatch.setenv("AGENT_REGISTRY_SKILLS_LOCATION", "eu")
+    monkeypatch.setenv("INCLUDE_PUBLIC_SKILLS", "true")
+    override_cfg = MiddlewareSettings.from_env()
+    assert override_cfg.effective_skills_location == "eu"
+    assert override_cfg.include_public_skills is True
+
+    # 4. Paginated global skills + built-in first-party filtering + Bangkok & Singapore regional Services linking
+    skill_zip = _build_skill_zip(
+        skill_name="cost-anomaly-triage",
+        description="Triage unexpected GCP billing spikes.",
+        metadata={
+            "plugin_name": "gcp-finops-toolkit",
+            "plugin_display_name": "GCP FinOps Toolkit",
+            "plugin_version": "1.0.0",
+            "mcp_service_id": "finops-mcp-server",
+            "agent_service_id": "finops-advisor-agent",
+        },
+    )
+    skill_sha = hashlib.sha256(skill_zip).hexdigest()
+    global_skill_name = f"projects/{PROJECT}/locations/global/skills/private-cost-anomaly-triage"
+    global_rev_name = f"{global_skill_name}/revisions/rev-1"
+
+    def _multi_region_handler(request: httpx.Request) -> httpx.Response:
+        if request.url.host == "storage.googleapis.com":
+            return httpx.Response(200, content=skill_zip)
+        path = request.url.path
+        if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/global/skills":
+            token = request.url.params.get("pageToken", "")
+            if not token:
+                return httpx.Response(
+                    200,
+                    json={
+                        "skills": [
+                            {
+                                "name": f"projects/{PROJECT}/locations/global/skills/cloud.google.com-gke",
+                                "state": "STATE_ACTIVE",
+                                "defaultRevision": f"projects/{PROJECT}/locations/global/skills/cloud.google.com-gke/revisions/rev-1",
+                            },
+                            {
+                                "name": f"projects/{PROJECT}/locations/global/skills/discoveryengine.googleapis.com-search",
+                                "publisher": f"projects/{PROJECT}/locations/global/publishers/discoveryengine.googleapis.com",
+                                "state": "STATE_ACTIVE",
+                                "defaultRevision": f"projects/{PROJECT}/locations/global/skills/discoveryengine.googleapis.com-search/revisions/rev-1",
+                            },
+                        ],
+                        "nextPageToken": "page-2",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "skills": [
+                        {
+                            "name": global_skill_name,
+                            "state": "STATE_ACTIVE",
+                            "defaultRevision": global_rev_name,
+                            "defaultRevisionFindingCount": 0,
+                            # Note: live GCP omits `publisher` on private skills!
+                        }
+                    ]
+                },
+            )
+        if request.method == "POST" and path == f"/v1/projects/{PROJECT}/locations/global/skills:search":
+            return httpx.Response(
+                200,
+                json={
+                    "skills": [
+                        {"name": f"projects/{PROJECT}/locations/global/skills/cloud.google.com-gke"},
+                        {"name": global_skill_name},
+                    ]
+                },
+            )
+        if request.method == "GET" and path == f"/v1/{global_rev_name}":
+            if request.url.params.get("alt") == "media":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "https://storage.googleapis.com/signed/global-rev-1.zip"},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "name": global_rev_name,
+                    "sha256Hash": skill_sha,
+                    "scanResult": {"scanState": "SUCCEEDED", "findings": []},
+                },
+            )
+        for region in ("asia-southeast3", "asia-southeast1"):
+            if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/mcpServers":
+                return httpx.Response(
+                    200,
+                    json={
+                        "mcpServers": [
+                            {
+                                "name": f"projects/{PROJECT}/locations/{region}/mcpServers/urn:mcp:p:locations:{region}:services:finops-mcp-server",
+                                "interfaces": [{"url": f"https://sample-mcp-server.{region}.run.app/mcp"}],
+                            }
+                        ]
+                    },
+                )
+            if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/agents":
+                return httpx.Response(
+                    200,
+                    json={
+                        "agents": [
+                            {
+                                "name": f"projects/{PROJECT}/locations/{region}/agents/urn:agent:p:locations:{region}:services:finops-advisor-agent",
+                                "protocols": [
+                                    {
+                                        "type": "A2A_AGENT",
+                                        "interfaces": [{"url": f"https://sample-a2a-agent.{region}.run.app/a2a"}],
+                                    }
+                                ],
+                            }
+                        ]
+                    },
+                )
+        return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+    async def _run_both_regions() -> None:
+        # Verify search_skills also filters first-party skills when only_private_skills=True
+        async with AgentRegistryClient(
+            base_url="https://agentregistry.googleapis.com/v1",
+            project_id=PROJECT,
+            location="asia-southeast3",
+            auth_token="test-tok",
+            transport=httpx.MockTransport(_multi_region_handler),
+        ) as reg_client:
+            assert reg_client.skills_location == "global"
+            searched = await reg_client.search_skills(search_string="cost")
+            assert [s["name"] for s in searched] == [global_skill_name]
+
+        for region, secondary in (
+            ("asia-southeast3", "asia-southeast1"),
+            ("asia-southeast1", "asia-southeast3"),
+        ):
+            mw_app = create_middleware_app(
+                settings=MiddlewareSettings(
+                    agent_registry_base_url="https://agentregistry.googleapis.com/v1",
+                    gcp_project_id=PROJECT,
+                    gcp_location=region,
+                    gcp_secondary_location=secondary,
+                    agent_registry_auth_token="test-tok",
+                    require_kms_signature=False,
+                ),
+                registry_transport=httpx.MockTransport(_multi_region_handler),
+            )
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
+            ) as client:
+                hz = (await client.get("/healthz")).json()
+                assert hz["region"] == region
+                assert hz["skillsLocation"] == "global"
+
+                cat = (await client.get("/v1/catalog")).json()
+                assert cat["marketplace"]["skillsLocation"] == "global"
+                assert [s["name"] for s in cat["skills"]] == [global_skill_name]
+                assert len(cat["plugins"]) == 1
+                plugin = cat["plugins"][0]
+                assert plugin["name"] == "gcp-finops-toolkit"
+                assert any(f"/locations/{region}/mcpServers/" in m for m in plugin["mcpServers"])
+                assert any(f"/locations/{region}/agents/" in a for a in plugin["agents"])
+
+    asyncio.run(_run_both_regions())

@@ -243,7 +243,7 @@ for plugin_dir in sorted(p for p in plugins_root.iterdir() if p.is_dir()):
     plan = build_sync_plan(
         plugin_dir,
         project="validation-check",
-        location="us-central1",
+        location="asia-southeast3",
         probe_mcp=False,
     )
     print(

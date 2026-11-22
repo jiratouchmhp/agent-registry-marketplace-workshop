@@ -176,8 +176,11 @@ def test_expected_terraform_files_exist() -> None:
 
 
 def test_terraform_hclfmt_check_passes() -> None:
-    tf_files = sorted(str(p) for p in TF_SEC_DIR.glob("*.tf"))
-    assert len(tf_files) >= len(EXPECTED_TF_FILES)
+    tf_files = [
+        *sorted(str(p) for p in TF_SEC_DIR.glob("*.tf")),
+        str(TF_SEC_DIR / "terraform.tfvars.example"),
+    ]
+    assert len(tf_files) >= len(EXPECTED_TF_FILES) + 1
     terraform_bin = shutil.which("terraform")
     hclfmt_bin = os.environ.get("HCLFMT") or shutil.which("hclfmt")
     if terraform_bin:
@@ -221,6 +224,9 @@ def test_versions_and_variables_contract() -> None:
     required_vars = [
         "project_id",
         "location",
+        "auth_provider_location",
+        "enable_agent_gateway",
+        "agent_gateway_location",
         "cmek_location",
         "middleware_sa_email",
         "mcp_server_resource_id",
@@ -231,10 +237,22 @@ def test_versions_and_variables_contract() -> None:
         "enable_org_policy",
         "org_id",
         "audit_retention_days",
+        "lock_audit_bucket",
     ]
     for name in required_vars:
         assert name in var_blocks, f"Missing required variable '{name}' in variables.tf"
 
+    assert re.search(r'default\s*=\s*"asia-southeast3"', var_blocks["location"]), (
+        "location must default to Bangkok primary (asia-southeast3)"
+    )
+    assert re.search(r'default\s*=\s*"asia-southeast1"', var_blocks["auth_provider_location"]), (
+        "auth_provider_location must default to Singapore (asia-southeast1) for Agent Identity GA"
+    )
+    assert "validation" in var_blocks["auth_provider_location"]
+    assert re.search(r"default\s*=\s*false\b", var_blocks["enable_agent_gateway"]), (
+        "enable_agent_gateway must default to false for APAC compatibility"
+    )
+    assert re.search(r'default\s*=\s*"us-central1"', var_blocks["agent_gateway_location"])
     assert re.search(r'default\s*=\s*"us"', var_blocks["cmek_location"])
     assert "europe" in var_blocks["cmek_location"]
     assert re.search(r"default\s*=\s*false", var_blocks["enable_cmek_spec"])
@@ -242,6 +260,10 @@ def test_versions_and_variables_contract() -> None:
     assert re.search(r"default\s*=\s*false", var_blocks["enable_org_policy"])
     assert re.search(r'default\s*=\s*""', var_blocks["org_id"])
     assert re.search(r"default\s*=\s*90\b", var_blocks["audit_retention_days"])
+    assert re.search(r"default\s*=\s*false\b", var_blocks["lock_audit_bucket"]), (
+        "lock_audit_bucket must default to false so ephemeral workshop sandboxes can be destroyed"
+    )
+    assert "production" in var_blocks["lock_audit_bucket"].lower()
 
 
 def test_kms_cmek_and_asymmetric_signing_invariants() -> None:
@@ -312,10 +334,18 @@ def test_auth_provider_and_agent_registry_binding_schema() -> None:
     )
     assert len(providers) == 1
     assert "auth_provider_type_params" in providers[0][1]
+    assert re.search(r"location\s*=\s*var\.auth_provider_location\b", providers[0][1]), (
+        "google_agent_identity_auth_provider.finops_oauth must use var.auth_provider_location"
+    )
+    assert "asia-southeast1" in auth_hcl
 
     bindings = _extract_hcl_blocks(auth_hcl, "resource", "google_agent_registry_binding")
     assert len(bindings) == 1
     binding_body = bindings[0][1]
+    assert re.search(r"location\s*=\s*var\.location\b", binding_body), (
+        "google_agent_registry_binding.finops_agent_to_mcp must remain in var.location"
+    )
+    assert "google_agent_identity_auth_provider.finops_oauth.name" in binding_body
 
     assert re.search(r"source\s*\{[^}]*identifier\s*=\s*var\.a2a_agent_urn", binding_body, re.S)
     assert re.search(r"target\s*\{[^}]*identifier\s*=\s*var\.mcp_server_urn", binding_body, re.S)
@@ -334,6 +364,12 @@ def test_agent_gateway_and_iap_egressor_bindings() -> None:
     )
     assert len(gateways) == 1
     gw_body = gateways[0][1]
+    assert re.search(r"count\s*=\s*var\.enable_agent_gateway\s*\?\s*1\s*:\s*0", gw_body), (
+        "google_network_services_agent_gateway.marketplace must be gated by var.enable_agent_gateway"
+    )
+    assert re.search(r"location\s*=\s*var\.agent_gateway_location\b", gw_body), (
+        "google_network_services_agent_gateway.marketplace must use var.agent_gateway_location"
+    )
     assert re.search(
         r'google_managed\s*\{[^}]*governed_access_path\s*=\s*"CLIENT_TO_AGENT"',
         gw_body,
@@ -345,6 +381,7 @@ def test_agent_gateway_and_iap_egressor_bindings() -> None:
         gw_hcl, "resource", "google_iap_agent_registry_mcp_server_iam_member"
     )
     assert len(mcp_iap) == 1
+    assert re.search(r"location\s*=\s*var\.location\b", mcp_iap[0][1])
     assert 'roles/iap.egressor' in mcp_iap[0][1]
     assert "var.mcp_server_resource_id" in mcp_iap[0][1]
 
@@ -352,6 +389,7 @@ def test_agent_gateway_and_iap_egressor_bindings() -> None:
         gw_hcl, "resource", "google_iap_agent_registry_agent_iam_member"
     )
     assert len(agent_iap) == 1
+    assert re.search(r"location\s*=\s*var\.location\b", agent_iap[0][1])
     assert 'roles/iap.egressor' in agent_iap[0][1]
     assert "var.a2a_agent_resource_id" in agent_iap[0][1]
 
@@ -397,7 +435,10 @@ def test_audit_logging_data_access_and_locked_worm_bucket() -> None:
     )
     assert len(buckets) == 1
     b_body = buckets[0][1]
-    assert re.search(r"locked\s*=\s*true", b_body), "WORM audit bucket must have locked = true"
+    assert re.search(r"locked\s*=\s*var\.lock_audit_bucket\b", b_body), (
+        "Audit bucket must bind locked = var.lock_audit_bucket"
+    )
+    assert "IRREVERSIBLE" in audit_hcl and "production" in audit_hcl.lower()
     assert re.search(r"retention_days\s*=\s*var\.audit_retention_days", b_body)
 
     sinks = _extract_hcl_blocks(audit_hcl, "resource", "google_logging_project_sink")
@@ -411,9 +452,10 @@ def test_audit_logging_data_access_and_locked_worm_bucket() -> None:
 def test_terraform_outputs_align_with_workshop_spec() -> None:
     spec = json.loads(WORKSHOP_SPEC_PATH.read_text(encoding="utf-8"))
     outputs_hcl = (TF_SEC_DIR / "outputs.tf").read_text(encoding="utf-8")
-    declared_outputs = {
-        labels[0] for labels, _body in _extract_hcl_blocks(outputs_hcl, "output")
+    output_blocks = {
+        labels[0]: body for labels, body in _extract_hcl_blocks(outputs_hcl, "output")
     }
+    declared_outputs = set(output_blocks)
     workstream_b_expected = {
         "agent_registry_p4sa",
         "binding_name",
@@ -424,6 +466,26 @@ def test_terraform_outputs_align_with_workshop_spec() -> None:
     }
     assert workstream_b_expected.issubset(declared_outputs)
     assert workstream_b_expected.issubset(set(spec["terraform_outputs"]))
+    assert "auth_provider_location" in declared_outputs
+    assert (
+        'try(google_network_services_agent_gateway.marketplace[0].name, "")'
+        in output_blocks["agent_gateway_name"]
+    )
+    assert (
+        'try(google_network_services_agent_gateway.marketplace[0].id, "")'
+        in output_blocks["agent_gateway_id"]
+    )
+
+
+def test_security_governance_tfvars_example_apac_defaults() -> None:
+    tfvars_text = (TF_SEC_DIR / "terraform.tfvars.example").read_text(encoding="utf-8")
+    uncommented = _strip_hcl_comments(tfvars_text)
+    assert re.search(r'(?m)^\s*location\s*=\s*"asia-southeast3"', uncommented)
+    assert re.search(r'(?m)^\s*auth_provider_location\s*=\s*"asia-southeast1"', uncommented)
+    assert re.search(r"(?m)^\s*enable_agent_gateway\s*=\s*false\b", uncommented)
+    assert re.search(r"(?m)^\s*lock_audit_bucket\s*=\s*false\b", uncommented)
+    assert "locations:asia-southeast3:agentregistry:services:finops-mcp-server" in uncommented
+    assert "locations:asia-southeast3:agentregistry:services:finops-advisor-agent" in uncommented
 
 
 # =============================================================================

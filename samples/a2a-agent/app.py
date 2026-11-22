@@ -37,6 +37,7 @@ def build_agent_card(base_url: str | None = None) -> dict[str, Any]:
         "/"
     )
     a2a_url = f"{public_base}/a2a"
+    a2a_http_url = f"{public_base}/a2a/http"
     return {
         "name": AGENT_NAME,
         "description": (
@@ -55,7 +56,7 @@ def build_agent_card(base_url: str | None = None) -> dict[str, Any]:
                 "protocolVersion": "1.0",
             },
             {
-                "url": a2a_url,
+                "url": a2a_http_url,
                 "protocolBinding": "HTTP+JSON",
                 "protocolVersion": "1.0",
             },
@@ -63,7 +64,6 @@ def build_agent_card(base_url: str | None = None) -> dict[str, Any]:
         "capabilities": {
             "streaming": False,
             "pushNotifications": False,
-            "stateTransitionHistory": True,
         },
         "defaultInputModes": ["text/plain", "application/json"],
         "defaultOutputModes": ["text/plain", "application/json"],
@@ -272,6 +272,7 @@ def _create_completed_task(prompt: str, context_id: str | None = None) -> dict[s
     return task
 
 
+@app.get("/health")
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {"status": "ok", "agent": "finops-advisor-agent", "version": AGENT_VERSION}
@@ -292,6 +293,7 @@ async def get_task_http(task_id: str) -> dict[str, Any]:
 
 
 @app.post("/a2a")
+@app.post("/a2a/http")
 async def a2a_endpoint(request: Request) -> JSONResponse:
     """Execute A2A v1.0 requests over JSON-RPC 2.0 or HTTP+JSON."""
     try:

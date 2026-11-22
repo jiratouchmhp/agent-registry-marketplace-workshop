@@ -12,7 +12,7 @@ Google Cloud Agent Registry supports **Customer-Managed Encryption Keys (CMEK)**
 | **Cloud KMS Key Ring** | `agent-registry-skill-cmek` (`terraform/security_governance/kms.tf`) | `agent-registry-skill-signing` (`terraform/security_governance/kms.tf`) |
 | **Cloud KMS Key** | `agent-registry-skills-at-rest` | `skill-artifact-ecdsa-p256` |
 | **Purpose & Algorithm** | `ENCRYPT_DECRYPT` (`GOOGLE_SYMMETRIC_ENCRYPTION`, 90-day `rotation_period = "7776000s"`) | `ASYMMETRIC_SIGN` (`EC_SIGN_P256_SHA256`) |
-| **Location Constraint** | **Multi-region ONLY**: Skills in `us` → KMS **`us`**; Skills in `eu` → KMS **`europe`** | Regional (e.g., `us-central1`) |
+| **Location Constraint** | **Multi-region ONLY**: Skills in `us` → KMS **`us`**; Skills in `eu` → KMS **`europe`** *(APAC deployments host standalone Skills in `global` with Google-managed encryption at rest + regional Asymmetric Signing)* | Regional — natively supported in **Bangkok (`asia-southeast3`)** and **Singapore (`asia-southeast1`)**, signing skills stored in `global`, `us`, or `eu` |
 | **Precondition** | **Strict ZERO-SKILLS precondition** — fails with `FAILED_PRECONDITION` if any skill exists in `us` or `eu` | None — enable or rotate at any time |
 | **IAM Principals** | Agent Registry P4SA (`service-<NUM>@gcp-sa-agentregistry.iam.gserviceaccount.com`) → `roles/cloudkms.cryptoKeyEncrypterDecrypter` | CI Publisher SA (`agent-registry-ci-publisher`) → `roles/cloudkms.signerVerifier`<br>Middleware SA (`agent-marketplace-middleware`) → **`roles/cloudkms.publicKeyViewer` ONLY** |
 | **Terraform Resource** | `google_kms_crypto_key.skill_cmek` + `terraform_data.skill_encryption_spec` (`enable_cmek_spec = true`) | `google_kms_crypto_key.skill_artifact_signer` + IAM bindings in `kms.tf` |
@@ -34,9 +34,10 @@ Google Cloud Agent Registry supports **Customer-Managed Encryption Keys (CMEK)**
 ```bash
 export GCP_PROJECT_ID="<your-project-id>"
 export SKILL_CMEK_LOCATION="us"   # "us" (KMS: us) or "eu" (KMS: europe)
-TOKEN="$(gcloud auth print-access-token)"
+TOKEN="$(gcloud auth print-access-token --quiet)"
 
 curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
+  -H "x-goog-user-project: ${GCP_PROJECT_ID}" \
   "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${SKILL_CMEK_LOCATION}/skills?pageSize=1"
 # Must return {} (no "skills" array). If skills exist, delete each with ?force=true first.
 ```
@@ -57,11 +58,13 @@ export KMS_CRYPTO_KEY_ID="$(terraform -chdir=terraform/security_governance outpu
 gcloud alpha agent-registry skill-encryption-spec update \
   --project="${GCP_PROJECT_ID}" \
   --location="${SKILL_CMEK_LOCATION}" \
-  --kms-key="${KMS_CRYPTO_KEY_ID}"
+  --kms-key="${KMS_CRYPTO_KEY_ID}" \
+  --quiet
 
 # Direct REST fallback:
 curl -fsSL -X PATCH \
-  -H "Authorization: Bearer $(gcloud auth print-access-token)" \
+  -H "Authorization: Bearer $(gcloud auth print-access-token --quiet)" \
+  -H "x-goog-user-project: ${GCP_PROJECT_ID}" \
   -H "Content-Type: application/json" \
   -d "{\"cryptoKeyName\": \"${KMS_CRYPTO_KEY_ID}\"}" \
   "https://agentregistry.googleapis.com/v1alpha/projects/${GCP_PROJECT_ID}/locations/${SKILL_CMEK_LOCATION}/skillEncryptionSpec?updateMask=cryptoKeyName"
@@ -121,8 +124,8 @@ To embed `kms_signature` and `kms_key_version` inside `SKILL.md` `frontmatter.me
 export KMS_SIGNING_KEY_VERSION="$(terraform -chdir=terraform/security_governance output -raw signing_crypto_key_id)/cryptoKeyVersions/1"
 
 gcloud run services update polyglot-middleware \
-  --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" \
-  --update-env-vars="REQUIRE_KMS_SIGNATURE=true,KMS_SIGNING_KEY_VERSION=${KMS_SIGNING_KEY_VERSION}"
+  --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION:-asia-southeast3}" \
+  --update-env-vars="REQUIRE_KMS_SIGNATURE=true,KMS_SIGNING_KEY_VERSION=${KMS_SIGNING_KEY_VERSION}" --quiet
 ```
 
 > **Terraform Drift Warning:** An out-of-band `gcloud run services update --update-env-vars=...` change will be overwritten on the next `terraform -chdir=terraform/core apply` unless you also add a `KMS_SIGNING_KEY_VERSION` `env` block (and variable) to `terraform/core/cloud_run.tf`.
@@ -160,11 +163,11 @@ gcloud run services update polyglot-middleware \
 1. **Create a new key version** (`cryptoKeyVersions/2` — inherits `EC_SIGN_P256_SHA256` from the parent CryptoKey's `version_template` in `terraform/security_governance/kms.tf`; `versions create` does not accept `--algorithm`):
    ```bash
    gcloud kms keys versions create \
-     --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+     --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION:-asia-southeast3}" \
      --keyring="agent-registry-skill-signing" \
-     --key="skill-artifact-ecdsa-p256"
+     --key="skill-artifact-ecdsa-p256" --quiet
    ```
-2. **Stage re-signed revisions**: Run CI (`tools.plugin_sync sync` / `ingest`) with `--kms-key-version .../cryptoKeyVersions/2` and `--target-state TARGET_STATE_DRAFT` for all active skills; verify every new revision reaches `scanState == SUCCEEDED` with `0` findings.
+2. **Stage re-signed revisions**: Run CI (`tools.plugin_sync ingest --only-skills --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --wait-for-scan`) with `--kms-key-version .../cryptoKeyVersions/2` and `--target-state TARGET_STATE_DRAFT` for all active skills; verify every new revision reaches `scanState == SUCCEEDED` with `0` findings (avoiding `400 FAILED_PRECONDITION` pending-scan rejection under `ENABLED_BLOCKING`).
 3. **Atomic cutover (small catalog)** — or **dual-key overlap (large fleet)**:
    - *Small catalog*: Promote all v2 revisions (`PATCH ...?updateMask=defaultRevision,targetState`) and immediately update middleware `KMS_SIGNING_KEY_VERSION` (or mounted PEM) to `cryptoKeyVersions/2`.
    - *Zero-downtime large fleet*: Extend `SecurityVerifier` to accept a map of trusted `kms_key_version -> public_key` (v1 + v2) during the rollout window, re-sign and promote all skills to v2, then remove v1 from the allowlist.

@@ -240,7 +240,7 @@ def test_gitlab_ci_pipeline_structure_and_jq_filter(tmp_path: Path) -> None:
         "CI_DRY_RUN_ONLY": "true",
         "AGENT_REGISTRY_BASE_URL": "https://agentregistry.googleapis.com/v1",
         "GCP_PROJECT_ID": "acme-agent-governance",
-        "GCP_LOCATION": "us-central1",
+        "GCP_LOCATION": "asia-southeast3",
         "SCANNING_POLICY": "ENABLED_BLOCKING",
         "DIST_DIR": str(pkg_dist),
     }
@@ -1083,3 +1083,269 @@ def test_plugin_sync_cli_dry_run_and_verify(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0
     assert "sync" in proc.stdout
+
+
+def test_plugin_sync_bangkok_defaults_headers_gcloud_and_wait_for_scan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Verify asia-southeast3 defaults, x-goog-user-project, gcloud --quiet, and async scan polling."""
+    import hashlib
+    import importlib.util
+    from tools.plugin_sync.sync import (
+        _resolve_bearer_token,
+        sign_digest_with_kms,
+        wait_for_skill_scan_completion,
+    )
+
+    # 1. CLI default --location is asia-southeast3 on both `sync` and `ingest`
+    runner = CliRunner()
+    dry_res = runner.invoke(
+        cli,
+        [
+            "sync",
+            "--plugin-dir",
+            str(STARTER_PLUGIN_DIR),
+            "--project",
+            "acme-agent-governance",
+            "--skip-mcp-probe",
+            "--dry-run",
+        ],
+    )
+    assert dry_res.exit_code == 0, dry_res.output
+    dry_summary = json.loads(dry_res.output)
+    assert dry_summary["location"] == "asia-southeast3"
+    assert "/locations/asia-southeast3/skills/private-" in dry_summary["skills"][0]["resource_name"]
+
+    ingest_res = runner.invoke(
+        cli,
+        [
+            "ingest",
+            "--source-type",
+            "local",
+            "--path",
+            str(REPO_ROOT / "local-skills"),
+            "--project",
+            "acme-agent-governance",
+            "--dry-run",
+        ],
+    )
+    assert ingest_res.exit_code == 0, ingest_res.output
+    assert json.loads(ingest_res.output)["location"] == "asia-southeast3"
+
+    # 2. _resolve_bearer_token uses --quiet and falls back to ~/.local/bin/gcloud
+    seen_cmds: list[list[str]] = []
+
+    def _fake_subprocess_run(cmd: list[str], **_kwargs: Any) -> Any:
+        seen_cmds.append(list(cmd))
+
+        class _Proc:
+            returncode = 0 if "application-default" in cmd else 1
+            stdout = "adc-live-token\n" if returncode == 0 else ""
+
+        return _Proc()
+
+    with monkeypatch.context() as mp:
+        mp.delenv("AGENT_REGISTRY_AUTH_TOKEN", raising=False)
+        mp.delenv("GOOGLE_OAUTH_ACCESS_TOKEN", raising=False)
+        mp.setattr("tools.plugin_sync.sync.shutil.which", lambda _name: None)
+        mp.setattr("tools.plugin_sync.sync.subprocess.run", _fake_subprocess_run)
+        resolved = _resolve_bearer_token("https://agentregistry.googleapis.com/v1")
+    assert resolved == "adc-live-token"
+    assert len(seen_cmds) == 2
+    assert all("--quiet" in c for c in seen_cmds)
+    assert seen_cmds[0][0].endswith(".local/bin/gcloud")
+    assert seen_cmds[0][1:] == ["auth", "print-access-token", "--quiet"]
+    assert seen_cmds[1][1:] == ["auth", "application-default", "print-access-token", "--quiet"]
+
+    # 3. sign_digest_with_kms sends x-goog-user-project parsed from kms_key_version
+    kms_headers_seen: list[dict[str, str]] = []
+
+    def _kms_handler(request: httpx.Request) -> httpx.Response:
+        kms_headers_seen.append(dict(request.headers))
+        return httpx.Response(200, json={"signature": base64.b64encode(b"sig-bytes").decode("ascii")})
+
+    with httpx.Client(transport=httpx.MockTransport(_kms_handler)) as kms_http:
+        sig = sign_digest_with_kms(
+            hashlib.sha256(b"payload").digest(),
+            "projects/bkk-prod-proj/locations/asia-southeast3/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1",
+            auth_token="tok-123",
+            http_client=kms_http,
+        )
+    assert sig == base64.b64encode(b"sig-bytes").decode("ascii")
+    assert kms_headers_seen[0].get("x-goog-user-project") == "bkk-prod-proj"
+
+    # 4. apply_sync_plan sends x-goog-user-project against googleapis.com & polls async scan to STATE_ACTIVE
+    poll_counts: dict[str, int] = {}
+    ar_headers_seen: list[dict[str, str]] = []
+
+    def _live_ar_handler(request: httpx.Request) -> httpx.Response:
+        ar_headers_seen.append(dict(request.headers))
+        path = request.url.path
+        if request.method == "GET" and "/skills/private-" in path and "/revisions/" not in path:
+            skill_id = path.rsplit("/", 1)[-1]
+            count = poll_counts.get(skill_id, 0)
+            if count == 0:
+                poll_counts[skill_id] = 1
+                return httpx.Response(404, json={"error": {"code": 404}})
+            poll_counts[skill_id] = count + 1
+            if count == 1:
+                return httpx.Response(
+                    200,
+                    json={
+                        "name": path.removeprefix("/v1/"),
+                        "state": "STATE_DRAFT",
+                        "defaultRevision": f"{path.removeprefix('/v1/')}/revisions/rev-1",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "name": path.removeprefix("/v1/"),
+                    "state": "STATE_ACTIVE",
+                    "defaultRevision": f"{path.removeprefix('/v1/')}/revisions/rev-1",
+                },
+            )
+        if request.method == "GET" and "/revisions/" in path:
+            return httpx.Response(
+                200,
+                json={
+                    "name": path.removeprefix("/v1/"),
+                    "scanResult": {"scanState": "RUNNING", "findings": []},
+                },
+            )
+        if request.method == "POST" and path.endswith("/skills"):
+            raw_id = request.url.params["skillId"]
+            res_name = f"projects/acme-agent-governance/locations/asia-southeast3/skills/private-{raw_id}"
+            return httpx.Response(
+                200,
+                json={
+                    "name": f"projects/acme-agent-governance/locations/asia-southeast3/operations/op-{raw_id}",
+                    "done": True,
+                    "response": {
+                        "name": res_name,
+                        "state": "STATE_DRAFT",
+                        "defaultRevision": f"{res_name}/revisions/rev-1",
+                    },
+                },
+            )
+        if request.method == "GET" and "/services/" in path:
+            return httpx.Response(404, json={"error": {"code": 404}})
+        if request.method == "POST" and path.endswith("/services"):
+            svc_id = request.url.params["serviceId"]
+            return httpx.Response(
+                200,
+                json={
+                    "name": f"op-svc-{svc_id}",
+                    "done": True,
+                    "response": {
+                        "name": f"projects/acme-agent-governance/locations/asia-southeast3/services/{svc_id}"
+                    },
+                },
+            )
+        return httpx.Response(500, json={"error": f"Unhandled {request.method} {path}"})
+
+    with httpx.Client(transport=httpx.MockTransport(_live_ar_handler)) as live_http:
+        plan = build_sync_plan(
+            STARTER_PLUGIN_DIR,
+            project="acme-agent-governance",
+            location="asia-southeast3",
+            target_state="TARGET_STATE_ACTIVE",
+            scanning_policy="ENABLED_BLOCKING",
+            probe_mcp=False,
+        )
+        summary = apply_sync_plan(
+            plan,
+            registry_url="https://agentregistry.googleapis.com/v1",
+            auth_token="live-ar-token",
+            http_client=live_http,
+            poll_interval=0.01,
+            wait_for_scan=True,
+            scan_timeout=5.0,
+            scan_poll_interval=0.01,
+        )
+
+    assert all(h.get("x-goog-user-project") == "acme-agent-governance" for h in ar_headers_seen)
+    assert all(s["final_state"] == "STATE_ACTIVE" for s in summary["skills"])
+    assert all(isinstance(s["scan_wait_seconds"], float) for s in summary["skills"])
+
+    # 5. wait_for_skill_scan_completion stops immediately on terminal FAILED scanState
+    def _failed_scan_handler(request: httpx.Request) -> httpx.Response:
+        if "/revisions/" in request.url.path:
+            return httpx.Response(
+                200,
+                json={
+                    "name": request.url.path.removeprefix("/v1/"),
+                    "scanResult": {"scanState": "FAILED", "findings": ["prompt-injection"]},
+                },
+            )
+        return httpx.Response(
+            200,
+            json={
+                "name": request.url.path.removeprefix("/v1/"),
+                "state": "STATE_DRAFT",
+                "defaultRevision": f"{request.url.path.removeprefix('/v1/')}/revisions/rev-bad",
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(_failed_scan_handler)) as fail_http:
+        fail_res = wait_for_skill_scan_completion(
+            fail_http,
+            "https://agentregistry.googleapis.com/v1",
+            "projects/acme-agent-governance/locations/asia-southeast3/skills/private-bad",
+            headers={"Authorization": "Bearer tok"},
+            timeout_seconds=5.0,
+            poll_interval=0.01,
+        )
+    assert fail_res["final_state"] == "STATE_DRAFT"
+    assert fail_res["scan_state"] == "FAILED"
+    assert fail_res["timed_out"] is False
+
+    # 6. Verify security-governance/kms/sign_and_verify.py & apply-uap.sh Bangkok defaults & headers
+    kms_mod_path = REPO_ROOT / "security-governance" / "kms" / "sign_and_verify.py"
+    spec = importlib.util.spec_from_file_location("test_kms_sign_and_verify", kms_mod_path)
+    assert spec is not None and spec.loader is not None
+    kms_mod = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = kms_mod
+    spec.loader.exec_module(kms_mod)
+    assert "/locations/asia-southeast3/" in kms_mod.DEFAULT_KEY_VERSION_LABEL
+
+    # Verify Cloud KMS REST calls include x-goog-user-project header
+    kms_urllib_reqs: list[Any] = []
+    _priv_pem, pub_pem = kms_mod.generate_ecdsa_p256_keypair()
+
+    class _FakeResp:
+        def __init__(self, payload: dict[str, Any]) -> None:
+            self._raw = json.dumps(payload).encode("utf-8")
+
+        def read(self) -> bytes:
+            return self._raw
+
+        def __enter__(self) -> _FakeResp:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    def _fake_urlopen(req: Any, timeout: float = 30) -> _FakeResp:
+        kms_urllib_reqs.append(req)
+        if req.full_url.endswith(":asymmetricSign"):
+            return _FakeResp({"signature": base64.b64encode(b"kms-sig").decode("ascii")})
+        return _FakeResp({"algorithm": "EC_SIGN_P256_SHA256", "pem": pub_pem.decode("utf-8")})
+
+    monkeypatch.setattr(kms_mod.urllib.request, "urlopen", _fake_urlopen)
+    key_ver = "projects/sg-kms-proj/locations/asia-southeast3/keyRings/r/cryptoKeys/k/cryptoKeyVersions/1"
+    kms_mod.sign_digest_cloud_kms(hashlib.sha256(b"msg").digest(), key_ver, access_token="tok")
+    kms_mod.fetch_public_key_cloud_kms(key_ver, access_token="tok")
+    assert len(kms_urllib_reqs) == 2
+    assert all(r.get_header("X-goog-user-project") == "sg-kms-proj" for r in kms_urllib_reqs)
+
+    captured_uap = subprocess.run(
+        [str(REPO_ROOT / "security-governance" / "iap-uap" / "apply-uap.sh"), "--dry-run"],
+        capture_output=True,
+        text=True,
+        check=False,
+        env={k: v for k, v in os.environ.items() if k != "GCP_LOCATION"},
+    )
+    assert captured_uap.returncode == 0, captured_uap.stderr
+    assert "/locations/asia-southeast3/agentGateways/" in captured_uap.stdout
+    assert "--quiet" in captured_uap.stdout

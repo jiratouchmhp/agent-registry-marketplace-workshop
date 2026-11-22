@@ -9,13 +9,41 @@ variable "project_id" {
 }
 
 variable "location" {
-  description = "Google Cloud region for Agent Registry Bindings, Agent Identity AuthProviders, Agent Gateway, KMS signing key, and regional audit bucket."
+  description = "Primary Google Cloud region for Agent Registry Bindings, IAP egressor IAM bindings, KMS asymmetric signing key, and regional audit log bucket (default: asia-southeast3, Bangkok)."
+  type        = string
+  default     = "asia-southeast3"
+
+  validation {
+    condition     = length(trimspace(var.location)) > 0
+    error_message = "location must be a non-empty Google Cloud region (for example, asia-southeast3)."
+  }
+}
+
+variable "auth_provider_location" {
+  description = "Google Cloud region for the Agent Identity AuthProvider (agentidentity.googleapis.com). Defaults to asia-southeast1 (Singapore), which is the verified APAC GA region for Agent Identity (Bangkok asia-southeast3 is not yet supported)."
+  type        = string
+  default     = "asia-southeast1"
+
+  validation {
+    condition     = length(trimspace(var.auth_provider_location)) > 0
+    error_message = "auth_provider_location must be a non-empty Google Cloud region supported by Agent Identity (for example, asia-southeast1)."
+  }
+}
+
+variable "enable_agent_gateway" {
+  description = "When true, provisions the Google-managed Network Services Agent Gateway. Defaults to false for APAC deployments because Network Services Agent Gateway on Cloud Run is currently GA only in us-central1 and europe-west1."
+  type        = bool
+  default     = false
+}
+
+variable "agent_gateway_location" {
+  description = "Google Cloud region for the optional Network Services Agent Gateway when enable_agent_gateway is true (currently GA in us-central1 and europe-west1)."
   type        = string
   default     = "us-central1"
 
   validation {
-    condition     = length(trimspace(var.location)) > 0
-    error_message = "location must be a non-empty Google Cloud region (for example, us-central1)."
+    condition     = length(trimspace(var.agent_gateway_location)) > 0
+    error_message = "agent_gateway_location must be a non-empty Google Cloud region supported by Network Services Agent Gateway (for example, us-central1 or europe-west1)."
   }
 }
 
@@ -110,7 +138,7 @@ variable "org_id" {
 }
 
 variable "audit_retention_days" {
-  description = "Retention period in days for the locked WORM Cloud Logging audit bucket (irreversible once locked = true is applied)."
+  description = "Retention period in days for the Cloud Logging audit bucket (irreversible once lock_audit_bucket = true is applied)."
   type        = number
   default     = 90
 
@@ -118,6 +146,16 @@ variable "audit_retention_days" {
     condition     = var.audit_retention_days >= 1 && var.audit_retention_days <= 3650
     error_message = "audit_retention_days must be between 1 and 3650 days."
   }
+}
+
+# WARNING: Set `lock_audit_bucket = true` in PRODUCTION for immutable WORM compliance!
+# Once `locked = true` is applied in Google Cloud, it is IRREVERSIBLE: retention cannot
+# be shortened and the bucket cannot be deleted until all log entries age out.
+# Defaults to `false` ONLY so ephemeral workshop sandboxes can run `terraform destroy` cleanly.
+variable "lock_audit_bucket" {
+  description = "Controls whether the Cloud Logging governance audit bucket is locked (WORM). WARNING: ALWAYS set true in production! Defaults to false so ephemeral workshop sandboxes can be cleanly destroyed."
+  type        = bool
+  default     = false
 }
 
 variable "auth_provider_id" {

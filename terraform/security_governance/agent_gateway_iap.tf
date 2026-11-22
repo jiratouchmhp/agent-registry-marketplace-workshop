@@ -5,10 +5,16 @@
 # Policy (`security-governance/iap-uap/mcp-tool-annotations-uap.json`) to enforce
 # tool-level annotation rules (`read_only_hint`, `destructive_hint`) at runtime.
 
+# Network Services Agent Gateway on Cloud Run is currently GA only in
+# `us-central1` and `europe-west1`. Keep `enable_agent_gateway = false` in APAC
+# deployments until regional GA expands, or set `enable_agent_gateway = true`
+# with `agent_gateway_location = "us-central1"` (or `"europe-west1"`).
 resource "google_network_services_agent_gateway" "marketplace" {
+  count = var.enable_agent_gateway ? 1 : 0
+
   project     = var.project_id
   name        = var.agent_gateway_name
-  location    = var.location
+  location    = var.agent_gateway_location
   description = "Google-managed Agent Gateway governing client-to-agent and MCP tool access via Agent Registry and IAP."
 
   google_managed {

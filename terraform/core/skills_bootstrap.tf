@@ -8,8 +8,9 @@
 #   (or `SkillRevision`) resource.
 #
 # Dual-source ingestion via `tools.plugin_sync ingest` (calling the GA Agent
-# Registry `v1` REST API `POST /v1/projects/{p}/locations/{l}/skills?skillId={id}`,
-# or equivalently `gcloud agent-registry skills create`):
+# Registry `v1` REST API `POST /v1/projects/{p}/locations/{skills_location}/skills?skillId={id}`,
+# where `skills_location` is `global`, `us`, or `eu`, while regional Services run
+# in `asia-southeast3` / `asia-southeast1`):
 #   - Option 1 (`skills_source_mode = "local"`, default):
 #     Publishes standalone skills from `starter_plugin_dir`
 #     (`starter-marketplace/plugins/gcp-finops-toolkit`) and, when
@@ -88,7 +89,8 @@ resource "terraform_data" "bootstrap_starter_skills" {
 
   triggers_replace = {
     project_id                     = var.project_id
-    location                       = var.location
+    location                       = local.agent_registry_location
+    skills_location                = var.skills_location
     skills_source_mode             = var.skills_source_mode
     plugin_dir                     = local.starter_plugin_path
     plugin_content_hash            = local.starter_plugin_content_hash
@@ -120,7 +122,9 @@ resource "terraform_data" "bootstrap_starter_skills" {
     environment = {
       PYTHONPATH                     = local.repo_root
       GCP_PROJECT_ID                 = var.project_id
-      GCP_LOCATION                   = var.location
+      GCP_LOCATION                   = local.agent_registry_location
+      AGENT_REGISTRY_LOCATION        = local.agent_registry_location
+      AGENT_REGISTRY_SKILLS_LOCATION = var.skills_location
       AGENT_REGISTRY_BASE_URL        = "https://agentregistry.googleapis.com/v1"
       SKILL_STAGING_BUCKET           = google_storage_bucket.skill_staging.name
       SKILLS_SOURCE_MODE             = var.skills_source_mode
@@ -155,15 +159,20 @@ resource "terraform_data" "bootstrap_starter_skills" {
         exit 1
       fi
 
-      # Publish ONLY standalone Skill resources via plugin-sync (Agent Registry v1 REST API).
+      # Publish ONLY standalone Skill resources via plugin-sync (Agent Registry v1 REST API)
+      # into AGENT_REGISTRY_SKILLS_LOCATION (global, us, or eu).
       # Passing --only-skills and --skip-mcp-probe guarantees agent_registry_services.tf
       # remains the sole Terraform owner of google_agent_registry_service resources.
+      # Passing --wait-for-scan ensures Terraform apply waits for live ENABLED_BLOCKING
+      # security scans to settle before outputting the middleware URL.
       COMMON_ARGS=(
         --registry-url "$AGENT_REGISTRY_BASE_URL"
         --project "$GCP_PROJECT_ID"
-        --location "$GCP_LOCATION"
+        --location "$AGENT_REGISTRY_SKILLS_LOCATION"
+        --skills-location "$AGENT_REGISTRY_SKILLS_LOCATION"
         --target-state TARGET_STATE_ACTIVE
         --scanning-policy ENABLED_BLOCKING
+        --wait-for-scan
         --only-skills
         --skip-mcp-probe
       )

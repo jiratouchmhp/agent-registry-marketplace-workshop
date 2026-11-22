@@ -4,7 +4,10 @@
   "project_defaults": {
     "project_id": "acme-agent-governance",
     "project_number": "123456789012",
-    "location": "us-central1",
+    "location": "asia-southeast3",
+    "secondary_location": "asia-southeast1",
+    "skills_location": "global",
+    "auth_provider_location": "asia-southeast1",
     "cmek_location": "us"
   },
   "ports": {
@@ -50,11 +53,14 @@
   "env_vars": {
     "AGENT_REGISTRY_BASE_URL": "http://127.0.0.1:8090/v1",
     "GCP_PROJECT_ID": "acme-agent-governance",
-    "GCP_LOCATION": "us-central1",
+    "GCP_LOCATION": "asia-southeast3",
+    "GCP_SECONDARY_LOCATION": "asia-southeast1",
+    "AGENT_REGISTRY_SKILLS_LOCATION": "global",
     "MIDDLEWARE_PUBLIC_URL": "http://127.0.0.1:8080",
     "REQUIRE_KMS_SIGNATURE": "true",
     "KMS_PUBLIC_KEY_PEM_PATH": "",
     "HUB_MIDDLEWARE_URL": "http://127.0.0.1:8080",
+    "HUB_FALLBACK_MIDDLEWARE_URL": "",
     "HUB_AUTH_TOKEN": ""
   },
   "agent_registry": {
@@ -65,21 +71,21 @@
     "private_skill_prefix": "private-"
   },
   "urns": {
-    "mcp_server": "urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server",
-    "agent": "urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent",
-    "endpoint": "urn:endpoint:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-billing-api",
+    "mcp_server": "urn:mcp:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-mcp-server",
+    "agent": "urn:agent:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-advisor-agent",
+    "endpoint": "urn:endpoint:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-billing-api",
     "skills": {
-      "cost-anomaly-triage": "urn:skill:projects-123456789012:locations:us-central1:private-cost-anomaly-triage",
-      "bq-query-optimizer": "urn:skill:projects-123456789012:locations:us-central1:private-bq-query-optimizer"
+      "cost-anomaly-triage": "urn:skill:projects-123456789012:locations:asia-southeast3:private-cost-anomaly-triage",
+      "bq-query-optimizer": "urn:skill:projects-123456789012:locations:asia-southeast3:private-bq-query-optimizer"
     }
   },
   "resource_names": {
-    "mcp_service": "projects/acme-agent-governance/locations/us-central1/services/finops-mcp-server",
-    "agent_service": "projects/acme-agent-governance/locations/us-central1/services/finops-advisor-agent",
-    "endpoint_service": "projects/acme-agent-governance/locations/us-central1/services/finops-billing-api",
+    "mcp_service": "projects/acme-agent-governance/locations/asia-southeast3/services/finops-mcp-server",
+    "agent_service": "projects/acme-agent-governance/locations/asia-southeast3/services/finops-advisor-agent",
+    "endpoint_service": "projects/acme-agent-governance/locations/asia-southeast3/services/finops-billing-api",
     "skills": {
-      "cost-anomaly-triage": "projects/acme-agent-governance/locations/us-central1/skills/private-cost-anomaly-triage",
-      "bq-query-optimizer": "projects/acme-agent-governance/locations/us-central1/skills/private-bq-query-optimizer"
+      "cost-anomaly-triage": "projects/acme-agent-governance/locations/asia-southeast3/skills/private-cost-anomaly-triage",
+      "bq-query-optimizer": "projects/acme-agent-governance/locations/asia-southeast3/skills/private-bq-query-optimizer"
     }
   },
   "marketplace_defaults": {

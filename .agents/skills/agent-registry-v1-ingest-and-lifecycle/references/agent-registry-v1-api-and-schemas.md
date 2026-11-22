@@ -10,7 +10,9 @@ Deep technical reference for **Google Cloud Agent Registry (`v1` GA)** (`agentre
 - **REST Base:** `https://agentregistry.googleapis.com/v1` (Local Workshop Mock: `http://127.0.0.1:8090/v1`, resettable via `POST http://127.0.0.1:8090/_mock/reset`)
 - **Per-Product Per-Project Service Agent (P4SA):** `service-${PROJECT_NUMBER}@gcp-sa-agentregistry.iam.gserviceaccount.com`
   - Required for importing `gcsSource` skill ZIPs (`roles/storage.objectViewer` on the GCS staging bucket) and CMEK at-rest encryption (`roles/cloudkms.cryptoKeyEncrypterDecrypter`).
-- **Locations:** `global` (mandatory for auto-discovered Google/GCP remote MCP servers), multi-regions `us` and `eu`, plus regional locations (e.g., `us-central1`, `europe-west1`).
+- **Verified Live Regional Split (Locations):**
+  - **Regional `Services` (`McpServer`, `Agent`, `Endpoint`) & `Bindings`:** Bangkok (`asia-southeast3`, primary) and Singapore (`asia-southeast1`, secondary/DR), plus other regional endpoints such as `us-central1`, `europe-west1` (and `global` for auto-discovered Google/GCP remote MCP servers).
+  - **Standalone `Skills` (`Skill`, `SkillRevision`, `Findings`):** Hosted **only** in **`global`** (default for APAC — shared seamlessly by Bangkok & Singapore Middleware, filtering to `private-*` skills) or multi-regions **`us`** / **`eu`** (required for CMEK `SkillEncryptionSpec`). Single regions (`asia-southeast3` / `asia-southeast1`) do not host live standalone Skills. *(Local `mock_registry` accepts regional locations for offline drills.)*
 - **No Generic `labels` Map:** `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, and `Skill` reject any `labels` field with `400 INVALID_ARGUMENT`. Store plugin/provenance attributes exclusively in `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only).
 
 ### Canonical `SKILL.md` `frontmatter.metadata` Provenance Keys
@@ -52,7 +54,7 @@ Creating a `Service` returns a Long-Running Operation (`operations/{opId}`) and 
 | Spec Block | Allowed `type` | Top-Level `interfaces` | `content` Contract |
 |---|---|---|---|
 | `mcpServerSpec` | `"TOOL_SPEC"` \| `"NO_SPEC"` | Required (`url`, `protocolBinding`: `"JSONRPC"` \| `"HTTP_JSON"` \| `"GRPC"`) | For `TOOL_SPEC`: `{"tools": [{name, description, inputSchema, annotations: {title, readOnlyHint, destructiveHint, idempotentHint, openWorldHint}}]}` (≤ 10 KB). Empty for `NO_SPEC`. |
-| `agentSpec` | `"A2A_AGENT_CARD"` \| `"NO_SPEC"` | **MUST be empty/omitted** for `A2A_AGENT_CARD`; required for `NO_SPEC` | For `A2A_AGENT_CARD`: A2A v1.0 Agent Card JSON with `name`, `supportedInterfaces` (`url`, `protocolBinding`, `protocolVersion`), `capabilities`, `defaultInputModes`, `defaultOutputModes`, `skills[]` (≤ 10 KB). |
+| `agentSpec` | `"A2A_AGENT_CARD"` \| `"NO_SPEC"` | **MUST be empty/omitted** for `A2A_AGENT_CARD`; required for `NO_SPEC` | For `A2A_AGENT_CARD`: A2A v1.0 Agent Card JSON with `name`, `supportedInterfaces` (unique `url` per binding — e.g. `/a2a` for `JSONRPC` and `/a2a/http` for `HTTP+JSON`; duplicate URLs return `400 INVALID_ARGUMENT`), `capabilities` (`streaming`, `pushNotifications` ONLY — legacy v0.x `stateTransitionHistory` fails proto unmarshal with `400 INVALID_ARGUMENT`), `defaultInputModes`, `defaultOutputModes`, `skills[]` (≤ 10 KB). |
 | `endpointSpec` | `"NO_SPEC"` | Required (`url`, `protocolBinding`) | Must be empty. Use `endpointSpec` (not `agentSpec: NO_SPEC`) for non-agent REST/SaaS APIs so governance policies classify them as `Endpoint`. |
 
 ### B. Read-Only Discovery & Search Endpoints
@@ -76,8 +78,8 @@ Standalone skills are top-level resources (no `Service` wrapper). Creating `?ski
 | Create Revision | `POST /v1/{PARENT}/skills/private-{rawId}/revisions?skillRevisionId={revId}` | `{"archiveUploadSource": {"archiveContent": "<base64-zip>"}}` or `{"gcsSource": {"uri": "gs://..."}}`. Immutable snapshot with server-computed `sha256Hash`, `sizeBytes`, `scanResult`. |
 | Describe / List Revisions | `GET /v1/{PARENT}/skills/private-{rawId}/revisions[/{revId}]` | Check `scanResult.scanState` and `scanResult.findings[]` before promoting. |
 | Update / Promote / Rollback | `PATCH /v1/{PARENT}/skills/private-{rawId}?updateMask=defaultRevision,targetState` | Set `defaultRevision` to full revision name `projects/{p}/locations/{l}/skills/private-{id}/revisions/{revId}` for atomic promotion or rollback. |
-| Download ZIP (`?alt=media`) | `GET /v1/{PARENT}/skills/private-{rawId}/revisions/{revId}?alt=media` | Returns **HTTP 302** to a short-lived GCS signed URL. Clients MUST follow redirects **and strip `Authorization` + all `x-goog-*` headers** on cross-origin redirect (`curl -L` works; naive `httpx` forwarding headers gets HTTP 403). |
-| Delete Skill | `DELETE /v1/{PARENT}/skills/private-{rawId}?force=true` | `?force=true` is **required** whenever one or more revisions exist. |
+| Download ZIP (`?alt=media`) | `GET /v1/{PARENT}/skills/private-{rawId}/revisions/{revId}?alt=media` | Returns **HTTP 302**: live Agent Registry redirects to same-origin authenticated `/download/v1/...?alt=media` (preserve `Authorization` strictly on same-origin `/download/...` without signed params to avoid `401 CREDENTIALS_MISSING`), whereas cross-origin or signed-URL redirects (`storage.googleapis.com` / `/scotty-signed/` / `X-Goog-Signature`) require stripping `Authorization` AND all `x-goog-*` headers (otherwise HTTP 403). |
+| Delete Skill | `DELETE /v1/{PARENT}/skills/private-{rawId}?force=true` | `?force=true` is **required** whenever one or more revisions exist (pass `Authorization` + `x-goog-user-project` headers; note `gcloud agent-registry skills delete` has **no `--force` flag**). |
 
 ### D. `agentskills.io` ZIP Package Rules (Validated Pre-Upload by `tools/plugin_sync/sync.py`)
 
@@ -94,11 +96,11 @@ Invoke via `.venv/bin/python -m tools.plugin_sync <command>`.
 
 | Subcommand | Purpose | Key Flags & Env Vars |
 |---|---|---|
-| `ingest` | Unified Option 1 (`local`) & Option 2 (`git`) auto-discovery & sync across all 5 repo layouts | `--source-type [local\|git]` (auto-inferred), `--path <dir>`, `--repo-url <url>`, `--ref <branch\|tag\|sha>`, `--subdir <rel-path>`, `--git-token-env <ENV_NAME>`, `--plugin-name`, `--plugin-display-name`, `--plugin-version` (default `1.0.0`), `--per-skill-plugin`, `--only-skills`, `--registry-url` (`AGENT_REGISTRY_BASE_URL`), `--project` (`GCP_PROJECT_ID`), `--location` (`GCP_LOCATION`, default `us-central1`), `--target-state` (default `TARGET_STATE_ACTIVE`), `--scanning-policy` (default `ENABLED_BLOCKING`), `--source-repo`, `--git-commit`, `--sign-pem`, `--kms-key-version`, `--auth-token` (`AGENT_REGISTRY_AUTH_TOKEN`), `--output-dir`, `--skip-mcp-probe`, `--dry-run` |
-| `sync` | Sync a single Agent Plugins 1.0 directory (skills + MCP/A2A services) | `--plugin-dir <dir>` (required), plus the same registry, target-state, scanning-policy, provenance, signing, `--output-dir`, `--skip-mcp-probe`, and `--dry-run` flags |
+| `ingest` | Unified Option 1 (`local`) & Option 2 (`git`) auto-discovery & sync across all 5 repo layouts | `--source-type [local\|git]` (auto-inferred), `--path <dir>`, `--repo-url <url>`, `--ref <branch\|tag\|sha>`, `--subdir <rel-path>`, `--git-token-env <ENV_NAME>`, `--plugin-name`, `--plugin-display-name`, `--plugin-version` (default `1.0.0`), `--per-skill-plugin`, `--only-skills`, `--registry-url` (`AGENT_REGISTRY_BASE_URL`), `--project` (`GCP_PROJECT_ID`), `--location` (`GCP_LOCATION`, default `asia-southeast3`), `--skills-location` (`AGENT_REGISTRY_SKILLS_LOCATION`, live default `global` or `us`/`eu`), `--target-state` (default `TARGET_STATE_ACTIVE`), `--scanning-policy` (default `ENABLED_BLOCKING`), `--wait-for-scan`, `--source-repo`, `--git-commit`, `--sign-pem`, `--kms-key-version`, `--auth-token` (`AGENT_REGISTRY_AUTH_TOKEN`), `--output-dir`, `--skip-mcp-probe`, `--dry-run` |
+| `sync` | Sync a single Agent Plugins 1.0 directory (skills + MCP/A2A services) | `--plugin-dir <dir>` (required), plus the same registry, `--location`, `--skills-location`, target-state, scanning-policy, `--wait-for-scan`, provenance, signing, `--output-dir`, `--skip-mcp-probe`, and `--dry-run` flags |
 | `verify` | Verify embedded ECDSA P-256 `kms_signature` in a packaged skill ZIP | `--skill-zip <path>` (required), `--public-key-pem <path>` (required) |
 
-> **Auth Resolution Order (`_resolve_bearer_token`):** `--auth-token` → `AGENT_REGISTRY_AUTH_TOKEN` → `GOOGLE_OAUTH_ACCESS_TOKEN` → `gcloud auth print-access-token` (automatically called only for `googleapis.com` URLs).
+> **Auth, Re-Deploy Scan Race & Quota Header Resolution (`_resolve_bearer_token`):** `--auth-token` → `AGENT_REGISTRY_AUTH_TOKEN` → `GOOGLE_OAUTH_ACCESS_TOKEN` → `gcloud auth print-access-token --quiet` (automatically called only for `googleapis.com` URLs, which also automatically receive `x-goog-user-project: <project>`). Pass **`--wait-for-scan`** in live GCP runs so `ENABLED_BLOCKING` async LLM scans settle on **both** initial creates (`STATE_DRAFT` → `STATE_ACTIVE`) **and** idempotent re-deploys (`wait_for_revision_scan_completion()` polls the new `SkillRevision` `scanState` ~10s before `PATCH defaultRevision`, preventing `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results`).
 
 ---
 
@@ -106,66 +108,73 @@ Invoke via `.venv/bin/python -m tools.plugin_sync <command>`.
 
 ```bash
 # Enable API & create P4SA if needed
-gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}"
-gcloud beta services identity create --service=agentregistry.googleapis.com --project="${GCP_PROJECT_ID}"
+gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet
+gcloud beta services identity create --service=agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet
 
 # Register Services manually (spec flags are mutually exclusive; <= 10 KB spec content)
 gcloud agent-registry services create finops-advisor-agent \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --quiet \
   --display-name="GCP FinOps Advisor" \
   --agent-spec-type=a2a-agent-card \
   --agent-spec-content=starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor/agent-card.json
 
 gcloud agent-registry services create finops-billing-api \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --quiet \
   --display-name="FinOps Cloud Billing API Endpoint" \
   --endpoint-spec-type=no-spec \
   --interfaces="url=https://cloudbilling.googleapis.com/v1,protocolBinding=http-json"
 
 # Inspect writable Service & projected read-only resources
-gcloud agent-registry services describe finops-advisor-agent --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
-gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
-gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
-gcloud agent-registry endpoints list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --filter='displayName:"FinOps"'
+gcloud agent-registry services describe finops-advisor-agent --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --quiet
+gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
+gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
+gcloud agent-registry endpoints list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --filter='displayName:"FinOps"' --quiet
 
-# Search (note: --search-type is ONLY valid on `skills search`)
-gcloud agent-registry agents search --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --search-string="finops"
-gcloud agent-registry mcp-servers search --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --search-string="billing"
-gcloud agent-registry skills search --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
-  --query="cost anomaly triage" --search-type=semantic
+# Search (note: --search-type is ONLY valid on `skills search`; live Skills live in global / us / eu!)
+export AGENT_REGISTRY_SKILLS_LOCATION="${AGENT_REGISTRY_SKILLS_LOCATION:-global}"
+gcloud agent-registry agents search --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --search-string="finops" --quiet
+gcloud agent-registry mcp-servers search --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --search-string="billing" --quiet
+gcloud agent-registry skills search --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --query="cost anomaly triage" --search-type=semantic --quiet
 
 # Standalone Skill create (local ZIP or --gcs-source-uri="gs://BUCKET/skill.zip"), revision, promote, download, IAM, delete
 gcloud agent-registry skills create cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet \
   --display-name="Cost Anomaly Triage" --description="Diagnose GCP Cloud Billing spend spikes." \
   --target-state=disabled --scanning-policy=enabled-blocking --payload="/tmp/cost-anomaly-triage.zip"
 
 # Use private- prefix on ALL post-create calls!
-gcloud agent-registry skills describe private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
+gcloud agent-registry skills describe private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet
 gcloud agent-registry skills revisions create v2 \
-  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
-  --payload="/tmp/cost-anomaly-triage-v2.zip"
+  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --payload="/tmp/cost-anomaly-triage-v2.zip" --quiet
 gcloud agent-registry skills revisions describe v2 \
-  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
+  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet
 gcloud agent-registry skills update private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
-  --default-revision="projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/skills/private-cost-anomaly-triage/revisions/v2" \
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet \
+  --default-revision="projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION}/skills/private-cost-anomaly-triage/revisions/v2" \
   --target-state=ACTIVE
 gcloud agent-registry skills revisions download v2 \
-  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
-  --destination="/tmp/extracted" --allow-overwrite
+  --skill=private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --destination="/tmp/extracted" --allow-overwrite --quiet
 
 # Per-Skill IAM & Findings triage (both require roles/agentregistry.admin)
 gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet \
   --member="serviceAccount:agent-marketplace-middleware@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
   --role="roles/agentregistry.viewer"
-gcloud agent-registry findings list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
-  --filter="resource=\"projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/skills/private-cost-anomaly-triage/revisions/v2\""
-gcloud agent-registry findings describe FINDING_ID --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --format=json
+gcloud agent-registry findings list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --limit=50 --quiet \
+  --filter="resource=\"projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION}/skills/private-cost-anomaly-triage/revisions/v2\""
+gcloud agent-registry findings describe FINDING_ID --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --format=json --quiet
 
-# Delete skill & all revisions
-gcloud agent-registry skills delete private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
+# Delete skill with NO revisions via gcloud (note: gcloud skills delete has NO --force flag!)
+gcloud agent-registry skills delete private-cost-anomaly-triage --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION}" --quiet
+
+# Delete skill WITH revisions via REST v1 ?force=true (with Authorization + x-goog-user-project)
+curl -fsSL -X DELETE \
+  -H "Authorization: Bearer $(gcloud auth print-access-token --quiet)" \
+  -H "x-goog-user-project: ${GCP_PROJECT_ID}" \
+  "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION}/skills/private-cost-anomaly-triage?force=true"
 ```
 
 ---
@@ -212,7 +221,7 @@ resource "google_agent_registry_service" "finops_a2a_agent" {
       name                = "GCP FinOps Advisor"
       version             = "1.0.0"
       supportedInterfaces = [{ url = "${google_cloud_run_v2_service.sample_a2a_agent.uri}/a2a", protocolBinding = "JSONRPC", protocolVersion = "1.0" }]
-      capabilities        = { streaming = false, pushNotifications = false, stateTransitionHistory = true }
+      capabilities        = { streaming = false, pushNotifications = false }
       defaultInputModes   = ["text/plain", "application/json"]
       defaultOutputModes  = ["text/plain", "application/json"]
       skills              = [{ id = "cost-anomaly-triage", name = "Cost Anomaly Triage", description = "..." }]
@@ -246,6 +255,7 @@ data "google_agent_registry_endpoint" "finops_endpoint" {
 
 | Terraform Variable (`terraform/core/variables.tf`) | Default | Purpose & Validation |
 |---|---|---|
+| `skills_location` | `"global"` | Multi-region location for standalone Skills (`"global"`, `"us"`, or `"eu"`) shared across Bangkok/Singapore |
 | `enable_skills_bootstrap` | `true` | Set `false` when GitLab CI exclusively publishes skills |
 | `skills_source_mode` | `"local"` | `"local"` (Option 1) or `"git"` (Option 2) |
 | `starter_plugin_dir` | `"../../starter-marketplace/plugins/gcp-finops-toolkit"` | Starter plugin ingested in `local` mode |
@@ -260,7 +270,7 @@ data "google_agent_registry_endpoint" "finops_endpoint" {
 | `skills_per_skill_plugin` | `false` | Passes `--per-skill-plugin` to emit 1 logical plugin per standalone skill |
 | `skills_bootstrap_command` | `""` | Optional custom shell command override |
 
-> **Ownership Guarantee:** `skills_bootstrap.tf` **always** passes `--only-skills --skip-mcp-probe` to `tools.plugin_sync ingest`, so `agent_registry_services.tf` remains the sole owner of `google_agent_registry_service` Cloud Run endpoints. `terraform/core/iam.tf` also provisions `google_storage_bucket.skill_staging` and grants `roles/storage.objectViewer` to the Agent Registry P4SA for `gcsSource` imports.
+> **Ownership Guarantee:** `skills_bootstrap.tf` **always** passes `--only-skills --skip-mcp-probe --wait-for-scan` to `tools.plugin_sync ingest`, so `agent_registry_services.tf` remains the sole owner of `google_agent_registry_service` Cloud Run endpoints and async scans settle cleanly. `terraform/core/iam.tf` also provisions `google_storage_bucket.skill_staging` and grants `roles/storage.objectViewer` to the Agent Registry P4SA for `gcsSource` imports.
 
 ---
 

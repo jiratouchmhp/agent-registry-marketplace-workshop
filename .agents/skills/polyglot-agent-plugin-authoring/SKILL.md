@@ -54,7 +54,7 @@ What are you authoring or validating?
 | **4** | Name every skill manifest strictly uppercase `SKILL.md` with frontmatter `name == <parent-dir>` (`^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$`, no `--`), `description` 1-1024 chars, scalar `map<string, string>` `metadata`, compressed ZIP `<= 1 MB` (`<= 500 KB` inline target), uncompressed `<= 10 MB` (`<= 1 MB`/file), depth `<= 8`, zero symlinks. | Use lowercase `skill.md`, nested duplicate `SKILL.md`, mismatched folder/frontmatter names, YAML lists/objects inside `metadata`, or symlinks. | Both Antigravity and Agent Registry `v1` (`tools.plugin_sync.sync.validate_skill_zip`) hard-reject case/name mismatches, symlinks, oversize ZIPs, and non-string metadata (Agent Registry `v1` has no generic `labels` map, so provenance relies on string `metadata`). |
 | **5** | Put always-on rules in `rules/AGENTS.md` and scoped rules in `rules/<name>.md` using `trigger: always_on\|model_decision\|glob\|manual` with `globs` as a **comma-separated string** (`globs: "**/*.sql, **/*.tf"`). | Rely on root `AGENTS.md` for Antigravity or write `globs: ["**/*.sql", "**/*.tf"]` as a YAML list. | Antigravity ignores root `AGENTS.md`, and a YAML array for `globs` fails both `validate_antigravity_bundle` and Antigravity rule parsing. |
 | **6** | Wrap `hooks.json` in a named top-level group (`"policy-guard": {"enabled": true, ...}`), use `matcher`+`hooks` wrappers ONLY for `PreToolUse`/`PostToolUse` and flat handler arrays for `Stop`/`SessionStart`/`PreInvocation`/`PostInvocation`, invoke `./scripts/...` relative paths ONLY, `chmod 0755 scripts/*`, and return exit `0` + JSON stdout on allow/structured decisions (or non-zero + stderr message, e.g. exit `2`, to block). | Put bare `PreToolUse`/`Stop`/`hooks` at top level, wrap `Stop` in `matcher`/`hooks`, use `${PLUGIN_ROOT}` / `${CLAUDE_PLUGIN_ROOT}` / bare `scripts/`, or commit `0644` scripts. | Antigravity executes hooks relative to plugin root without env-var expansion, rejects bare event roots and mismatched event wrappers, and fails to run non-executable scripts (`0644`). |
-| **7** | Author A2A v1.0 cards at `agents/<slug>/agent-card.json` `<= 10 KB` (`10,240` bytes compact JSON) with `name`, non-empty `supportedInterfaces`, `capabilities`, `defaultInputModes`, `defaultOutputModes`, and `skills[]`. | Exceed 10 KB, omit required A2A v1.0 fields, or duplicate endpoints in top-level Service `interfaces` when registering `A2A_AGENT_CARD`. | Agent Registry `v1` caps `agentSpec.content` at 10 KB and rejects `A2A_AGENT_CARD` services with non-empty top-level `interfaces`. |
+| **7** | Author A2A v1.0 cards at `agents/<slug>/agent-card.json` `<= 10 KB` (`10,240` bytes compact JSON) with `name`, non-empty `supportedInterfaces` using **unique URLs per binding** (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`), A2A v1.0 `capabilities` (`streaming`, `pushNotifications` only), `defaultInputModes`, `defaultOutputModes`, and `skills[]`. | Exceed 10 KB, include legacy A2A v0.x `capabilities.stateTransitionHistory`, assign duplicate URLs across `supportedInterfaces`, or duplicate endpoints in top-level Service `interfaces` when registering `A2A_AGENT_CARD`. | Live Agent Registry `v1` caps `agentSpec.content` at 10 KB and returns `400 INVALID_ARGUMENT` on non-empty top-level `interfaces`, unknown field `stateTransitionHistory`, or `duplicate interface url found in agent card` (enforced locally in `mock_registry` and `tools.plugin_sync`). |
 
 ## Quick-Start Patterns
 
@@ -183,10 +183,10 @@ Run these checks before opening a PR/MR or moving to Agent Registry ingestion:
    .venv/bin/python -m tools.plugin_sync sync \
      --plugin-dir "${PLUGIN_DIR:-starter-marketplace/plugins/gcp-finops-toolkit}" \
      --project "${GCP_PROJECT_ID:-acme-agent-governance}" \
-     --location "${GCP_LOCATION:-us-central1}" \
+     --location "${GCP_LOCATION:-asia-southeast3}" \
      --skip-mcp-probe --dry-run
    ```
-5. **Repo schema regression suite passes:** `.venv/bin/pytest -v tests/test_schemas.py` reports 0 failures.
+5. **Repo schema regression suite & starter check pass (zero Docker):** `.venv/bin/pytest -v tests/test_schemas.py` and `make starter-check` report 0 failures.
 6. **Antigravity CLI CI gate passes (when `agy` is available):** Pattern 4 exits `0` with `true` from `jq -e`.
 
 ## Reference Guides

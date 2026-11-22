@@ -8,21 +8,31 @@
 # Supply auth_provider_client_secret via environment variable:
 #   export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
 
-project_id    = "acme-agent-governance"
-location      = "us-central1"
-cmek_location = "us" # Use "us" for Skills in `us`, or "europe" for Skills in `eu`
+project_id = "acme-agent-governance"
+
+# Primary region: Bangkok (asia-southeast3) for Agent Registry Bindings, IAP, KMS signing key, and audit logs.
+# Agent Identity AuthProvider region: Singapore (asia-southeast1) — verified APAC GA region for agentidentity.googleapis.com.
+location               = "asia-southeast3"
+auth_provider_location = "asia-southeast1"
+cmek_location          = "us" # Use "us" for Skills in `us`, or "europe" for Skills in `eu`
 
 # Identities (from `terraform/core` outputs or existing project service accounts)
 middleware_sa_email   = "agent-marketplace-middleware@acme-agent-governance.iam.gserviceaccount.com"
 ci_publisher_sa_email = "agent-registry-ci-publisher@acme-agent-governance.iam.gserviceaccount.com"
 
-# Registered Agent Registry MCP server and A2A agent identifiers
+# Registered Agent Registry MCP server and A2A agent identifiers (Bangkok: asia-southeast3)
 # Tip: Run `terraform -chdir=../core output` to retrieve live projected IDs & URNs.
 mcp_server_resource_id = "finops-mcp-server"
-mcp_server_urn         = "urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server"
+mcp_server_urn         = "urn:mcp:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-mcp-server"
 
 a2a_agent_resource_id = "finops-advisor-agent"
-a2a_agent_urn         = "urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent"
+a2a_agent_urn         = "urn:agent:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-advisor-agent"
+
+# Optional Network Services Agent Gateway:
+# Defaults to false for APAC because Agent Gateway on Cloud Run is currently GA
+# only in us-central1 and europe-west1.
+enable_agent_gateway   = false
+agent_gateway_location = "us-central1"
 
 # Optional CMEK SkillEncryptionSpec attachment:
 # Keep false if ANY Skill already exists in the target multi-region (`us`/`eu`),
@@ -33,5 +43,9 @@ enable_cmek_spec = false
 enable_org_policy = false
 org_id            = ""
 
-# Locked WORM audit bucket retention (irreversible once locked = true is applied):
+# Audit bucket retention & WORM lock:
+# WARNING: Set `lock_audit_bucket = true` in PRODUCTION for immutable WORM logs!
+# Once locked, retention cannot be reduced and the bucket cannot be deleted until logs age out.
+# Keep false ONLY in ephemeral workshop sandboxes for clean `terraform destroy`.
 audit_retention_days = 90
+lock_audit_bucket    = false

@@ -112,13 +112,13 @@ make demo-sync-repo \
 # 3. Emit 1 plugin per standalone skill directly from local-skills/ (skipping Services)
 .venv/bin/python -m tools.plugin_sync ingest \
   --source-type local --path local-skills --per-skill-plugin --only-skills \
-  --registry-url http://127.0.0.1:8090/v1 --project acme-agent-governance --location us-central1
+  --registry-url http://127.0.0.1:8090/v1 --project acme-agent-governance --location asia-southeast3
 
 # 4. Fully offline Option 2 Git clone-and-ingest smoke test (no internet or token needed)
 .venv/bin/python -m tools.plugin_sync ingest \
   --source-type git --repo-url /tmp/central-skills-repo --ref main --subdir skills \
   --plugin-name central-sec-toolkit --only-skills --dry-run \
-  --project acme-agent-governance --location us-central1
+  --project acme-agent-governance --location asia-southeast3
 ```
 
 ---
@@ -153,8 +153,8 @@ Fallback order if not using WIF: `AGENT_REGISTRY_AUTH_TOKEN` → `GOOGLE_OAUTH_A
 | `PLUGINS_DIR` | Optional *(auto-detected)* | Leave empty to auto-detect `plugins` (standalone) or `starter-marketplace/plugins` (monorepo); set explicitly for custom folder paths (e.g., `catalog/plugins`) |
 | `GCP_WORKLOAD_IDENTITY_PROVIDER` | **Yes** *(live GCP keyless auth)* | Full WIF provider path: `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/<POOL>/providers/<PROVIDER>` |
 | `GCP_SERVICE_ACCOUNT_EMAIL` | **Yes** *(live GCP keyless auth)* | Least-privilege CI publisher SA (`roles/agentregistry.editor` + `roles/cloudkms.signerVerifier`): `agent-registry-ci-publisher@<PROJECT_ID>.iam.gserviceaccount.com` |
-| `GCP_PROJECT_ID` / `GCP_LOCATION` | **Yes** *(override defaults)* | Target catalog project ID and region (defaults: `acme-agent-governance` / `us-central1`) |
+| `GCP_PROJECT_ID` / `GCP_LOCATION` / `AGENT_REGISTRY_SKILLS_LOCATION` | **Yes** *(override defaults)* | Target catalog project ID, regional Services location (`asia-southeast3`), and standalone Skills location (`global` default for APAC, or `us`/`eu` for CMEK) |
 | `KMS_SIGNING_KEY_VERSION` | Recommended *(production signing)* | Cloud KMS `EC_SIGN_P256_SHA256` CryptoKeyVersion resource name (`projects/.../cryptoKeyVersions/1`); overrides `SIGNING_KEY_PEM_PATH` |
 | `AGENT_REGISTRY_BASE_URL` / `SCANNING_POLICY` | Optional | Defaults: `https://agentregistry.googleapis.com/v1` and `ENABLED_BLOCKING` |
 
-> **Ownership Tip for Production CI:** When Terraform (`terraform/core/agent_registry_services.tf`) owns Cloud Run `google_agent_registry_service` registrations, replace `tools.plugin_sync sync` in `.gitlab-ci.yml` with `tools.plugin_sync ingest --source-type local --path "${plugin_dir}" --only-skills --skip-mcp-probe` (and set `enable_skills_bootstrap = false` in `terraform/core/terraform.tfvars`) so Terraform exclusively manages `Service` endpoints while GitLab CI exclusively manages `Skill` revisions.
+> **Ownership & Re-Deploy Scan Tip for Production CI:** When Terraform (`terraform/core/agent_registry_services.tf`) owns Cloud Run `google_agent_registry_service` registrations, replace `tools.plugin_sync sync` in `.gitlab-ci.yml` with `tools.plugin_sync ingest --source-type local --path "${plugin_dir}" --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --wait-for-scan --only-skills --skip-mcp-probe` (and set `enable_skills_bootstrap = false` in `terraform/core/terraform.tfvars`) so Terraform exclusively manages regional `Service` endpoints while GitLab CI exclusively manages `global` (or `us`/`eu`) `Skill` revisions without hitting `ENABLED_BLOCKING` pending-scan promotion errors.

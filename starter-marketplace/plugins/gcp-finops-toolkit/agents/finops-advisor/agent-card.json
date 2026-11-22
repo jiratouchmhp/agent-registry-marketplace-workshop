@@ -13,15 +13,14 @@
       "protocolVersion": "1.0"
     },
     {
-      "url": "http://127.0.0.1:8092/a2a",
+      "url": "http://127.0.0.1:8092/a2a/http",
       "protocolBinding": "HTTP+JSON",
       "protocolVersion": "1.0"
     }
   ],
   "capabilities": {
     "streaming": false,
-    "pushNotifications": false,
-    "stateTransitionHistory": true
+    "pushNotifications": false
   },
   "defaultInputModes": [
     "text/plain",

@@ -1,0 +1,27 @@
+# Zero-Docker Cloud Build configuration for Sample FinOps MCP Server.
+# Submit from repository root:
+#   gcloud builds submit --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" \
+#     --default-buckets-behavior=regional-user-owned-bucket \
+#     --config=cloudbuild/sample-mcp-server.yaml \
+#     --substitutions=_IMAGE_URI="${GCP_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/agent-marketplace/sample-mcp-server:1.0.0" \
+#     . --quiet
+
+steps:
+  - id: build-sample-mcp-server-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - samples/mcp-server/Dockerfile
+      - -t
+      - ${_IMAGE_URI}
+      - samples/mcp-server
+
+images:
+  - ${_IMAGE_URI}
+
+substitutions:
+  _IMAGE_URI: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY

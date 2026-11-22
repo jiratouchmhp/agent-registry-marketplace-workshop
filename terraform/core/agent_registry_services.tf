@@ -17,7 +17,7 @@
 
 resource "google_agent_registry_service" "finops_mcp" {
   project         = var.project_id
-  location        = var.location
+  location        = local.agent_registry_location
   service_id      = "finops-mcp-server"
   display_name    = "FinOps Cost & BigQuery MCP Server"
   description     = "Governed MCP server exposing read-only Cloud Billing and BigQuery SQL analysis tools alongside a destructive idle BigQuery dataset deletion tool with explicit MCP tool annotations."
@@ -135,7 +135,7 @@ resource "google_agent_registry_service" "finops_mcp" {
 
 resource "google_agent_registry_service" "finops_a2a_agent" {
   project         = var.project_id
-  location        = var.location
+  location        = local.agent_registry_location
   service_id      = "finops-advisor-agent"
   display_name    = "GCP FinOps Advisor"
   description     = "Enterprise A2A v1.0 FinOps specialist that analyzes GCP Cloud Billing anomalies, BigQuery query efficiency, and safe cost-remediation plans."
@@ -160,15 +160,14 @@ resource "google_agent_registry_service" "finops_a2a_agent" {
           protocolVersion = "1.0"
         },
         {
-          url             = "${google_cloud_run_v2_service.sample_a2a_agent.uri}/a2a"
+          url             = "${google_cloud_run_v2_service.sample_a2a_agent.uri}/a2a/http"
           protocolBinding = "HTTP+JSON"
           protocolVersion = "1.0"
         },
       ]
       capabilities = {
-        streaming              = false
-        pushNotifications      = false
-        stateTransitionHistory = true
+        streaming         = false
+        pushNotifications = false
       }
       defaultInputModes  = ["text/plain", "application/json"]
       defaultOutputModes = ["text/plain", "application/json"]
@@ -206,7 +205,7 @@ resource "google_agent_registry_service" "finops_a2a_agent" {
 
 resource "google_agent_registry_service" "finops_endpoint" {
   project         = var.project_id
-  location        = var.location
+  location        = local.agent_registry_location
   service_id      = "finops-billing-api"
   display_name    = "FinOps Cloud Billing API Endpoint"
   description     = "External Cloud Billing REST API endpoint registered for governed agent egress policies."
@@ -230,18 +229,18 @@ resource "google_agent_registry_service" "finops_endpoint" {
 
 data "google_agent_registry_mcp_server" "finops_mcp" {
   project       = var.project_id
-  location      = var.location
+  location      = local.agent_registry_location
   mcp_server_id = basename(google_agent_registry_service.finops_mcp.registry_resource)
 }
 
 data "google_agent_registry_agent" "finops_a2a_agent" {
   project  = var.project_id
-  location = var.location
+  location = local.agent_registry_location
   agent_id = basename(google_agent_registry_service.finops_a2a_agent.registry_resource)
 }
 
 data "google_agent_registry_endpoint" "finops_endpoint" {
   project     = var.project_id
-  location    = var.location
+  location    = local.agent_registry_location
   endpoint_id = basename(google_agent_registry_service.finops_endpoint.registry_resource)
 }

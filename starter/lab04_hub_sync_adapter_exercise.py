@@ -89,17 +89,20 @@ def safe_merge_antigravity_mcp_config(
 
 
 def _run_self_check() -> None:
-    """Offline self-check harness verifying all 4 safety invariants for Lab 04."""
+    """Offline self-check harness verifying all safety invariants for Lab 04."""
     print("Lab 04 Self-Check")
+    passed = 0
+    total = 3
+
     with tempfile.TemporaryDirectory() as tmp:
         target = Path(tmp) / "nested" / "mcp_config.json"
         try:
             atomic_write_json(target, {"mcpServers": {"ok": {"url": "http://127.0.0.1:8091/mcp"}}})
             assert json.loads(target.read_text(encoding="utf-8"))["mcpServers"]["ok"]["url"]
             print("  [PASS] atomic_write_json")
+            passed += 1
         except NotImplementedError as exc:
             print(f"  [TODO] {exc}")
-            return
 
     existing = {
         "mcpServers": {
@@ -132,7 +135,11 @@ def _run_self_check() -> None:
         assert "retired-enterprise-mcp" in partial_doc["mcpServers"]
         assert "retired-enterprise-mcp" in partial_owned
         print("  [PASS] partial failure preserves existing installations")
+        passed += 1
+    except NotImplementedError as exc:
+        print(f"  [TODO] {exc} (partial-failure preservation check)")
 
+    try:
         # 2. Clean sync (catalog_complete=True) updates URL, preserves user server + disabled flags, prunes retired
         clean_doc, clean_owned = safe_merge_antigravity_mcp_config(
             existing, desired, prev_owned, catalog_complete=True
@@ -146,12 +153,15 @@ def _run_self_check() -> None:
         assert "retired-enterprise-mcp" not in servers
         assert clean_owned == {"finops-mcp-server"}
         print("  [PASS] clean sync preserves user configs & prunes retired entries safely")
+        passed += 1
     except NotImplementedError as exc:
-        print(f"  [TODO] {exc}")
-        return
+        print(f"  [TODO] {exc} (clean-sync merge & prune check)")
 
     _ = (copy, os)
-    print("  [DONE] All Lab 04 checks passed!")
+    if passed == total:
+        print(f"  [DONE] Progress: {passed}/{total} checks passed — all Lab 04 checks passed!")
+    else:
+        print(f"  [INFO] Progress: {passed}/{total} checks passed")
 
 
 if __name__ == "__main__":

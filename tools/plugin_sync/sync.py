@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 import zipfile
@@ -35,7 +36,7 @@ from schemas.validators import (
     validate_skill_md,
 )
 
-# Agent Registry v1 archive limits (VERIFIED_SPECS.md & skill.proto)
+# Agent Registry v1 archive limits
 MAX_ZIP_COMPRESSED_BYTES = 1 * 1024 * 1024  # 1 MB hard limit
 INLINE_ZIP_RECOMMENDED_BYTES = 500 * 1024  # 500 KB recommended for archiveUploadSource
 MAX_ZIP_UNCOMPRESSED_BYTES = 10 * 1024 * 1024  # 10 MB total uncompressed
@@ -60,6 +61,26 @@ VALID_SCANNING_POLICIES = frozenset(
     {"ENABLED_BLOCKING", "ENABLED_NONBLOCKING", "DISABLED"}
 )
 SERVICE_ID_SANITIZE_RE = re.compile(r"[^a-z0-9-]+")
+RESOURCE_PROJECT_RE = re.compile(r"^/?projects/([^/]+)/")
+IN_PROGRESS_SCAN_STATES = frozenset(
+    {
+        "",
+        "SCAN_STATE_UNSPECIFIED",
+        "UNSPECIFIED",
+        "PENDING",
+        "SCAN_STATE_PENDING",
+        "QUEUED",
+        "SCAN_STATE_QUEUED",
+        "RUNNING",
+        "SCAN_STATE_RUNNING",
+        "IN_PROGRESS",
+    }
+)
+
+
+def _extract_project_from_resource_name(resource_name: str) -> str | None:
+    match = RESOURCE_PROJECT_RE.match(resource_name.strip())
+    return match.group(1) if match else None
 
 
 class PluginSyncError(Exception):
@@ -113,10 +134,15 @@ class SyncPlan:
     location: str
     target_state: str
     scanning_policy: str
+    skills_location: str | None = None
     skills: list[PackagedSkill] = field(default_factory=list)
     mcp_services: list[PackagedService] = field(default_factory=list)
     agent_services: list[PackagedService] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+
+    @property
+    def effective_skills_location(self) -> str:
+        return (self.skills_location or "").strip() or self.location
 
 
 def canonical_private_skill_id(skill_id: str) -> str:
@@ -462,6 +488,9 @@ def sign_digest_with_kms(
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    quota_project = _extract_project_from_resource_name(kms_key_version)
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
 
     url = f"{kms_base_url.rstrip('/')}/{kms_key_version.lstrip('/')}:asymmetricSign"
     payload = {"digest": {"sha256": base64.b64encode(digest).decode("ascii")}}
@@ -861,11 +890,23 @@ def _validate_a2a_agent_card(card: dict[str, Any], source_label: str) -> None:
         raise PluginSyncError(
             f"A2A agent card {source_label} 'supportedInterfaces' must be a non-empty list"
         )
+    caps = card.get("capabilities")
+    if isinstance(caps, dict) and "stateTransitionHistory" in caps:
+        raise PluginSyncError(
+            f"A2A agent card {source_label} capabilities contains unsupported A2A v0.x field 'stateTransitionHistory'"
+        )
+    seen_urls: set[str] = set()
     for idx, iface in enumerate(card["supportedInterfaces"]):
         if not isinstance(iface, dict) or not isinstance(iface.get("url"), str) or not iface["url"].strip():
             raise PluginSyncError(
                 f"A2A agent card {source_label} supportedInterfaces[{idx}].url must be non-empty"
             )
+        iface_url = iface["url"].strip()
+        if iface_url in seen_urls:
+            raise PluginSyncError(
+                f"A2A agent card {source_label} has duplicate supportedInterfaces url: {iface_url}"
+            )
+        seen_urls.add(iface_url)
 
 
 def _detect_git_commit(plugin_dir: Path) -> str:
@@ -886,24 +927,32 @@ def _detect_git_commit(plugin_dir: Path) -> str:
 
 
 def _resolve_bearer_token(url: str) -> str | None:
-    """Resolve Bearer token from env var or gcloud ADC for googleapis.com endpoints."""
-    env_token = os.environ.get("AGENT_REGISTRY_AUTH_TOKEN") or os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN")
+    """Resolve Bearer token from env var or gcloud CLI for googleapis.com endpoints."""
+    env_token = (
+        os.environ.get("AGENT_REGISTRY_AUTH_TOKEN", "").strip()
+        or os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    )
     if env_token:
-        return env_token.strip()
-    if "googleapis.com" not in url:
+        return env_token
+    if "googleapis.com" not in url.lower():
         return None
-    try:
-        proc = subprocess.run(
-            ["gcloud", "auth", "print-access-token"],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if proc.returncode == 0 and proc.stdout.strip():
-            return proc.stdout.strip()
-    except Exception:
-        pass
+    gcloud_bin = shutil.which("gcloud") or str(Path.home() / ".local" / "bin" / "gcloud")
+    for cmd in (
+        [gcloud_bin, "auth", "print-access-token", "--quiet"],
+        [gcloud_bin, "auth", "application-default", "print-access-token", "--quiet"],
+    ):
+        try:
+            proc = subprocess.run(
+                cmd,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                return proc.stdout.strip()
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
+            continue
     return None
 
 
@@ -912,6 +961,7 @@ def build_sync_plan(
     *,
     project: str,
     location: str,
+    skills_location: str | None = None,
     target_state: str = "TARGET_STATE_ACTIVE",
     scanning_policy: str = "ENABLED_BLOCKING",
     source_repo: str | None = None,
@@ -973,6 +1023,7 @@ def build_sync_plan(
         git_commit=resolved_git_commit,
         project=project,
         location=location,
+        skills_location=(skills_location.strip() if isinstance(skills_location, str) and skills_location.strip() else None),
         target_state=target_state,
         scanning_policy=scanning_policy,
     )
@@ -1164,6 +1215,182 @@ def poll_operation(
     return response if isinstance(response, dict) else op
 
 
+def wait_for_skill_scan_completion(
+    client: httpx.Client,
+    registry_url: str,
+    skill_resource_path: str,
+    *,
+    headers: dict[str, str],
+    timeout_seconds: float = 90.0,
+    poll_interval: float = 3.0,
+) -> dict[str, Any]:
+    """Poll a Skill resource until async security scanning completes or times out.
+
+    Polls `GET .../skills/private-{id}` (and its `defaultRevision` / `latestRevision`
+    if present) until:
+      - `skill.state == "STATE_ACTIVE"` (or another non-DRAFT state) -> returns immediately
+      - `scanState` is `FAILED` / `UNSUPPORTED_FORMAT`, OR `scanState == "SUCCEEDED"` with
+        findings > 0 (blocking findings detected) -> returns immediately
+      - When `scanState == "SUCCEEDED"` with 0 findings while `skill.state == "STATE_DRAFT"`,
+        keeps polling until `skill.state` transitions to `STATE_ACTIVE` or `timeout_seconds`
+        elapses (live GCP takes ~1-3s after scan completion to promote `STATE_DRAFT` ->
+        `STATE_ACTIVE`).
+    """
+    base = registry_url.rstrip("/")
+    cleaned_path = skill_resource_path.lstrip("/")
+    started = time.monotonic()
+    deadline = started + max(0.0, timeout_seconds)
+
+    latest_skill: dict[str, Any] = {}
+    latest_revision: dict[str, Any] | None = None
+    final_state = ""
+    scan_state = ""
+    findings: list[Any] = []
+
+    while True:
+        resp = client.get(f"{base}/{cleaned_path}", headers=headers)
+        if resp.status_code >= 400:
+            raise RegistryApiError(
+                f"Failed polling skill scan status for '{cleaned_path}' "
+                f"({resp.status_code}): {resp.text}"
+            )
+        latest_skill = resp.json()
+        final_state = str(latest_skill.get("state") or "")
+        latest_revision = None
+        scan_state = ""
+        findings = []
+
+        default_rev = str(
+            latest_skill.get("defaultRevision") or latest_skill.get("latestRevision") or ""
+        ).strip()
+        if default_rev:
+            rev_resp = client.get(f"{base}/{default_rev.lstrip('/')}", headers=headers)
+            if rev_resp.status_code == 200:
+                latest_revision = rev_resp.json()
+                scan_result = latest_revision.get("scanResult")
+                if isinstance(scan_result, dict):
+                    scan_state = str(scan_result.get("scanState") or "")
+                    raw_findings = scan_result.get("findings")
+                    if isinstance(raw_findings, list):
+                        findings = raw_findings
+
+        if final_state == "STATE_ACTIVE" or (final_state and final_state != "STATE_DRAFT"):
+            return {
+                "skill": latest_skill,
+                "revision": latest_revision,
+                "final_state": final_state,
+                "scan_state": scan_state,
+                "findings": findings,
+                "scan_wait_seconds": round(time.monotonic() - started, 3),
+                "timed_out": False,
+            }
+
+        finding_count = max(
+            len(findings),
+            int(latest_skill.get("defaultRevisionFindingCount") or 0),
+        )
+        normalized_scan = scan_state.upper()
+        if normalized_scan in {
+            "FAILED",
+            "SCAN_STATE_FAILED",
+            "UNSUPPORTED_FORMAT",
+            "SCAN_STATE_UNSUPPORTED_FORMAT",
+        } or (
+            normalized_scan in {"SUCCEEDED", "SCAN_STATE_SUCCEEDED"} and finding_count > 0
+        ):
+            return {
+                "skill": latest_skill,
+                "revision": latest_revision,
+                "final_state": final_state,
+                "scan_state": scan_state,
+                "findings": findings,
+                "scan_wait_seconds": round(time.monotonic() - started, 3),
+                "timed_out": False,
+            }
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {
+                "skill": latest_skill,
+                "revision": latest_revision,
+                "final_state": final_state,
+                "scan_state": scan_state,
+                "findings": findings,
+                "scan_wait_seconds": round(time.monotonic() - started, 3),
+                "timed_out": True,
+            }
+        time.sleep(min(poll_interval, remaining))
+
+
+def wait_for_revision_scan_completion(
+    client: httpx.Client,
+    registry_url: str,
+    revision_resource_path: str,
+    *,
+    headers: dict[str, str],
+    timeout_seconds: float = 90.0,
+    poll_interval: float = 3.0,
+) -> dict[str, Any]:
+    """Poll a SkillRevision until async security scanning completes or times out.
+
+    Under ``ENABLED_BLOCKING``, Agent Registry rejects ``PATCH Skill`` setting
+    ``defaultRevision`` to a revision whose scan is still pending/running.
+    """
+    base = registry_url.rstrip("/")
+    cleaned_path = revision_resource_path.lstrip("/")
+    started = time.monotonic()
+    deadline = started + max(0.0, timeout_seconds)
+
+    latest_revision: dict[str, Any] = {}
+    scan_state = ""
+    findings: list[Any] = []
+
+    while True:
+        resp = client.get(f"{base}/{cleaned_path}", headers=headers)
+        if resp.status_code >= 400:
+            raise RegistryApiError(
+                f"Failed polling revision scan status for '{cleaned_path}' "
+                f"({resp.status_code}): {resp.text}"
+            )
+        latest_revision = resp.json()
+        scan_result = latest_revision.get("scanResult")
+        scan_state = ""
+        findings = []
+        if isinstance(scan_result, dict):
+            scan_state = str(scan_result.get("scanState") or "")
+            raw_findings = scan_result.get("findings")
+            if isinstance(raw_findings, list):
+                findings = raw_findings
+
+        normalized_scan = scan_state.upper()
+        if normalized_scan in {
+            "SUCCEEDED",
+            "SCAN_STATE_SUCCEEDED",
+            "FAILED",
+            "SCAN_STATE_FAILED",
+            "UNSUPPORTED_FORMAT",
+            "SCAN_STATE_UNSUPPORTED_FORMAT",
+        }:
+            return {
+                "revision": latest_revision,
+                "scan_state": scan_state,
+                "findings": findings,
+                "scan_wait_seconds": round(time.monotonic() - started, 3),
+                "timed_out": False,
+            }
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return {
+                "revision": latest_revision,
+                "scan_state": scan_state,
+                "findings": findings,
+                "scan_wait_seconds": round(time.monotonic() - started, 3),
+                "timed_out": True,
+            }
+        time.sleep(min(poll_interval, remaining))
+
+
 def _build_skill_create_payload(
     skill: PackagedSkill, *, target_state: str, scanning_policy: str
 ) -> dict[str, Any]:
@@ -1203,10 +1430,15 @@ def apply_sync_plan(
     output_dir: str | Path | None = None,
     http_client: httpx.Client | None = None,
     poll_interval: float = 0.2,
+    wait_for_scan: bool = False,
+    scan_timeout: float = 90.0,
+    scan_poll_interval: float = 3.0,
 ) -> dict[str, Any]:
     """Execute (or dry-run) a SyncPlan against Google Cloud Agent Registry v1 REST API."""
     base = registry_url.rstrip("/")
     parent = f"projects/{plan.project}/locations/{plan.location}"
+    skills_loc = plan.effective_skills_location
+    skills_parent = f"projects/{plan.project}/locations/{skills_loc}"
 
     if output_dir is not None:
         out_path = Path(output_dir)
@@ -1219,6 +1451,7 @@ def apply_sync_plan(
         "plugin_version": plan.plugin_version,
         "project": plan.project,
         "location": plan.location,
+        "skills_location": skills_loc,
         "registry_url": base,
         "dry_run": dry_run,
         "target_state": plan.target_state,
@@ -1236,7 +1469,7 @@ def apply_sync_plan(
                     "action": "dry_run",
                     "raw_skill_id": skill.raw_skill_id,
                     "private_skill_id": skill.private_skill_id,
-                    "resource_name": f"{parent}/skills/{skill.private_skill_id}",
+                    "resource_name": f"{skills_parent}/skills/{skill.private_skill_id}",
                     "zip_bytes": len(skill.zip_bytes),
                     "sha256_hex": skill.sha256_hex,
                     "unsigned_sha256_hex": skill.unsigned_sha256_hex,
@@ -1273,17 +1506,55 @@ def apply_sync_plan(
     headers: dict[str, str] = {"Content-Type": "application/json", "Accept": "application/json"}
     if token:
         headers["Authorization"] = f"Bearer {token}"
+    if "googleapis.com" in base.lower() and plan.project:
+        headers["x-goog-user-project"] = plan.project
 
     close_client = http_client is None
     client = http_client or httpx.Client(timeout=60.0)
+
+    def _finalize_skill_entry(
+        entry: dict[str, Any],
+        response_obj: dict[str, Any],
+        resource_path: str,
+    ) -> dict[str, Any]:
+        current_state = str(response_obj.get("state") or "")
+        if (
+            wait_for_scan
+            and plan.target_state == "TARGET_STATE_ACTIVE"
+            and plan.scanning_policy == "ENABLED_BLOCKING"
+            and current_state == "STATE_DRAFT"
+        ):
+            wait_result = wait_for_skill_scan_completion(
+                client,
+                base,
+                resource_path,
+                headers=headers,
+                timeout_seconds=scan_timeout,
+                poll_interval=scan_poll_interval,
+            )
+            entry["final_state"] = wait_result["final_state"]
+            entry["scan_wait_seconds"] = wait_result["scan_wait_seconds"]
+            entry["scan_state"] = wait_result["scan_state"]
+            entry["scan_timed_out"] = wait_result["timed_out"]
+            entry["response"] = wait_result["skill"]
+            if wait_result["timed_out"]:
+                summary["warnings"].append(
+                    f"Timed out after {scan_timeout}s waiting for security scan on "
+                    f"'{resource_path}' (state={wait_result['final_state']!r}, "
+                    f"scanState={wait_result['scan_state']!r})."
+                )
+        elif wait_for_scan:
+            entry["final_state"] = current_state
+            entry["scan_wait_seconds"] = 0.0
+        return entry
     try:
         # 1. Sync Skills (handling private- prefixing on GET/POST revisions/PATCH)
         for skill in plan.skills:
-            skill_resource_path = f"{parent}/skills/{skill.private_skill_id}"
+            skill_resource_path = f"{skills_parent}/skills/{skill.private_skill_id}"
             get_resp = client.get(f"{base}/{skill_resource_path}", headers=headers)
 
             if get_resp.status_code == 404:
-                create_url = f"{base}/{parent}/skills"
+                create_url = f"{base}/{skills_parent}/skills"
                 create_payload = _build_skill_create_payload(
                     skill,
                     target_state=plan.target_state,
@@ -1308,15 +1579,19 @@ def apply_sync_plan(
                         client, base, post_resp.json(), headers=headers, poll_interval=poll_interval
                     )
                     summary["skills"].append(
-                        {
-                            "action": "created",
-                            "raw_skill_id": skill.raw_skill_id,
-                            "private_skill_id": skill.private_skill_id,
-                            "resource_name": created.get("name", skill_resource_path),
-                            "sha256_hex": skill.sha256_hex,
-                            "signed": skill.kms_signature is not None,
-                            "response": created,
-                        }
+                        _finalize_skill_entry(
+                            {
+                                "action": "created",
+                                "raw_skill_id": skill.raw_skill_id,
+                                "private_skill_id": skill.private_skill_id,
+                                "resource_name": created.get("name", skill_resource_path),
+                                "sha256_hex": skill.sha256_hex,
+                                "signed": skill.kms_signature is not None,
+                                "response": created,
+                            },
+                            created,
+                            created.get("name", skill_resource_path),
+                        )
                     )
                     continue
 
@@ -1349,6 +1624,22 @@ def apply_sync_plan(
                 )
                 revision_name = rev_result.get("name", revision_name)
 
+            rev_scan_wait: dict[str, Any] | None = None
+            if wait_for_scan and plan.scanning_policy == "ENABLED_BLOCKING":
+                rev_scan_wait = wait_for_revision_scan_completion(
+                    client,
+                    base,
+                    revision_name,
+                    headers=headers,
+                    timeout_seconds=scan_timeout,
+                    poll_interval=scan_poll_interval,
+                )
+                if rev_scan_wait["timed_out"]:
+                    summary["warnings"].append(
+                        f"Timed out after {scan_timeout}s waiting for revision scan on "
+                        f"'{revision_name}' (scanState={rev_scan_wait['scan_state']!r})."
+                    )
+
             patch_payload = {
                 "displayName": skill.display_name,
                 "description": skill.description,
@@ -1372,17 +1663,25 @@ def apply_sync_plan(
             updated = poll_operation(
                 client, base, patch_resp.json(), headers=headers, poll_interval=poll_interval
             )
+            updated_entry: dict[str, Any] = {
+                "action": "updated",
+                "raw_skill_id": skill.raw_skill_id,
+                "private_skill_id": skill.private_skill_id,
+                "resource_name": updated.get("name", skill_resource_path),
+                "revision_name": revision_name,
+                "sha256_hex": skill.sha256_hex,
+                "signed": skill.kms_signature is not None,
+                "response": updated,
+            }
+            if rev_scan_wait is not None:
+                updated_entry["revision_scan_state"] = rev_scan_wait["scan_state"]
+                updated_entry["revision_scan_wait_seconds"] = rev_scan_wait["scan_wait_seconds"]
             summary["skills"].append(
-                {
-                    "action": "updated",
-                    "raw_skill_id": skill.raw_skill_id,
-                    "private_skill_id": skill.private_skill_id,
-                    "resource_name": updated.get("name", skill_resource_path),
-                    "revision_name": revision_name,
-                    "sha256_hex": skill.sha256_hex,
-                    "signed": skill.kms_signature is not None,
-                    "response": updated,
-                }
+                _finalize_skill_entry(
+                    updated_entry,
+                    updated,
+                    updated.get("name", skill_resource_path),
+                )
             )
 
         # 2. Sync MCP Services & A2A Agent Services

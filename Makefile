@@ -7,13 +7,20 @@ PYTHON ?= .venv/bin/python
 PYTEST ?= .venv/bin/pytest
 TERRAFORM ?= terraform
 HCLFMT ?= hclfmt
+STRICT_HCL ?= false
 
-# Workshop defaults aligned with WORKSHOP_SPEC.json
+# Workshop defaults aligned with WORKSHOP_SPEC.json (Bangkok primary + Singapore secondary)
 AGENT_REGISTRY_BASE_URL ?= http://127.0.0.1:8090/v1
 GCP_PROJECT_ID ?= acme-agent-governance
-GCP_LOCATION ?= us-central1
+GCP_LOCATION ?= asia-southeast3
+GCP_SECONDARY_LOCATION ?= asia-southeast1
+AGENT_REGISTRY_SKILLS_LOCATION ?= global
+ENABLE_SECONDARY ?= false
+ARTIFACT_REGISTRY_REPO ?= agent-marketplace
+IMAGE_TAG ?= 1.0.0
 MIDDLEWARE_PUBLIC_URL ?= http://127.0.0.1:8080
 HUB_MIDDLEWARE_URL ?= http://127.0.0.1:8080
+HUB_FALLBACK_MIDDLEWARE_URL ?=
 REQUIRE_KMS_SIGNATURE ?= false
 KMS_PUBLIC_KEY_PEM_PATH ?=
 SIGNING_KEY_PEM_PATH ?=
@@ -27,24 +34,56 @@ SKILLS_REPO_SUBDIR ?= local-skills
 SKILLS_REPO_PLUGIN_NAME ?= central-repo-skills
 SKILLS_REPO_TOKEN_ENV ?=
 TF_PLAN_ARGS ?=
+GCP_BUILD_ARGS ?=
+GCP_DEPLOY_ARGS ?=
+GCP_VALIDATE_ARGS ?=
+GCP_DESTROY_ARGS ?=
 
-.PHONY: help test test-e2e validate-hcl run-mock run-samples run-middleware \
-	demo-sync demo-sync-local demo-sync-repo demo-hub-sync tf-core-plan tf-sec-plan
+.PHONY: help preflight starter-check test test-e2e validate-hcl \
+	run-local-stack smoke-local run-mock run-samples run-middleware \
+	demo-sync demo-sync-local demo-sync-repo demo-hub-sync \
+	gcp-build gcp-deploy gcp-validate gcp-destroy \
+	tf-core-plan tf-sec-plan
 
 help:
 	@echo "Enterprise Agent Marketplace Workshop — Available Targets:"
-	@echo "  make test            Run all unit and integration tests"
-	@echo "  make test-e2e        Run end-to-end integration tests"
-	@echo "  make validate-hcl    Verify Terraform HCL formatting across terraform/"
-	@echo "  make run-mock        Start Mock Agent Registry v1 API on http://127.0.0.1:8090"
-	@echo "  make run-samples     Start FinOps MCP server (:8091) and A2A agent (:8092)"
-	@echo "  make run-middleware  Start Polyglot Marketplace Middleware on http://127.0.0.1:8080"
-	@echo "  make demo-sync       Sync gcp-finops-toolkit into Agent Registry (mock or live)"
-	@echo "  make demo-sync-local Option 1: Ingest starter plugin + local-skills/ ($(LOCAL_SKILLS_PLUGIN_NAME))"
-	@echo "  make demo-sync-repo  Option 2: Shallow-clone & ingest SKILLS_REPO_URL into Agent Registry"
-	@echo "  make demo-hub-sync   Hydrate local demo HOME ($(HUB_DEMO_HOME)) for all 4 IDEs"
-	@echo "  make tf-core-plan    Run terraform init & plan for terraform/core (Workstream A)"
-	@echo "  make tf-sec-plan     Run terraform init & plan for terraform/security_governance (Workstream B)"
+	@echo ""
+	@echo "Setup, Preflight & Tests:"
+	@echo "  make preflight        Check Python 3.12+, .venv, git, curl, gcloud, and optional tools"
+	@echo "  make starter-check    Validate starter exercises (Labs 01-04) offline"
+	@echo "  make test             Run all unit and integration tests"
+	@echo "  make test-e2e         Run end-to-end integration tests"
+	@echo "  make validate-hcl     Verify Terraform HCL formatting (Track 3; set STRICT_HCL=true in CI)"
+	@echo ""
+	@echo "Zero-Docker Local Stack (Default: $(GCP_LOCATION)):"
+	@echo "  make smoke-local      Run self-contained zero-Docker end-to-end smoke test (isolated ports)"
+	@echo "  make run-local-stack  Launch all 4 local services in one terminal with health checks"
+	@echo "  make run-mock         Start Mock Agent Registry v1 API on http://127.0.0.1:8090"
+	@echo "  make run-samples      Start FinOps MCP server (:8091) and A2A agent (:8092)"
+	@echo "  make run-middleware   Start Polyglot Marketplace Middleware on http://127.0.0.1:8080"
+	@echo ""
+	@echo "Ingestion & IDE Hydration:"
+	@echo "  make demo-sync        Sync gcp-finops-toolkit into Agent Registry (mock or live)"
+	@echo "  make demo-sync-local  Option 1: Ingest starter plugin + local-skills/ ($(LOCAL_SKILLS_PLUGIN_NAME))"
+	@echo "  make demo-sync-repo   Option 2: Shallow-clone & ingest SKILLS_REPO_URL into Agent Registry"
+	@echo "  make demo-hub-sync    Hydrate local demo HOME ($(HUB_DEMO_HOME)) for all 4 IDEs"
+	@echo ""
+	@echo "Zero-Docker / Zero-Terraform Live GCP ($(GCP_LOCATION) + optional $(GCP_SECONDARY_LOCATION)):"
+	@echo "  (Pass ENABLE_SECONDARY=true to deploy/validate/destroy Bangkok + Singapore together)"
+	@echo "  make gcp-build        Build & push workshop images via Cloud Build (zero local Docker)"
+	@echo "  make gcp-deploy       Deploy Cloud Run + Agent Registry v1 + Skills (zero Terraform)"
+	@echo "  make gcp-validate     Validate live GCP deployment end-to-end as an attendee"
+	@echo "  make gcp-destroy      Tear down all workshop GCP resources + zero-leftover audit"
+	@echo ""
+	@echo "Optional Terraform IaC Track:"
+	@echo "  make tf-core-plan     Run terraform init & plan for terraform/core (Workstream A)"
+	@echo "  make tf-sec-plan      Run terraform init & plan for terraform/security_governance (Workstream B)"
+
+preflight:
+	./scripts/preflight_check.sh
+
+starter-check:
+	$(PYTHON) scripts/check_starter.py
 
 test:
 	$(PYTEST) -v
@@ -62,10 +101,26 @@ validate-hcl:
 			terraform/security_governance/*.tf \
 			terraform/security_governance/terraform.tfvars.example > /dev/null; \
 		echo "hclfmt check passed for terraform/core and terraform/security_governance."; \
-	else \
+	elif [ "$(STRICT_HCL)" = "true" ]; then \
 		echo "ERROR: Neither $(TERRAFORM) nor $(HCLFMT) found on PATH." >&2; \
 		exit 1; \
+	else \
+		echo "[SKIP] Neither $(TERRAFORM) nor $(HCLFMT) found on PATH — skipping HCL check (Track 3 Terraform IaC only; set STRICT_HCL=true to fail in CI)."; \
 	fi
+
+run-local-stack:
+	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+	GCP_LOCATION="$(GCP_LOCATION)" \
+	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
+	REQUIRE_KMS_SIGNATURE="$(REQUIRE_KMS_SIGNATURE)" \
+	KMS_PUBLIC_KEY_PEM_PATH="$(KMS_PUBLIC_KEY_PEM_PATH)" \
+	./scripts/run_local_stack.sh
+
+smoke-local:
+	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
+	GCP_LOCATION="$(GCP_LOCATION)" \
+	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
+	./scripts/local_smoke_test.sh
 
 run-mock:
 	$(PYTHON) -m uvicorn mock_registry.app:app --host 127.0.0.1 --port 8090
@@ -85,6 +140,7 @@ run-middleware:
 	AGENT_REGISTRY_BASE_URL="$(AGENT_REGISTRY_BASE_URL)" \
 	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 	GCP_LOCATION="$(GCP_LOCATION)" \
+	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
 	MIDDLEWARE_PUBLIC_URL="$(MIDDLEWARE_PUBLIC_URL)" \
 	REQUIRE_KMS_SIGNATURE="$(REQUIRE_KMS_SIGNATURE)" \
 	KMS_PUBLIC_KEY_PEM_PATH="$(KMS_PUBLIC_KEY_PEM_PATH)" \
@@ -151,12 +207,68 @@ demo-sync-repo:
 	$(PYTHON) -m tools.plugin_sync ingest "$$@"
 
 demo-hub-sync:
-	$(PYTHON) -m tools.hub_sync sync \
+	@set -eu; \
+	set -- \
 		--middleware-url "$(HUB_MIDDLEWARE_URL)" \
 		--home "$(HUB_DEMO_HOME)" \
 		--tools all \
-		--no-exec
+		--no-exec; \
+	if [ -n "$(HUB_FALLBACK_MIDDLEWARE_URL)" ]; then \
+		set -- "$$@" --fallback-middleware-url "$(HUB_FALLBACK_MIDDLEWARE_URL)"; \
+	fi; \
+	$(PYTHON) -m tools.hub_sync sync "$$@"; \
 	$(PYTHON) -m tools.hub_sync status --home "$(HUB_DEMO_HOME)"
+
+gcp-build:
+	@set -eu; \
+	set -- \
+		--project "$(GCP_PROJECT_ID)" \
+		--region "$(GCP_LOCATION)" \
+		--repo "$(ARTIFACT_REGISTRY_REPO)" \
+		--tag "$(IMAGE_TAG)"; \
+	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
+		set -- "$$@" --secondary-region "$(GCP_SECONDARY_LOCATION)"; \
+	fi; \
+	./scripts/build_images_cloudbuild.sh "$$@" $(GCP_BUILD_ARGS)
+
+gcp-deploy:
+	@set -eu; \
+	set -- \
+		--project "$(GCP_PROJECT_ID)" \
+		--primary-region "$(GCP_LOCATION)" \
+		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
+		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)" \
+		--repo "$(ARTIFACT_REGISTRY_REPO)" \
+		--tag "$(IMAGE_TAG)"; \
+	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
+		set -- "$$@" --enable-secondary; \
+	fi; \
+	./scripts/deploy_gcp.sh "$$@" $(GCP_DEPLOY_ARGS)
+
+gcp-validate:
+	@set -eu; \
+	set -- \
+		--project "$(GCP_PROJECT_ID)" \
+		--primary-region "$(GCP_LOCATION)" \
+		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
+		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)"; \
+	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
+		set -- "$$@" --enable-secondary; \
+	fi; \
+	./scripts/validate_live_gcp.sh "$$@" $(GCP_VALIDATE_ARGS)
+
+gcp-destroy:
+	@set -eu; \
+	set -- \
+		--project "$(GCP_PROJECT_ID)" \
+		--primary-region "$(GCP_LOCATION)" \
+		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
+		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)" \
+		--repo "$(ARTIFACT_REGISTRY_REPO)"; \
+	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
+		set -- "$$@" --enable-secondary; \
+	fi; \
+	./scripts/destroy_gcp.sh "$$@" $(GCP_DESTROY_ARGS)
 
 tf-core-plan:
 	@command -v $(TERRAFORM) >/dev/null 2>&1 || { echo "ERROR: terraform CLI not installed." >&2; exit 1; }

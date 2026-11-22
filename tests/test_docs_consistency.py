@@ -37,6 +37,10 @@ EXPECTED_LAB_FILES: tuple[str, ...] = (
 
 REQUIRED_MAKE_TARGETS: frozenset[str] = frozenset(
     {
+        "preflight",
+        "starter-check",
+        "smoke-local",
+        "run-local-stack",
         "test",
         "test-e2e",
         "validate-hcl",
@@ -47,6 +51,10 @@ REQUIRED_MAKE_TARGETS: frozenset[str] = frozenset(
         "demo-sync-local",
         "demo-sync-repo",
         "demo-hub-sync",
+        "gcp-build",
+        "gcp-deploy",
+        "gcp-validate",
+        "gcp-destroy",
         "tf-core-plan",
         "tf-sec-plan",
     }
@@ -118,6 +126,7 @@ def test_required_curriculum_files_exist_and_non_empty() -> None:
         MAKEFILE_PATH,
         LOCAL_SKILLS_DIR / "README.md",
         *(LOCAL_SKILLS_DIR / name / "SKILL.md" for name in EXPECTED_LOCAL_SKILL_NAMES),
+        DOCS_DIR / "attendee-quickstart.md",
         DOCS_DIR / "customer-usecase-3-brief.md",
         DOCS_DIR / "architecture.md",
         *(LABS_DIR / name for name in EXPECTED_LAB_FILES),
@@ -223,11 +232,12 @@ def test_all_python_dash_m_modules_are_importable() -> None:
 
 
 def test_readme_links_workstreams_and_all_labs() -> None:
-    """README.md links executive brief, architecture, starter, local-skills, and all 9 lab guides."""
+    """README.md links quickstart, executive brief, architecture, starter, local-skills, and all 9 lab guides."""
     readme = README_PATH.read_text(encoding="utf-8")
     assert "```mermaid" in readme
     assert "Workstream A" in readme
     assert "Workstream B" in readme
+    assert "docs/attendee-quickstart.md" in readme
     assert "docs/customer-usecase-3-brief.md" in readme
     assert "docs/architecture.md" in readme
     assert "starter/README.md" in readme
@@ -353,3 +363,48 @@ def test_no_invalid_gcloud_builds_file_flag_or_double_url_prefix() -> None:
             f"{md_file.relative_to(REPO_ROOT)} prepends a scheme/host onto ${{SIGNED_LOC}} "
             "(Location header is already an absolute URL)"
         )
+
+
+def test_docs_use_consistent_track_1_2_3_naming() -> None:
+    """All workshop docs consistently use Track 1 / Track 2 / Track 3 (never drifted Track A / Track B)."""
+    drift_re = re.compile(r"\bTrack [AB]\b")
+    for md_file in _all_doc_markdown_files():
+        text = md_file.read_text(encoding="utf-8")
+        assert not drift_re.search(text), (
+            f"{md_file.relative_to(REPO_ROOT)} uses drifted 'Track A'/'Track B' naming instead of Track 1/2/3"
+        )
+
+
+def test_live_apac_regional_split_and_findings_documented_consistently() -> None:
+    """Core docs and key labs consistently document the live Bangkok/Singapore/global split and live gotchas."""
+    quickstart = (DOCS_DIR / "attendee-quickstart.md").read_text(encoding="utf-8")
+    arch = (DOCS_DIR / "architecture.md").read_text(encoding="utf-8")
+    lab02 = (LABS_DIR / "02-register-agent-registry.md").read_text(encoding="utf-8")
+    lab03 = (LABS_DIR / "03-build-deploy-middleware.md").read_text(encoding="utf-8")
+    lab06 = (LABS_DIR / "06-governance-scanning-lifecycle.md").read_text(encoding="utf-8")
+    lab08 = (LABS_DIR / "08-access-control-and-audit.md").read_text(encoding="utf-8")
+
+    # Verified live regional split: Bangkok + Singapore regional Services + global Skills
+    for name, doc in (
+        ("attendee-quickstart.md", quickstart),
+        ("architecture.md", arch),
+        ("02-register-agent-registry.md", lab02),
+        ("03-build-deploy-middleware.md", lab03),
+    ):
+        for token in ("asia-southeast3", "asia-southeast1", "global", "private-"):
+            assert token in doc, f"{name} missing live regional split token: {token}"
+
+    # Live-discovered A2A v1.0 & ENABLED_BLOCKING scan-race gotchas in Lab 02
+    for token in ("stateTransitionHistory", "/a2a/http", "--wait-for-scan", "--skills-location"):
+        assert token in lab02, f"Lab 02 missing live finding documentation: {token}"
+
+    # Live Cloud Run GFE /healthz -> /health, same-origin /download/v1/ redirect, and concurrency in Lab 03
+    for token in ("/health", "/download/v1/", "CREDENTIALS_MISSING", "Semaphore(8)"):
+        assert token in lab03, f"Lab 03 missing live finding documentation: {token}"
+
+    # Workstream B standalone Skills in global + APAC AuthProvider/Gateway notes
+    assert "AGENT_REGISTRY_SKILLS_LOCATION=\"global\"" in lab06
+    assert "wait_for_revision_scan_completion" in lab06
+    assert "AGENT_REGISTRY_SKILLS_LOCATION=\"global\"" in lab08
+    assert "auth_provider_location = \"asia-southeast1\"" in lab08
+    assert "enable_agent_gateway = false" in lab08

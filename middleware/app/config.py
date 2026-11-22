@@ -18,7 +18,11 @@ class MiddlewareSettings:
 
     agent_registry_base_url: str = "http://127.0.0.1:8090/v1"
     gcp_project_id: str = "acme-agent-governance"
-    gcp_location: str = "us-central1"
+    gcp_location: str = "asia-southeast3"
+    gcp_secondary_location: str = "asia-southeast1"
+    agent_registry_location: str = ""
+    agent_registry_skills_location: str = ""
+    include_public_skills: bool = False
     middleware_public_url: str = "http://127.0.0.1:8080"
     require_kms_signature: bool = True
     kms_public_key_pem_path: str = ""
@@ -37,6 +41,22 @@ class MiddlewareSettings:
     marketplace_owner_name: str = "Acme Platform Security"
     marketplace_owner_email: str = "platform-security@acme.example.com"
     marketplace_owner_url: str = "https://acme.example.com/platform"
+
+    @property
+    def effective_registry_location(self) -> str:
+        return self.agent_registry_location.strip() or self.gcp_location
+
+    @property
+    def effective_skills_location(self) -> str:
+        explicit = self.agent_registry_skills_location.strip()
+        if explicit:
+            return explicit
+        if (
+            "googleapis.com" in self.agent_registry_base_url.lower()
+            and self.effective_registry_location not in ("global", "us", "eu")
+        ):
+            return "global"
+        return self.effective_registry_location
 
     @property
     def effective_quota_project(self) -> str:
@@ -58,7 +78,11 @@ class MiddlewareSettings:
                 "AGENT_REGISTRY_BASE_URL", "http://127.0.0.1:8090/v1"
             ),
             gcp_project_id=project_id,
-            gcp_location=os.getenv("GCP_LOCATION", "us-central1"),
+            gcp_location=os.getenv("GCP_LOCATION", "asia-southeast3"),
+            gcp_secondary_location=os.getenv("GCP_SECONDARY_LOCATION", "asia-southeast1"),
+            agent_registry_location=os.getenv("AGENT_REGISTRY_LOCATION", ""),
+            agent_registry_skills_location=os.getenv("AGENT_REGISTRY_SKILLS_LOCATION", ""),
+            include_public_skills=_parse_bool(os.getenv("INCLUDE_PUBLIC_SKILLS"), False),
             middleware_public_url=os.getenv("MIDDLEWARE_PUBLIC_URL", "http://127.0.0.1:8080"),
             require_kms_signature=_parse_bool(os.getenv("REQUIRE_KMS_SIGNATURE"), True),
             kms_public_key_pem_path=os.getenv("KMS_PUBLIC_KEY_PEM_PATH", ""),

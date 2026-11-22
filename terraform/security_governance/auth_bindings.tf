@@ -9,9 +9,13 @@
 #     actively filters out bindings whose AuthProvider the caller lacks
 #     `roles/agentidentity.user` on.
 
+# Agent Identity (`agentidentity.googleapis.com`) is provisioned in
+# `var.auth_provider_location` (default: `asia-southeast1`, Singapore) — the
+# verified GA region for Thailand/APAC coverage, because Bangkok
+# (`asia-southeast3`) is not yet supported for Agent Identity AuthProviders.
 resource "google_agent_identity_auth_provider" "finops_oauth" {
   project          = var.project_id
-  location         = var.location
+  location         = var.auth_provider_location
   auth_provider_id = var.auth_provider_id
   description      = "Scoped three-legged OAuth 2.0 AuthProvider for FinOps Agent-to-MCP delegated access."
 

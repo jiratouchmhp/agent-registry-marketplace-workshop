@@ -10,10 +10,10 @@ Mixing identifier formats across APIs is the #1 source of `INVALID_ARGUMENT` and
 
 | Layer | Format & Verified Example (`WORKSHOP_SPEC.json`) | Valid Surfaces | FORBIDDEN Surfaces |
 |---|---|---|---|
-| **1. URN** | `urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server`<br>`urn:agent:...`, `urn:endpoint:...`, `urn:skill:projects-123456789012:locations:us-central1:private-cost-anomaly-triage` | Discovery/search results, `google_agent_registry_binding` `source.identifier` & `target.identifier`, `bindings:fetchAvailable` query params | **NEVER** in IAM bindings, IAP IAM resources, PolicyBindings, or Gateway configs |
-| **2. Resource Name** | `projects/acme-agent-governance/locations/us-central1/services/finops-mcp-server`<br>`.../skills/private-cost-anomaly-triage`<br>`//networkservices.googleapis.com/projects/acme-agent-governance/locations/us-central1/agentGateways/agent-marketplace-gateway` | REST/gcloud CRUD, per-`Skill` IAM, `google_iap_agent_registry_*_iam_member` (short ID = `basename(registry_resource)`), IAM PolicyBinding `--target-resource` | Do not pass full Resource Names into `Binding` `source`/`target` (those require URNs) |
-| **3. Agent / Workload Principal** | `principal://agents.global.proj-123456789012.system.id.goog/resources/aiplatform/projects/acme-agent-governance/locations/us-central1/reasoningEngines/finops-advisor-agent`<br>`principalSet://...`, `serviceAccount:<email>` | IAM `member`, `roles/iap.egressor`, IAP v2 UAP `principals[]` | **NEVER pass `spiffe://...`** (IAM/UAP returns `INVALID_ARGUMENT`!) |
-| **4. Runtime Reference** | Cloud Run `https://sample-mcp-server-<num>.us-central1.run.app/mcp`, Vertex AI Reasoning Engine resource, App Hub backing workload | Backend routing, `Service.interfaces[].url`, `A2A_AGENT_CARD` `supportedInterfaces[]`, App Hub endpoint resolution (`apphubendpoint.googleapis.com`) | Never substitute raw URLs for Resource Names in IAM or URNs in `Binding` |
+| **1. URN** | `urn:mcp:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-mcp-server`<br>`urn:agent:...`, `urn:endpoint:...`, `urn:skill:projects-123456789012:locations:global:private-cost-anomaly-triage` | Discovery/search results, `google_agent_registry_binding` `source.identifier` & `target.identifier`, `bindings:fetchAvailable` query params | **NEVER** in IAM bindings, IAP IAM resources, PolicyBindings, or Gateway configs |
+| **2. Resource Name** | `projects/acme-agent-governance/locations/asia-southeast3/services/finops-mcp-server`<br>`projects/acme-agent-governance/locations/global/skills/private-cost-anomaly-triage`<br>`//networkservices.googleapis.com/projects/acme-agent-governance/locations/us-central1/agentGateways/agent-marketplace-gateway` | REST/gcloud CRUD, per-`Skill` IAM (live Skills in `global` / `us` / `eu`), `google_iap_agent_registry_*_iam_member` (short ID = `basename(registry_resource)`), IAM PolicyBinding `--target-resource` | Do not pass full Resource Names into `Binding` `source`/`target` (those require URNs) |
+| **3. Agent / Workload Principal** | `principal://agents.global.proj-123456789012.system.id.goog/resources/aiplatform/projects/acme-agent-governance/locations/asia-southeast3/reasoningEngines/finops-advisor-agent`<br>`principalSet://...`, `serviceAccount:<email>` | IAM `member`, `roles/iap.egressor`, IAP v2 UAP `principals[]` | **NEVER pass `spiffe://...`** (IAM/UAP returns `INVALID_ARGUMENT`!) |
+| **4. Runtime Reference** | Cloud Run `https://sample-mcp-server-<num>.asia-southeast3.run.app/mcp`, Vertex AI Reasoning Engine resource, App Hub backing workload | Backend routing, `Service.interfaces[].url`, `A2A_AGENT_CARD` `supportedInterfaces[]`, App Hub endpoint resolution (`apphubendpoint.googleapis.com`) | Never substitute raw URLs for Resource Names in IAM or URNs in `Binding` |
 
 ---
 
@@ -33,18 +33,18 @@ Mixing identifier formats across APIs is the #1 source of `INVALID_ARGUMENT` and
 
 ### Per-`Skill` Resource-Level IAM
 
-Use resource-level IAM on individual `Skill` resources to restrict sensitive playbooks without granting project-wide access (always use the auto-prefixed `private-<skill-id>` name):
+Use resource-level IAM on individual `Skill` resources to restrict sensitive playbooks without granting project-wide access (always use the auto-prefixed `private-<skill-id>` name and live Skills location `global` — or `us`/`eu` for CMEK):
 
 ```bash
 # Grant viewer access on one sensitive skill
 gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" \
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
   --member="serviceAccount:finops-agent@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/agentregistry.viewer"
+  --role="roles/agentregistry.viewer" --quiet
 
 # Audit who can read a skill
 gcloud agent-registry skills get-iam-policy private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
+  --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --quiet
 ```
 
 ---
@@ -56,7 +56,7 @@ Configured in `terraform/security_governance/auth_bindings.tf` using GA `hashico
 ```hcl
 resource "google_agent_identity_auth_provider" "finops_oauth" {
   project          = var.project_id
-  location         = var.location
+  location         = var.auth_provider_location # Default: "asia-southeast1" (Singapore GA for Agent Identity in APAC)
   auth_provider_id = var.auth_provider_id
   allowed_scopes   = var.auth_provider_scopes
   blocked_scopes = [
@@ -101,7 +101,8 @@ resource "google_agent_registry_binding" "finops_agent_to_mcp" {
 
 ### Terraform Infrastructure (`terraform/security_governance/agent_gateway_iap.tf`)
 
-1. **`google_network_services_agent_gateway.marketplace`**:
+1. **`google_network_services_agent_gateway.marketplace`** *(guarded by `count = var.enable_agent_gateway ? 1 : 0`, default `false` in APAC because Agent Gateway on Cloud Run is currently GA only in `us-central1` and `europe-west1`)*:
+   - `location = var.agent_gateway_location` (`"us-central1"` or `"europe-west1"`)
    - `google_managed { governed_access_path = "CLIENT_TO_AGENT" }`
    - `registries = ["//agentregistry.googleapis.com/projects/${var.project_id}/locations/${var.location}"]`
 2. **IAP Egressor IAM Bindings**:
@@ -153,7 +154,7 @@ resource "google_agent_registry_binding" "finops_agent_to_mcp" {
 
 Provisioned by `terraform/security_governance/audit_logging.tf`:
 - `google_project_iam_audit_config` enables **`ADMIN_READ`** Data Access on **BOTH** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com`.
-- `google_logging_project_bucket_config.agent_governance_audit` creates bucket `agent-governance-audit` with **`locked = true`** (irreversible!), `enable_analytics = true`, and `retention_days = var.audit_retention_days` (default `90`, valid `1..3650`).
+- `google_logging_project_bucket_config.agent_governance_audit` creates bucket `agent-governance-audit` in `var.location` (`asia-southeast3`) with **`locked = var.lock_audit_bucket`** (`false` default for clean workshop teardown; **set `lock_audit_bucket = true` in production** — irreversible once locked!), `enable_analytics = true`, and `retention_days = var.audit_retention_days` (default `90`, valid `1..3650`).
 - `google_logging_project_sink.agent_governance_audit` (`unique_writer_identity = true`, granted `roles/logging.bucketWriter`) routes:
   - `cloudaudit.googleapis.com/activity` (`agentregistry`, `apphubendpoint`, `agentidentity`, `iap`, `networkservices`, `cloudkms`)
   - `cloudaudit.googleapis.com/data_access` (`agentregistry`, `apphubendpoint`, `iap`, `cloudkms`)

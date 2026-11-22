@@ -30,6 +30,8 @@ import hmac
 import io
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
 import urllib.error
@@ -48,10 +50,16 @@ CLOUD_KMS_REST_BASE = "https://cloudkms.googleapis.com/v1"
 EXPECTED_KMS_ALGORITHM = "EC_SIGN_P256_SHA256"
 SIGNATURE_METADATA_KEYS = frozenset({"kms_signature", "kms_key_version"})
 DEFAULT_KEY_VERSION_LABEL = (
-    "projects/acme-agent-governance/locations/us-central1/"
+    "projects/acme-agent-governance/locations/asia-southeast3/"
     "keyRings/agent-registry-skill-signing/"
     "cryptoKeys/skill-artifact-ecdsa-p256/cryptoKeyVersions/1"
 )
+_KMS_PROJECT_RE = re.compile(r"^/?projects/([^/]+)/")
+
+
+def _extract_project_from_kms_key_version(kms_key_version: str) -> str | None:
+    match = _KMS_PROJECT_RE.match(kms_key_version.strip())
+    return match.group(1) if match else None
 
 
 @dataclass
@@ -267,13 +275,17 @@ def verify_digest_local(
 
 def get_adc_access_token() -> str:
     """Acquire an OAuth 2.0 Bearer token via env var, ADC/gcloud CLI, or GCE metadata server."""
-    env_token = os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+    env_token = (
+        os.environ.get("GOOGLE_OAUTH_ACCESS_TOKEN", "").strip()
+        or os.environ.get("AGENT_REGISTRY_AUTH_TOKEN", "").strip()
+    )
     if env_token:
         return env_token
 
+    gcloud_bin = shutil.which("gcloud") or str(Path.home() / ".local" / "bin" / "gcloud")
     for cmd in (
-        ["gcloud", "auth", "application-default", "print-access-token"],
-        ["gcloud", "auth", "print-access-token"],
+        [gcloud_bin, "auth", "application-default", "print-access-token", "--quiet"],
+        [gcloud_bin, "auth", "print-access-token", "--quiet"],
     ):
         try:
             proc = subprocess.run(
@@ -286,7 +298,7 @@ def get_adc_access_token() -> str:
             token = proc.stdout.strip()
             if token:
                 return token
-        except (FileNotFoundError, subprocess.SubprocessError):
+        except (FileNotFoundError, subprocess.SubprocessError, OSError):
             continue
 
     # Cloud Run / GCE metadata server fallback.
@@ -332,14 +344,19 @@ def sign_digest_cloud_kms(
         {"digest": {"sha256": base64.b64encode(digest_bytes).decode("ascii")}}
     ).encode("utf-8")
 
+    headers: dict[str, str] = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    quota_project = _extract_project_from_kms_key_version(key_version)
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
+
     req = urllib.request.Request(
         url,
         data=body,
         method="POST",
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read().decode("utf-8"))
@@ -366,10 +383,14 @@ def fetch_public_key_cloud_kms(
 
     token = access_token or get_adc_access_token()
     url = f"{kms_endpoint.rstrip('/')}/{key_version}/publicKey"
+    headers: dict[str, str] = {"Authorization": f"Bearer {token}"}
+    quota_project = _extract_project_from_kms_key_version(key_version)
+    if quota_project:
+        headers["x-goog-user-project"] = quota_project
     req = urllib.request.Request(
         url,
         method="GET",
-        headers={"Authorization": f"Bearer {token}"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=30) as resp:
         payload = json.loads(resp.read().decode("utf-8"))

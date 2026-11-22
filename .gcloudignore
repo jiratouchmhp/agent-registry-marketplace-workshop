@@ -1,0 +1,51 @@
+# Exclude local developer environments, VCS metadata, IaC, docs, and tests
+# from Google Cloud Build uploads (`gcloud builds submit ... .`) so only
+# container runtime/build inputs (`middleware/`, `schemas/`, `samples/`,
+# `cloudbuild/`, `pyproject.toml`) are uploaded.
+
+# Ignore file itself and Git metadata
+.gcloudignore
+.dockerignore
+.git/
+.gitignore
+
+# Python virtualenvs, caches & build artifacts
+.venv/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# Terraform IaC, local state & variable files
+terraform/
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.tfstate.*
+*.tfvars
+
+# Workshop docs, tests, starter exercises, local skills & CLI tools
+docs/
+tests/
+starter/
+starter-marketplace/
+local-skills/
+security-governance/
+mock_registry/
+platform_agent/
+tools/
+scripts/
+.agents/
+.acme-agent-hub/
+
+# Local archives, secrets & OS files
+*.zip
+.env
+.env.*
+.DS_Store
+README.md
+Makefile
+WORKSHOP_SPEC.json

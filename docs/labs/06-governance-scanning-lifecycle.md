@@ -34,8 +34,9 @@ In Terminal 2, set base variables:
 ```bash
 export AGENT_REGISTRY_BASE_URL="http://127.0.0.1:8090/v1"
 export GCP_PROJECT_ID="acme-agent-governance"
-export GCP_LOCATION="us-central1"
-export PARENT="${AGENT_REGISTRY_BASE_URL}/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}"
+export GCP_LOCATION="asia-southeast3"
+export AGENT_REGISTRY_SKILLS_LOCATION="asia-southeast3"
+export PARENT="${AGENT_REGISTRY_BASE_URL}/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION}"
 export AUTH_HEADER=""
 ```
 
@@ -43,10 +44,14 @@ export AUTH_HEADER=""
 ```bash
 export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
 export GCP_PROJECT_ID="<your-gcp-project-id>"
-export GCP_LOCATION="us-central1"
-export PARENT="${AGENT_REGISTRY_BASE_URL}/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}"
-export AUTH_HEADER="Authorization: Bearer $(gcloud auth print-access-token)"
+export GCP_LOCATION="asia-southeast3"
+# Verified live regional split: standalone Skills, SkillRevisions, and Findings live in global (or us/eu for CMEK)!
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
+export PARENT="${AGENT_REGISTRY_BASE_URL}/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION}"
+export AUTH_HEADER="Authorization: Bearer $(gcloud auth print-access-token --quiet)"
+export QUOTA_HEADER="x-goog-user-project: ${GCP_PROJECT_ID}"
 ```
+> **Verified Live APAC Regional Split & Async Scan Note:** On live Google Cloud Agent Registry `v1`, standalone **`Skills`**, **`SkillRevisions`**, and Skill **`Findings`** live in **`global`** (default for APAC — or **`us` / `eu`** for CMEK), while regional `Services` (`McpServer`, `Agent`, `Endpoint`) and `Bindings` run in **Bangkok (`asia-southeast3`)** and **Singapore (`asia-southeast1`)**. In Live GCP Mode, `ENABLED_BLOCKING` runs an asynchronous LLM security scan (~10s) after every Skill or SkillRevision upload — always pass **`--wait-for-scan`** in `tools.plugin_sync` (which polls `wait_for_revision_scan_completion()` before `PATCH`ing `defaultRevision` on idempotent re-deploys so you never hit `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results`) and include `x-goog-user-project: ${GCP_PROJECT_ID}` on direct REST calls.
 
 ---
 
@@ -67,6 +72,9 @@ base = os.environ["PARENT"]
 headers = {"Content-Type": "application/json"}
 if os.environ.get("AUTH_HEADER"):
     k, v = os.environ["AUTH_HEADER"].split(": ", 1)
+    headers[k] = v
+if os.environ.get("QUOTA_HEADER"):
+    k, v = os.environ["QUOTA_HEADER"].split(": ", 1)
     headers[k] = v
 
 poisoned_md = """---
@@ -114,8 +122,8 @@ Inspect the response:
 Query the `Finding` resources (requires `roles/agentregistry.admin` in Live GCP Mode):
 
 ```bash
-curl -fsSL ${AUTH_HEADER:+-H "${AUTH_HEADER}"} \
-  "${PARENT}/findings?filter=resource%3D%22projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/skills/private-leaky-finops-skill/revisions/rev-1%22" \
+curl -fsSL ${AUTH_HEADER:+-H "${AUTH_HEADER}"} ${QUOTA_HEADER:+-H "${QUOTA_HEADER}"} \
+  "${PARENT}/findings?filter=resource%3D%22projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-${GCP_LOCATION}}/skills/private-leaky-finops-skill/revisions/rev-1%22" \
   | .venv/bin/python -m json.tool
 ```
 
@@ -125,15 +133,15 @@ Now confirm that **both** `?alt=media` download AND `defaultRevision` promotion 
 
 ```bash
 # Attempt to download blocked rev-1 media -> rejected!
-curl -i -sS ${AUTH_HEADER:+-H "${AUTH_HEADER}"} \
+curl -i -sS ${AUTH_HEADER:+-H "${AUTH_HEADER}"} ${QUOTA_HEADER:+-H "${QUOTA_HEADER}"} \
   "${PARENT}/skills/private-leaky-finops-skill/revisions/rev-1?alt=media"
 
 # Attempt to promote infected rev-1 as defaultRevision -> rejected!
-curl -i -sS -X PATCH ${AUTH_HEADER:+-H "${AUTH_HEADER}"} \
+curl -i -sS -X PATCH ${AUTH_HEADER:+-H "${AUTH_HEADER}"} ${QUOTA_HEADER:+-H "${QUOTA_HEADER}"} \
   -H "Content-Type: application/json" \
   "${PARENT}/skills/private-leaky-finops-skill?updateMask=defaultRevision,targetState" \
   -d "{
-    \"defaultRevision\": \"projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}/skills/private-leaky-finops-skill/revisions/rev-1\",
+    \"defaultRevision\": \"projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-${GCP_LOCATION}}/skills/private-leaky-finops-skill/revisions/rev-1\",
     \"targetState\": \"TARGET_STATE_ACTIVE\"
   }"
 ```
@@ -155,10 +163,13 @@ import httpx
 
 base = os.environ["PARENT"]
 project = os.environ["GCP_PROJECT_ID"]
-location = os.environ["GCP_LOCATION"]
+location = os.environ.get("AGENT_REGISTRY_SKILLS_LOCATION") or os.environ["GCP_LOCATION"]
 headers = {"Content-Type": "application/json"}
 if os.environ.get("AUTH_HEADER"):
     k, v = os.environ["AUTH_HEADER"].split(": ", 1)
+    headers[k] = v
+if os.environ.get("QUOTA_HEADER"):
+    k, v = os.environ["QUOTA_HEADER"].split(": ", 1)
     headers[k] = v
 
 def make_zip(version_note: str) -> str:
@@ -278,9 +289,9 @@ export ORG_ID="<your-numeric-org-id>"
 # Option 1: Apply via gcloud (requires roles/orgpolicy.policyAdmin)
 sed "s/ORGANIZATION_ID/${ORG_ID}/g" security-governance/org-policy/require-skill-scanning.yaml \
   > /tmp/require-skill-scanning.yaml
-gcloud org-policies set-custom-constraint /tmp/require-skill-scanning.yaml
+gcloud org-policies set-custom-constraint /tmp/require-skill-scanning.yaml --quiet
 
-gcloud org-policies set-policy /dev/stdin <<EOF
+gcloud org-policies set-policy /dev/stdin --quiet <<EOF
 name: organizations/${ORG_ID}/policies/custom.requireAgentRegistrySkillScanning
 spec:
   rules:
@@ -288,7 +299,7 @@ spec:
 EOF
 
 gcloud org-policies describe custom.requireAgentRegistrySkillScanning \
-  --project="${GCP_PROJECT_ID}" --effective
+  --project="${GCP_PROJECT_ID}" --effective --quiet
 ```
 
 **Option 2 (Terraform):** In `terraform/security_governance/terraform.tfvars` (see [terraform/security_governance/org_policy.tf](../../terraform/security_governance/org_policy.tf)), set `enable_org_policy = true` and `org_id = "<your-numeric-org-id>"`, then run `make tf-sec-plan`.
@@ -308,9 +319,11 @@ gcloud org-policies describe custom.requireAgentRegistrySkillScanning \
 
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
-| `409 ALREADY_EXISTS` re-running Step 1 in Local Mock Mode | `private-leaky-finops-skill` already exists in memory | Delete with `DELETE .../skills/private-leaky-finops-skill?force=true` (`force=true` is required when revisions exist) or call `POST http://127.0.0.1:8090/_mock/reset`. |
+| `409 ALREADY_EXISTS` re-running Step 1 in Local Mock Mode | `private-leaky-finops-skill` already exists in memory | Delete via REST `DELETE .../skills/private-leaky-finops-skill?force=true` (pass `Authorization` + `x-goog-user-project` on live GCP; note `gcloud agent-registry skills delete` has no `--force` flag!) or call `POST http://127.0.0.1:8090/_mock/reset`. |
 | `403 PERMISSION_DENIED` listing `/findings` in Live GCP Mode | Listing `Finding` resources requires `roles/agentregistry.admin` | Grant `roles/agentregistry.admin` to your security-reviewer principal (never to runtime agents). |
 | `orgpolicy.customConstraints.create` denied | Caller lacks Organization-level `roles/orgpolicy.policyAdmin` | Keep `enable_org_policy = false` in `terraform/security_governance/terraform.tfvars` and hand the YAML to your Org Policy Admin. |
+| `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results` | Patched `defaultRevision` immediately after uploading a new `SkillRevision` under `ENABLED_BLOCKING` before the async LLM scan (~10s) completed | Poll `GET .../revisions/<rev>` until `scanResult.scanState == "SUCCEEDED"` before patching `defaultRevision`, or pass `--wait-for-scan` to `tools.plugin_sync` (`wait_for_revision_scan_completion()`). |
+| Live `skills` create/list fails in `asia-southeast3` / `asia-southeast1` | Standalone Skills are hosted only in `global`, `us`, or `eu` on live Agent Registry `v1` | Set `AGENT_REGISTRY_SKILLS_LOCATION="global"` (or `us`/`eu` for CMEK) so `PARENT` targets `locations/global`. |
 
 ---
 

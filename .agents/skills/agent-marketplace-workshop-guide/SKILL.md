@@ -24,8 +24,11 @@ Navigate, facilitate, and execute the **Enterprise Agent Marketplace Workshop** 
 
 ```text
 What is your goal in this repository?
-├── First time here / pre-flight check / running the end-to-end demo locally
-│   └── Run Pre-Flight (`make test` + `make validate-hcl`) -> 4-Terminal Local Mock Mode below
+├── First time here / choosing a laptop track (zero Docker required!)
+│   └── Read `docs/attendee-quickstart.md` -> Run `make preflight` (`scripts/preflight_check.sh`)
+│       ├── Track 1 (Offline Local): `make smoke-local` -> `make run-local-stack` (or 4-terminal mode)
+│       ├── Track 2 (Live GCP, No Docker/No Terraform): `scripts/deploy_gcp.sh --project <ID> --primary-region asia-southeast3 [--enable-secondary]`
+│       └── Track 3 (Live GCP, Full IaC): Stage 1 `scripts/build_images_cloudbuild.sh` (`cloudbuild/*.yaml`) -> Stage 2 `terraform -chdir=terraform/core apply`
 ├── Choosing a workshop track
 │   ├── Full platform, multi-IDE marketplace, middleware & ADK build (~3.5 hrs)
 │   │   └── Workstream A: Labs 00 -> 05 (`docs/labs/00-*.md` .. `05-*.md`)
@@ -40,11 +43,12 @@ What is your goal in this repository?
 │   └── Bring-your-own centralized GitLab / GitHub repo without restructuring first
 │       └── Option 2: Git Shallow-Clone & Ingest via `make demo-sync-repo` (`--source-type git`)
 │           -> See references/dual-source-ingestion-matrix.md
-├── Practicing hands-on coding exercises (`starter/`)
-│   └── Labs 01-04 `# WORKSHOP-TODO` exercises -> Follow the Guided `starter/` Protocol below
-├── Deploying to a real Google Cloud project (Live GCP Mode)
-│   ├── Workstream A core stack -> `terraform/core/` (`make tf-core-plan`)
-│   └── Workstream B security stack -> `terraform/security_governance/` (`make tf-sec-plan`)
+├── Practicing hands-on coding exercises (`starter/`, 100% zero-Docker)
+│   └── Labs 01-04 `# WORKSHOP-TODO` exercises -> Run `make starter-check` & follow the Guided `starter/` Protocol below
+├── Deploying to a real Google Cloud project (Bangkok `asia-southeast3` primary / Singapore `asia-southeast1` DR + shared `global` Skills)
+│   ├── Zero-Terraform (`gcloud` + Cloud Build) -> `make gcp-deploy`, `make gcp-validate`, `make gcp-destroy`
+│   ├── Workstream A Terraform -> Stage 1 `scripts/build_images_cloudbuild.sh` -> Stage 2 `make tf-core-plan` (`skills_location = "global"`)
+│   └── Workstream B security stack -> `terraform/security_governance/` (`make tf-sec-plan`; APAC toggles: `location = "asia-southeast3"`, `auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false`, `lock_audit_bucket = false` in sandboxes)
 └── Deep technical implementation outside workshop navigation?
     ├── 5-IDE plugin schemas, Antigravity rules/hooks/`agy plugin validate` -> `polyglot-agent-plugin-authoring`
     ├── Agent Registry `v1` CRUD, `private-`, `Service` specs, GitLab CI -> `agent-registry-v1-ingest-and-lifecycle`
@@ -65,28 +69,32 @@ What is your goal in this repository?
 | 7 | Pass `--git-token-env <ENV_VAR_NAME>` (or `SKILLS_REPO_TOKEN_ENV` / `skills_repo_token_env`) for private Git repos. | Putting raw GitLab/GitHub tokens in URLs, CLI arguments, or `.tfvars` files. | `tools/plugin_sync/sources.py` injects the token via ephemeral, origin-scoped `GIT_CONFIG_*` `http.<origin>/.extraHeader` and scrubs credentials from `source_repo` metadata and error logs. |
 | 8 | Keep `REQUIRE_KMS_SIGNATURE=false` during Workstream A local labs, and reset mock state via `POST http://127.0.0.1:8090/_mock/reset` between drills. | Enabling `REQUIRE_KMS_SIGNATURE=true` without a public key PEM, or reusing poisoned Lab 06 skills in later steps. | Middleware fails closed when `REQUIRE_KMS_SIGNATURE=true` lacks `KMS_PUBLIC_KEY_PEM_PATH`/`KMS_SIGNING_KEY_VERSION` (empty `plugins[]`); `mock_registry` holds in-memory state (`409 ALREADY_EXISTS` on duplicate creates). |
 | 9 | Keep workspace skills in `.agents/skills/` distinct from catalog content in `local-skills/` and `starter-marketplace/`. | Uploading `.agents/skills/` into Agent Registry during labs or confusing them with sample skills. | `.agents/skills/` assists the developer inside Antigravity; `local-skills/` (`local-ops-toolkit`) and `starter-marketplace/` (`gcp-finops-toolkit`) are the sample assets ingested into Agent Registry. |
+| 10 | Keep Lab 00 to auth & `make preflight` ONLY, and build images remotely via `scripts/build_images_cloudbuild.sh` (`cloudbuild/*.yaml`) BEFORE running Stage 2 `terraform -chdir=terraform/core apply` in Lab 03. | Running full `terraform/core apply` in Lab 00 on a fresh GCP project before container images exist, or requiring local Docker. | Cloud Run v2 fails on missing Artifact Registry images; two-stage zero-Docker Cloud Build (`scripts/build_images_cloudbuild.sh` or Track 2 `scripts/deploy_gcp.sh`) eliminates local Docker and chicken-and-egg Terraform failures. |
+| 11 | Follow the verified live APAC regional split: deploy Cloud Run, Cloud Build, Artifact Registry, and Agent Registry `Services` in Bangkok (`asia-southeast3`) / Singapore (`asia-southeast1`), keep standalone `Skills` in **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `private-*` auto-filtered), probe **`/health`** on live Cloud Run URLs, and pass **`--wait-for-scan`** on live `plugin_sync` runs. | Uploading live standalone `Skills` to single-region `asia-southeast3`, probing `/healthz` externally on `*.run.app`, or re-deploying skills under `ENABLED_BLOCKING` without `--wait-for-scan`. | Live Agent Registry hosts standalone `Skills` only in `global`/`us`/`eu`; Google Frontend intercepts external `/healthz` with HTML `404`; and `ENABLED_BLOCKING` rejects `defaultRevision` promotion until the ~10s async scan finishes. |
 
 ## Quick-Start Patterns
 
 ### 1. Environment Pre-Flight (Run First in Both Modes)
 
 ```bash
-# Confirm repository root and Python 3.12+ virtualenv
-.venv/bin/python --version
+# Confirm repository root, Python 3.12+ virtualenv, tools, and ports
+make preflight
 
-# Bootstrap .venv only if missing on a fresh workstation
-# python3 -m venv .venv && .venv/bin/pip install --upgrade pip && .venv/bin/pip install -e .
-
-# Run full offline unit/schema/integration suite and Terraform HCL formatting check
+# Run full offline unit/schema/integration suite and 1-command smoke check (zero Terraform needed)
 make test
-make validate-hcl
+make smoke-local
+# (Track 3 Terraform IaC only): make validate-hcl
 ```
 
-### 2. Local Workshop Mode (4-Terminal Offline Stack — Zero GCP Needed)
+### 2. Local Workshop Mode (1-Command or 4-Terminal Offline Stack — Zero GCP/Docker Needed)
 
-Canonical ports from `WORKSHOP_SPEC.json`: Mock Registry `:8090`, Sample MCP Server `:8091`, Sample A2A Agent `:8092`, Polyglot Middleware `:8080`.
+Canonical ports from `WORKSHOP_SPEC.json`: Mock Registry `:8090`, Sample MCP Server `:8091`, Sample A2A Agent `:8092`, Polyglot Middleware `:8080`. Default region: **Bangkok (`asia-southeast3`)** (secondary: **Singapore `asia-southeast1`**).
 
 ```bash
+# Single-terminal option: start Mock Registry (:8090), Samples (:8091/:8092), and Middleware (:8080)
+make run-local-stack
+
+# OR 4-terminal interactive option:
 # Terminal 1 — Mock Google Cloud Agent Registry v1 API (:8090)
 make run-mock
 
@@ -114,45 +122,48 @@ curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
 curl -fsSL http://127.0.0.1:8080/v1/marketplace/antigravity.json | .venv/bin/python -m json.tool
 ```
 
-### 3. Guided `starter/` Exercise Coaching Protocol (Labs 01–04)
+### 3. Guided `starter/` Exercise Coaching Protocol (Labs 01–04, Zero Docker)
 
 When a developer is working through `starter/` exercises:
-1. Point them to the exact `# WORKSHOP-TODO(lab-XX)` target and run the built-in offline check first.
+1. Point them to the exact `# WORKSHOP-TODO(lab-XX)` target and run `make starter-check` (`scripts/check_starter.py`) first.
 2. Give conceptual hints and point to relevant spec constraints before showing code; only reveal or compare with reference implementations (`starter-marketplace/`, `tools/plugin_sync/`, `middleware/`, `tools/hub_sync/`) when explicitly asked.
 
 ```bash
-# Lab 01: Validate starter/lab01_plugin_skeleton against Agent Plugins 1.0 + Antigravity v1
-.venv/bin/python - << 'EOF'
-from schemas import validate_agent_plugin_bundle, validate_antigravity_bundle
-print("Agent Plugins 1.0:", validate_agent_plugin_bundle("starter/lab01_plugin_skeleton"))
-print("Antigravity v1   :", validate_antigravity_bundle("starter/lab01_plugin_skeleton"))
-EOF
+# One-command check across Labs 01-04 (and facilitator reference verification):
+make starter-check
+.venv/bin/python scripts/check_starter.py --verify-reference-solutions
 
-# Labs 02-04: Run built-in __main__ self-check harnesses
+# Individual exercise self-checks:
 .venv/bin/python starter/lab02_plugin_sync_exercise.py
 .venv/bin/python starter/lab03_middleware_redirect_exercise.py
 .venv/bin/python starter/lab04_hub_sync_adapter_exercise.py
 ```
 
-### 4. Live GCP Production Mode Handoff
+### 4. Live GCP Mode Handoff (Bangkok `asia-southeast3` Primary + Singapore `asia-southeast1` Secondary + `global` Skills)
 
-Never run `terraform apply` or mutate live `https://agentregistry.googleapis.com/v1` without previewing (`--dry-run` / `plan`) and confirming target `${GCP_PROJECT_ID}` and `${GCP_LOCATION}`:
+Never run `terraform apply`, `scripts/deploy_gcp.sh`, or mutate live `https://agentregistry.googleapis.com/v1` without confirming target `${GCP_PROJECT_ID}`, `${GCP_LOCATION}`, and `${AGENT_REGISTRY_SKILLS_LOCATION}` (always pass `--wait-for-scan` on live `plugin_sync` runs and clean up afterward!):
 
 ```bash
-# Authenticate and target live Google Cloud
+# Authenticate and target live Google Cloud (Lab 00 — auth & preflight only)
 export GCP_PROJECT_ID="<your-gcp-project-id>"
-export GCP_LOCATION="us-central1"
+export GCP_LOCATION="asia-southeast3"
+export GCP_SECONDARY_LOCATION="asia-southeast1"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
 export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
-gcloud auth login && gcloud auth application-default login
-gcloud config set project "${GCP_PROJECT_ID}"
+gcloud auth login --quiet && gcloud auth application-default login --quiet
+gcloud config set project "${GCP_PROJECT_ID}" --quiet
 
-# Workstream A — Core infrastructure (keep allow_unauthenticated_workshop_demo = false in shared/prod)
+# Track 2 (Zero-Docker, Zero-Terraform via gcloud + Cloud Build; add ENABLE_SECONDARY=true for Singapore failover):
+# make gcp-deploy   GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
+# make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
+# make gcp-destroy  GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
+
+# Track 3 (Zero-Docker Cloud Build + Terraform Core — Stage 1 build images, Stage 2 apply):
 cp terraform/core/terraform.tfvars.example terraform/core/terraform.tfvars
-# Edit terraform/core/terraform.tfvars (project_id, container images, skills_source_mode = "local"|"git")
-make tf-core-plan
-# terraform -chdir=terraform/core apply
+# Stage 1: scripts/build_images_cloudbuild.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3
+# Stage 2: make tf-core-plan && terraform -chdir=terraform/core apply
 
-# Workstream B — Standalone security & governance (no terraform/core state dependency)
+# Workstream B — Standalone security & governance (APAC toggles in terraform.tfvars):
 cp terraform/security_governance/terraform.tfvars.example terraform/security_governance/terraform.tfvars
 export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
 make tf-sec-plan
@@ -165,9 +176,9 @@ For deep production hardening (CMEK `us`/`eu` zero-skills precondition, Cloud KM
 
 Run these checks to confirm workshop readiness before starting or after completing a workstream:
 
-- [ ] **Pre-flight unit & schema tests pass:** `make test` exits `0` with zero failures.
-- [ ] **Terraform HCL formatting clean:** `make validate-hcl` passes across `terraform/core/` and `terraform/security_governance/`.
-- [ ] **End-to-end pipeline verified offline:** `make test-e2e` exits `0`.
+- [ ] **Pre-flight, unit & schema tests pass:** `make preflight`, `make test`, and `make starter-check` exit `0` with zero failures.
+- [ ] **Terraform HCL formatting clean *(Track 3 Terraform IaC)*:** `make validate-hcl` passes across `terraform/core/` and `terraform/security_governance/`.
+- [ ] **End-to-end offline smoke & pipeline verified:** `make smoke-local` and `make test-e2e` exit `0`.
 - [ ] **Local mock stack healthy (Local Mode):**
   - `curl -fsSL http://127.0.0.1:8090/healthz` returns `{"status": "ok", "service": "mock-agent-registry"}`.
   - `curl -fsSL http://127.0.0.1:8080/healthz` returns `"status": "ok"`.

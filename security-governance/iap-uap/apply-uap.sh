@@ -13,7 +13,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 PROJECT_ID="${GCP_PROJECT_ID:-acme-agent-governance}"
-LOCATION="${GCP_LOCATION:-us-central1}"
+LOCATION="${GCP_LOCATION:-asia-southeast3}"
 POLICY_ID="${UAP_POLICY_ID:-finops-mcp-tool-annotations}"
 BINDING_ID="${UAP_BINDING_ID:-finops-mcp-tool-annotations-binding}"
 GATEWAY_NAME="${AGENT_GATEWAY_NAME:-agent-marketplace-gateway}"
@@ -32,7 +32,7 @@ Apply IAM v3 Unified Access Policy (UAP) rules enforcing MCP tool annotations
 
 Options:
   --project ID           Google Cloud project ID (default: $GCP_PROJECT_ID or acme-agent-governance)
-  --location REGION      Agent Gateway location (default: $GCP_LOCATION or us-central1)
+  --location REGION      Agent Gateway location (default: $GCP_LOCATION or asia-southeast3)
   --policy-id ID         IAM AccessPolicy ID (default: finops-mcp-tool-annotations)
   --binding-id ID        IAM PolicyBinding ID (default: finops-mcp-tool-annotations-binding)
   --gateway-name NAME    Agent Gateway name when --bind-scope=gateway (default: agent-marketplace-gateway)
@@ -149,27 +149,50 @@ for idx, rule in enumerate(rules):
 dst_path.write_text(json.dumps(rules, indent=2) + "\n", encoding="utf-8")
 PYEOF
 
+resolve_gcloud() {
+  if command -v gcloud >/dev/null 2>&1; then
+    command -v gcloud
+  elif [[ -x "${HOME}/.local/bin/gcloud" ]]; then
+    echo "${HOME}/.local/bin/gcloud"
+  else
+    echo ""
+  fi
+}
+
+GCLOUD="$(resolve_gcloud)"
+if [[ -z "${GCLOUD}" ]]; then
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    GCLOUD="gcloud"
+  else
+    echo "ERROR: gcloud CLI not found on PATH or at \$HOME/.local/bin/gcloud." >&2
+    echo "If installed under \$HOME/.local/bin, run: export PATH=\"\$HOME/.local/bin:\$PATH\"" >&2
+    exit 1
+  fi
+fi
+
 POLICY_RESOURCE="projects/${PROJECT_ID}/locations/global/accessPolicies/${POLICY_ID}"
 
 CREATE_CMD=(
-  gcloud beta iam access-policies create "${POLICY_ID}"
+  "${GCLOUD}" beta iam access-policies create "${POLICY_ID}"
   --project="${PROJECT_ID}"
   --location="global"
   --display-name="FinOps MCP Tool Annotation Governance"
   --details-rules="${RENDERED_RULES}"
+  --quiet
 )
 if [[ "${VALIDATE_ONLY}" == "true" ]]; then
   CREATE_CMD+=(--validate-only)
 fi
 
 BIND_CMD=(
-  gcloud iam policy-bindings create "${BINDING_ID}"
+  "${GCLOUD}" iam policy-bindings create "${BINDING_ID}"
   --project="${PROJECT_ID}"
   --location="global"
   --policy="${POLICY_RESOURCE}"
   --policy-kind="access"
   --target-resource="${TARGET_RESOURCE}"
   --display-name="Bind FinOps MCP Tool UAP"
+  --quiet
 )
 
 if [[ "${DRY_RUN}" == "true" ]]; then
@@ -188,14 +211,16 @@ if [[ "${DRY_RUN}" == "true" ]]; then
 fi
 
 echo "Applying IAM v3 AccessPolicy '${POLICY_ID}' in project '${PROJECT_ID}'..."
-if gcloud beta iam access-policies describe "${POLICY_ID}" \
+if "${GCLOUD}" beta iam access-policies describe "${POLICY_ID}" \
   --project="${PROJECT_ID}" \
-  --location="global" >/dev/null 2>&1; then
+  --location="global" \
+  --quiet >/dev/null 2>&1; then
   echo "AccessPolicy '${POLICY_ID}' already exists; updating rules..."
-  gcloud beta iam access-policies update "${POLICY_ID}" \
+  "${GCLOUD}" beta iam access-policies update "${POLICY_ID}" \
     --project="${PROJECT_ID}" \
     --location="global" \
-    --details-rules="${RENDERED_RULES}"
+    --details-rules="${RENDERED_RULES}" \
+    --quiet
 else
   "${CREATE_CMD[@]}"
 fi
@@ -205,9 +230,10 @@ if [[ "${VALIDATE_ONLY}" == "true" ]]; then
   exit 0
 fi
 
-if gcloud iam policy-bindings describe "${BINDING_ID}" \
+if "${GCLOUD}" iam policy-bindings describe "${BINDING_ID}" \
   --project="${PROJECT_ID}" \
-  --location="global" >/dev/null 2>&1; then
+  --location="global" \
+  --quiet >/dev/null 2>&1; then
   echo "PolicyBinding '${BINDING_ID}' already exists for target '${TARGET_RESOURCE}'."
 else
   echo "Binding AccessPolicy '${POLICY_RESOURCE}' to '${TARGET_RESOURCE}'..."

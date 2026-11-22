@@ -29,7 +29,7 @@ Google Cloud Agent Registry (`v1` GA) does **not** accept multi-skill `agent-plu
 - **Strictly ONE uppercase `SKILL.md`** at archive root (`SKILL.md`) or inside a single top-level directory (`<dir>/SKILL.md`).
 - **Size & safety limits**: Compressed ZIP ≤ **1 MB** (≤ 500 KB recommended for inline `archiveUploadSource`; up to 1 MB via `gcsSource`), uncompressed total ≤ **10 MB**, individual file ≤ **1 MB**, max nesting depth **8**, zero symlinks, zero `..` traversal or absolute paths.
 - **No generic `labels` map** on `Skill`, `Service`, `Agent`, `McpServer`, `Endpoint`, or `Binding` in `v1`. Instead, `SKILL.md` YAML frontmatter supports `metadata: map<string, string>` (scalar string values only).
-- **Automatic `private-` ID prefix**: Uploading `skillId=cost-anomaly-triage` creates `projects/{p}/locations/{l}/skills/private-cost-anomaly-triage` under the `PRIVATE` publisher (`urn:skill:projects-{NUM}:locations:{LOC}:private-cost-anomaly-triage`).
+- **Automatic `private-` ID prefix & verified regional split**: Uploading `skillId=cost-anomaly-triage` into a live Skills location (`global` default for APAC, or `us`/`eu` for CMEK) creates `projects/{p}/locations/global/skills/private-cost-anomaly-triage` under the `PRIVATE` publisher (`urn:skill:projects-{NUM}:locations:global:private-cost-anomaly-triage`), while regional `Services` (`McpServer`, `Agent`, `Endpoint`) run in Bangkok (`asia-southeast3`) primary and Singapore (`asia-southeast1`) secondary/DR. Middleware (`INCLUDE_PUBLIC_SKILLS=false`) automatically filters to `private-*` skills so built-in Google first-party skills do not pollute enterprise catalogs.
 
 ### How Decomposition & Polyglot Re-Assembly Work Together
 
@@ -49,7 +49,7 @@ Google Cloud Agent Registry (`v1` GA) does **not** accept multi-skill `agent-plu
 Google Cloud Agent Registry exposes a Preview Remote MCP server at `https://agentregistry.googleapis.com/mcp` (Streamable HTTP, OAuth 2.0 Bearer only, requiring `roles/mcp.toolUser` + an Agent Registry role). However:
 1. It exposes **metadata discovery tools only**—it has **NO tool to download skill ZIP bytes** (`?alt=media`).
 2. It does **not** emit IDE-specific marketplace JSON feeds or Polyglot plugin ZIPs.
-3. Calling `?alt=media` directly returns an **HTTP 302 redirect** to a short-lived GCS signed URL that fails if standard Google API clients leak `Authorization` or `x-goog-*` headers (`x-goog-user-project`, `x-goog-api-client`) across the redirect.
+3. Calling `?alt=media` directly returns an **HTTP 302 redirect** that requires nuanced header handling: live Agent Registry redirects to a same-origin authenticated Scotty endpoint (`https://agentregistry.googleapis.com/download/v1/...`, where stripping `Authorization` causes `401 CREDENTIALS_MISSING`), whereas cross-origin or signed-URL redirects (`storage.googleapis.com` / `/scotty-signed/` / `X-Goog-Signature`) return `403` if `Authorization` or `x-goog-*` headers leak.
 
 Our **Polyglot Marketplace Middleware** ([middleware/app/main.py](../middleware/app/main.py)) bridges all three gaps cleanly, offering both **4 IDE-native marketplace feeds + 1-command `hub_sync` hydration** AND a **governed Streamable HTTP `/mcp` gateway** (`search_catalog`, `load_verified_skill`, `list_governed_mcp_servers`, `call_remote_a2a_agent`).
 
@@ -62,11 +62,14 @@ Our **Polyglot Marketplace Middleware** ([middleware/app/main.py](../middleware/
 | **VS Code & GitHub Copilot** | Root `plugin.json` (`agent-plugins.org` 1.0 `$schema` takes priority #1), root `mcp.json`, `com.github.copilot/agents/<name>.agent.md`, `skills/` | Middleware: `/v1/marketplace/copilot.json`<br>Local: `<hub>/marketplace.json` + `<hub>/.github/plugin/marketplace.json` + `<hub>/vscode-settings-snippet.json` | `hub_sync` generates a copy-pasteable `vscode-settings-snippet.json` (`chat.plugins.enabled`, `chat.plugins.marketplaces`, `chat.pluginLocations`), optionally applies it via `--apply-vscode`, and prints `copilot plugin marketplace add` / `install` commands. |
 | **OpenAI Codex** | Root `plugin.json` (`extensions["com.openai"]`) + `.codex-plugin/plugin.json`, `~/.codex/agents/<name>.toml`, `~/.codex/config.toml` (`[mcp_servers.<key>]`) | Middleware: `/v1/marketplace/codex.json`<br>Local: `~/.agents/plugins/marketplace.json` + symlinks under `~/.agents/plugins/plugins/<name>` | `hub_sync` merges `[mcp_servers.<key>]` into `~/.codex/config.toml` without clobbering user entries and materializes `.toml` agents and plugin symlinks atomically. |
 
-### Zero-Friction Developer Onboarding (1 Command)
-A developer onboards all 4 IDEs in one idempotent, ownership-tracked command:
+### Zero-Friction Developer Onboarding & Multi-Region Failover (1 Command)
+A developer onboards all 4 IDEs in one idempotent, ownership-tracked command — optionally supplying `--fallback-middleware-url` for seamless **Bangkok (`asia-southeast3`) → Singapore (`asia-southeast1`)** failover:
 
 ```bash
-python -m tools.hub_sync sync --middleware-url https://<middleware-url> --tools all
+python -m tools.hub_sync sync \
+  --middleware-url https://<bangkok-middleware-url> \
+  --fallback-middleware-url https://<singapore-middleware-url> \
+  --tools all
 ```
 
 Or zero-disk **Bootstrap MCP-Only Mode** (wires only the `/mcp` gateway into IDEs so agents fetch verified skills on demand via `load_verified_skill`):
@@ -78,8 +81,8 @@ python -m tools.hub_sync sync --middleware-url https://<middleware-url> --bootst
 ### Platform Agent UX (Google ADK on Vertex AI Agent Engine / Cloud Run)
 Headless platform agents do **not** need IDE plugin wrappers—they connect **directly to `agentregistry.googleapis.com/v1`** using `google-adk >= 1.29.0` ([platform_agent/adk_orchestrator.py](../platform_agent/adk_orchestrator.py)):
 1. Register `CredentialManager.register_auth_provider(GcpAuthProvider())` so ADK automatically resolves Agent Registry `Binding` credentials.
-2. Instantiate `AgentRegistry(project_id, location)` to discover and materialize `get_mcp_toolset(...)` and `get_remote_a2a_agent(...)`.
-3. Instantiate `SkillToolset(registry=GCPSkillRegistry(project_id, location))` to run `POST .../skills:search` (`searchType: "SEMANTIC"`, `filter: "state=ACTIVE AND defaultRevisionFindingCount=0"`) and load verified `SKILL.md` bundles via `?alt=media`.
+2. Instantiate `AgentRegistry(project_id, location)` (e.g., Bangkok `asia-southeast3` or Singapore `asia-southeast1`) to discover and materialize regional `get_mcp_toolset(...)` and `get_remote_a2a_agent(...)`.
+3. Instantiate `SkillToolset(registry=GCPSkillRegistry(project_id, location="global"))` (or `us`/`eu` when CMEK is enabled) to run `POST .../skills:search` (`searchType: "SEMANTIC"`, `filter: "state=ACTIVE AND defaultRevisionFindingCount=0"`, filtering to `private-*` enterprise skills) and load verified `SKILL.md` bundles via `?alt=media`.
 4. Note the **project scoping** boundary: Standalone `Skill` resources are strictly project-scoped (they do not roll up across folder/org boundaries), so platform agents point to the governed hub project.
 
 ---
@@ -101,7 +104,7 @@ A critical distinction often conflated in architecture reviews:
 | :--- | :--- | :--- |
 | **Security Purpose** | **Encryption at rest ONLY** (key sovereignty / crypto-shredding of stored Skill packages). Does **not** sign skills. | **Supply-chain provenance & tamper detection** (proves an artifact was built/approved by trusted CI and unmodified). |
 | **KMS Key Type** | Symmetric `ENCRYPT_DECRYPT` (`GOOGLE_SYMMETRIC_ENCRYPTION`), 90-day rotation | Asymmetric `ASYMMETRIC_SIGN` (`EC_SIGN_P256_SHA256`) |
-| **Location Rules** | **Multi-region ONLY**: Skills in `us` → KMS key in `us`; Skills in `eu` → KMS key in `europe`. | Regional (e.g., `us-central1`) matching CI/Middleware region |
+| **Location Rules** | **Multi-region ONLY**: Skills in `us` → KMS key in `us`; Skills in `eu` → KMS key in `europe`. *(For APAC deployments with standalone Skills in `global` and regional compute/Services in `asia-southeast3`/`asia-southeast1`, rely on Google-managed encryption at rest plus regional Asymmetric Signing.)* | Regional — natively supported in **Bangkok (`asia-southeast3`)** and **Singapore (`asia-southeast1`)** matching CI/Middleware region |
 | **Critical Precondition** | **Zero-skills precondition:** `PATCH .../skillEncryptionSpec` fails with `FAILED_PRECONDITION` if **any** Skill already exists in that multi-region! | Can be enabled/rotated anytime via `kms_key_version` |
 | **Least-Privilege IAM** | Agent Registry P4SA (`service-${PROJECT_NUMBER}@gcp-sa-agentregistry.iam.gserviceaccount.com`) gets `roles/cloudkms.cryptoKeyEncrypterDecrypter` | CI Publisher SA gets `roles/cloudkms.signerVerifier`; Middleware SA gets **ONLY** `roles/cloudkms.publicKeyViewer` |
 | **Repo Implementation** | [terraform/security_governance/kms.tf](../terraform/security_governance/kms.tf), [skill_encryption_spec.tf](../terraform/security_governance/skill_encryption_spec.tf) | [security-governance/kms/sign_and_verify.py](../security-governance/kms/sign_and_verify.py), [middleware/app/security_verifier.py](../middleware/app/security_verifier.py) |
@@ -113,8 +116,8 @@ A critical distinction often conflated in architecture reviews:
   - `roles/agentregistry.editor` — Viewer + `Service` & `Skill` CRUD (CI/CD publisher SA only).
   - `roles/agentregistry.admin` — Full control + `Binding`, `Finding`, per-`Skill` IAM (`skills add-iam-policy-binding`), and `SkillEncryptionSpec` (platform security admins only).
   - **Rule:** *Never grant `editor` or `admin` to runtime agents or serving middleware.*
-- **Delegated Tool Credentials (`AuthProvider` + `Binding`)**: Provision `google_agent_identity_auth_provider` + `google_agent_registry_binding` ([terraform/security_governance/auth_bindings.tf](../terraform/security_governance/auth_bindings.tf)). At runtime, `GET .../bindings:fetchAvailable` automatically filters out bindings whose `AuthProvider` the calling agent lacks `roles/agentidentity.user` on.
-- **Runtime Tool-Annotation Enforcement (Agent Gateway + IAP v2 UAP)**: Attach a Google-managed `google_network_services_agent_gateway` (`CLIENT_TO_AGENT`) + `roles/iap.egressor` ([terraform/security_governance/agent_gateway_iap.tf](../terraform/security_governance/agent_gateway_iap.tf)) and enforce IAM v3 Unified Access Policies ([security-governance/iap-uap/mcp-tool-annotations-uap.json](../security-governance/iap-uap/mcp-tool-annotations-uap.json)) on `iap.googleapis.com/resources.egressViaIAP`:
+- **Delegated Tool Credentials (`AuthProvider` + `Binding`)**: Provision `google_agent_identity_auth_provider` + `google_agent_registry_binding` ([terraform/security_governance/auth_bindings.tf](../terraform/security_governance/auth_bindings.tf)). In APAC deployments, host the `AuthProvider` in Singapore (`auth_provider_location = "asia-southeast1"`) while regional Services/Bindings run in Bangkok (`asia-southeast3`) and standalone Skills live in `global`. At runtime, `GET .../bindings:fetchAvailable` automatically filters out bindings whose `AuthProvider` the calling agent lacks `roles/agentidentity.user` on.
+- **Runtime Tool-Annotation Enforcement (Agent Gateway + IAP v2 UAP)**: Attach a Google-managed `google_network_services_agent_gateway` (`CLIENT_TO_AGENT`, currently available in `us-central1` / `europe-west1`; toggle via `enable_agent_gateway = false` in APAC-only workshops) + `roles/iap.egressor` ([terraform/security_governance/agent_gateway_iap.tf](../terraform/security_governance/agent_gateway_iap.tf)) and enforce IAM v3 Unified Access Policies ([security-governance/iap-uap/mcp-tool-annotations-uap.json](../security-governance/iap-uap/mcp-tool-annotations-uap.json)) on `iap.googleapis.com/resources.egressViaIAP`:
   - **ALLOW** when `destination.is_registered == true && destination.agent_registry.resource_type == 'MCP_SERVER' && destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true`
   - **DENY** when `destination.agent_registry.mcp_server.tool.annotations.destructive_hint == true`
 - **Client-Side Defense-in-Depth (Optional)**: Antigravity `hooks.json` + [security-governance/hooks/scripts/policy_guard.py](../security-governance/hooks/scripts/policy_guard.py) blocks destructive MCP tools and dangerous shell commands locally in `PreToolUse` and logs redacted telemetry in `PostToolUse`.
@@ -122,7 +125,7 @@ A critical distinction often conflated in architecture reviews:
 ### 4. Immutable Audit Logging & Compliance
 Configured in [terraform/security_governance/audit_logging.tf](../terraform/security_governance/audit_logging.tf) with ready-to-run Cloud Logging & BigQuery Log Analytics SQL queries in [security-governance/audit/compliance-queries.md](../security-governance/audit/compliance-queries.md):
 - Enable `ADMIN_READ` Data Access logs on **both** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com` (Admin Activity is always on).
-- Route `cloudaudit.googleapis.com/activity`, `cloudaudit.googleapis.com/data_access`, and `networkservices.googleapis.com/gateway_requests` into a **locked WORM Cloud Logging bucket** (`locked = true`, `enable_analytics = true`).
+- Route `cloudaudit.googleapis.com/activity`, `cloudaudit.googleapis.com/data_access`, and `networkservices.googleapis.com/gateway_requests` into a regional Cloud Logging bucket (`asia-southeast3`, `enable_analytics = true`), keeping `lock_audit_bucket = false` in ephemeral sandboxes and setting `lock_audit_bucket = true` in production for irreversible WORM compliance.
 
 ---
 

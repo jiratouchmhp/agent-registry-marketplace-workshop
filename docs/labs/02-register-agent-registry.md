@@ -21,10 +21,14 @@ By the end of this lab, you will:
 
 ## Key Agent Registry `v1` Invariants (Read Before Running)
 
-1. **No generic `labels` map** exists on `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, or `Skill` in `v1`. Plugin lineage is stored inside `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only): `plugin_name`, `plugin_display_name`, `plugin_version`, `source_repo`, `git_commit`, `mcp_service_id`, `agent_service_id`, `kms_signature`, `kms_key_version`.
-2. **Automatic `private-` Skill ID prefix**: Calling `POST /v1/projects/{p}/locations/{l}/skills?skillId=cost-anomaly-triage` creates `projects/{p}/locations/{l}/skills/private-cost-anomaly-triage`. Every subsequent `GET`, `PATCH`, `DELETE`, and `/revisions` call **must** use `private-cost-anomaly-triage`!
-3. **`A2A_AGENT_CARD` top-level `interfaces` rule**: When `agentSpec.type == "A2A_AGENT_CARD"`, the Service's top-level `interfaces` array **must be empty**—endpoints are declared exclusively inside `agentSpec.content.supportedInterfaces` (≤ 10 KB).
-4. **Immutable `oneof spec` type**: Once a `Service` is created as `mcpServerSpec`, `agentSpec`, or `endpointSpec`, its spec type cannot be mutated via `PATCH`.
+1. **Verified live APAC regional split (`Services` vs. standalone `Skills`):** On live Google Cloud Agent Registry `v1`, **`Services`** (`McpServer`, `Agent`, `Endpoint`) run regionally in **Bangkok (`asia-southeast3`)** primary and **Singapore (`asia-southeast1`)** secondary/DR, while standalone **`Skills`** (`Skill`, `SkillRevision`, `Findings`) are hosted **only** in **`global`** (default for APAC — `AGENT_REGISTRY_SKILLS_LOCATION=global` / `--skills-location global`) or **`us` / `eu`** (required for CMEK). Both Bangkok and Singapore Middleware instances share the single `global` Skills catalog and automatically filter to `private-*` skills (`INCLUDE_PUBLIC_SKILLS=false`) so Google's built-in first-party skills do not pollute enterprise catalogs. *(Local `mock_registry` accepts regional `asia-southeast3` for backward-compatible offline drills.)*
+2. **No generic `labels` map** exists on `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, or `Skill` in `v1`. Plugin lineage is stored inside `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only): `plugin_name`, `plugin_display_name`, `plugin_version`, `source_repo`, `git_commit`, `mcp_service_id`, `agent_service_id`, `kms_signature`, `kms_key_version`.
+3. **Automatic `private-` Skill ID prefix**: Calling `POST /v1/projects/{p}/locations/{skills_loc}/skills?skillId=cost-anomaly-triage` creates `projects/{p}/locations/{skills_loc}/skills/private-cost-anomaly-triage`. Every subsequent `GET`, `PATCH`, `DELETE`, and `/revisions` call **must** use `private-cost-anomaly-triage`!
+4. **A2A v1.0 `A2A_AGENT_CARD` strict validation rules**:
+   - Top-level `interfaces` on the `Service` **must be empty**—endpoints are declared exclusively inside `agentSpec.content.supportedInterfaces` (≤ 10 KB).
+   - **No legacy A2A v0.x `capabilities.stateTransitionHistory`**: Live Agent Registry rejects it with `400 INVALID_ARGUMENT` (`proto unmarshal failed: unknown field "stateTransitionHistory"`). Use only A2A v1.0 capabilities (`streaming`, `pushNotifications`).
+   - **Unique `supportedInterfaces` URLs**: Live Agent Registry rejects duplicate URLs across bindings with `400 INVALID_ARGUMENT` (`duplicate interface url found in agent card`). Split `JSONRPC` onto `/a2a` and `HTTP+JSON` onto `/a2a/http` (both served by `samples/a2a-agent/app.py`, and enforced locally in `mock_registry/app.py` and `tools/plugin_sync/sync.py`).
+5. **Immutable `oneof spec` type**: Once a `Service` is created as `mcpServerSpec`, `agentSpec`, or `endpointSpec`, its spec type cannot be mutated via `PATCH`.
 
 ---
 
@@ -36,7 +40,7 @@ Run `tools.plugin_sync` in `--dry-run` mode to package deterministic per-skill Z
 .venv/bin/python -m tools.plugin_sync sync \
   --plugin-dir starter-marketplace/plugins/gcp-finops-toolkit \
   --project acme-agent-governance \
-  --location us-central1 \
+  --location asia-southeast3 \
   --target-state TARGET_STATE_ACTIVE \
   --scanning-policy ENABLED_BLOCKING \
   --output-dir /tmp/finops-sync-dryrun \
@@ -57,7 +61,9 @@ Notice each archive contains **strictly one uppercase `SKILL.md`** and stays wel
 
 ## Step 2: Register Skills, MCP Server, A2A Agent & Endpoint (Choose Option 1 or Option 2)
 
-Ensure the Mock Registry (`:8090`) and Sample FinOps Workloads (`:8091` MCP server + `:8092` A2A agent) are running in two terminals before running **Mode A (Local Mock Mode)**:
+> **Already running `make run-local-stack` from Lab 00?** Skip starting individual servers below (ports `:8090`, `:8091`, `:8092`, and `:8080` are already active) and run your sync commands directly in a second terminal.
+
+If you are using the 4-terminal interactive layout instead, ensure the Mock Registry (`:8090`) and Sample FinOps Workloads (`:8091` MCP server + `:8092` A2A agent) are running in two terminals before running **Mode A (Local Mock Mode)**:
 
 ```bash
 # Terminal 1
@@ -89,7 +95,7 @@ Use Option 1 for zero-friction classroom labs and offline environments—no GitL
      --path starter-marketplace/plugins/gcp-finops-toolkit \
      --registry-url http://127.0.0.1:8090/v1 \
      --project acme-agent-governance \
-     --location us-central1 \
+     --location asia-southeast3 \
      --target-state TARGET_STATE_ACTIVE \
      --scanning-policy ENABLED_BLOCKING
 
@@ -100,7 +106,7 @@ Use Option 1 for zero-friction classroom labs and offline environments—no GitL
      --plugin-name local-ops-toolkit \
      --registry-url http://127.0.0.1:8090/v1 \
      --project acme-agent-governance \
-     --location us-central1 \
+     --location asia-southeast3 \
      --target-state TARGET_STATE_ACTIVE \
      --scanning-policy ENABLED_BLOCKING
    ```
@@ -148,7 +154,7 @@ git -C /tmp/central-skills-repo commit -m "Add central-security-checker skill"
   --plugin-name central-sec-toolkit \
   --registry-url http://127.0.0.1:8090/v1 \
   --project acme-agent-governance \
-  --location us-central1 \
+  --location asia-southeast3 \
   --target-state TARGET_STATE_ACTIVE \
   --scanning-policy ENABLED_BLOCKING
 ```
@@ -185,7 +191,7 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
      --plugin-name central-repo-skills \
      --registry-url http://127.0.0.1:8090/v1 \
      --project acme-agent-governance \
-     --location us-central1 \
+     --location asia-southeast3 \
      --target-state TARGET_STATE_ACTIVE \
      --scanning-policy ENABLED_BLOCKING
    ```
@@ -197,7 +203,7 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
 1. Also register the `finops-billing-api` **Endpoint** Service (`NO_SPEC` + `HTTP_JSON`) directly via REST `v1`:
    ```bash
    curl -fsSL -X POST \
-     "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/us-central1/services?serviceId=finops-billing-api" \
+     "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3/services?serviceId=finops-billing-api" \
      -H "Content-Type: application/json" \
      -d '{
        "displayName": "FinOps Cloud Billing API Endpoint",
@@ -211,7 +217,7 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
 
 2. Verify all projected read-only discovery resources and standalone `private-` skills:
    ```bash
-   BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/us-central1"
+   BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3"
 
    # Standalone Skills (observe 'private-' prefix across Option 1 and Option 2 skills!)
    curl -fsSL "${BASE}/skills" | .venv/bin/python -m json.tool
@@ -240,16 +246,27 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
 
 ### Mode B: Live GCP Mode (`v1` REST, `gcloud`, and Terraform `skills_source_mode`)
 
-1. **Via `tools.plugin_sync ingest` (REST `v1`):**
-   > **Terraform Service Ownership Note:** If `terraform/core` already manages your Cloud Run `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`), pass `--only-skills` when invoking `tools.plugin_sync ingest` directly so local `127.0.0.1` development URLs in `starter-marketplace/` do not overwrite your Cloud Run Service endpoints (the Terraform bootstrapper passes `--only-skills` automatically).
+> **Track 2 & Track 3 Fresh-Project Ordering (Choose Your Path):** Because [Lab 00](00-environment-setup.md) stopped at authentication and pre-flight (without enabling APIs or deploying Cloud Run yet), choose one of these two options:
+> 1. **Recommended (End-to-End Track 2 / Track 3 Flow):** Complete Lab 02 in **Mode A (Local Mock Mode)** above, then move to **[Lab 03](03-build-deploy-middleware.md)** where `scripts/deploy_gcp.sh` (Track 2) or `terraform/core` (Track 3) enables all required APIs, deploys Cloud Run services, registers Agent Registry Services (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api`), and ingests Skills with `--wait-for-scan` in one atomic pass.
+> 2. **Run Lab 02 Live Standalone Right Now:** Enable the Agent Registry API first so you do not hit `403 SERVICE_DISABLED`:
+>    ```bash
+>    gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet
+>    ```
+>    Then run `tools.plugin_sync ingest --only-skills --skills-location global --wait-for-scan` below and verify `gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet`. Expect regional `mcp-servers list` and `agents list` (`--location="${GCP_LOCATION}"`) to populate once Cloud Run services are deployed and registered in [Lab 03](03-build-deploy-middleware.md).
+
+1. **Via `tools.plugin_sync ingest` (REST `v1`) with `--skills-location global` and `--wait-for-scan`:**
+   > **Live Async LLM Scanning (`--wait-for-scan`), Re-Deploy Race Protection & Quota Project Header:** On live `https://agentregistry.googleapis.com/v1`, `ENABLED_BLOCKING` runs an asynchronous LLM security scan (~10 seconds) after upload. On **initial create**, newly created skills briefly remain in `STATE_DRAFT` before auto-promoting to `STATE_ACTIVE`. On **idempotent re-deploy** of an existing skill, creating a new `SkillRevision` and immediately `PATCH`ing `defaultRevision` fails with `400 FAILED_PRECONDITION` (`cannot set default revision to a revision with pending scan results when scanning policy is ENABLED_BLOCKING`). Always pass **`--wait-for-scan`** so `tools/plugin_sync/sync.py` (`wait_for_revision_scan_completion()`) polls the new revision's `scanState` to completion before promoting `defaultRevision`. `tools.plugin_sync` also automatically sends `x-goog-user-project: <project>` on all `googleapis.com` requests.
+   >
+   > **Terraform Service Ownership Note:** If `terraform/core` manages your Cloud Run `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`), pass `--only-skills` when invoking `tools.plugin_sync ingest` directly so local `127.0.0.1` development URLs in `starter-marketplace/` do not overwrite your Cloud Run Service endpoints (the Terraform bootstrapper passes `--only-skills --skills-location global --wait-for-scan` automatically).
 
    ```bash
    export GCP_PROJECT_ID="<your-gcp-project-id>"
-   export GCP_LOCATION="us-central1"
+   export GCP_LOCATION="asia-southeast3"
+   export AGENT_REGISTRY_SKILLS_LOCATION="global"
    export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
-   export AGENT_REGISTRY_AUTH_TOKEN="$(gcloud auth print-access-token)"
+   export AGENT_REGISTRY_AUTH_TOKEN="$(gcloud auth print-access-token --quiet)"
 
-   # Option 1 (Local Skills + Starter Plugin — add --only-skills if Terraform owns Services)
+   # Option 1 (Local Skills + Starter Plugin — standalone Skills go to global; add --only-skills if Terraform owns Services)
    .venv/bin/python -m tools.plugin_sync ingest \
      --source-type local \
      --path local-skills \
@@ -257,8 +274,10 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
      --registry-url "${AGENT_REGISTRY_BASE_URL}" \
      --project "${GCP_PROJECT_ID}" \
      --location "${GCP_LOCATION}" \
+     --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
      --target-state TARGET_STATE_ACTIVE \
      --scanning-policy ENABLED_BLOCKING \
+     --wait-for-scan \
      --only-skills \
      --skip-mcp-probe
 
@@ -273,18 +292,25 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
      --registry-url "${AGENT_REGISTRY_BASE_URL}" \
      --project "${GCP_PROJECT_ID}" \
      --location "${GCP_LOCATION}" \
+     --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
      --target-state TARGET_STATE_ACTIVE \
      --scanning-policy ENABLED_BLOCKING \
+     --wait-for-scan \
      --only-skills \
      --skip-mcp-probe
    ```
 
-2. **Via Terraform (`terraform/core/`) with `skills_source_mode = "local" | "git"`:**
-   [terraform/core/agent_registry_services.tf](../../terraform/core/agent_registry_services.tf) manages the three GA `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api`) and reads back their projected IDs & URNs via `data.google_agent_registry_mcp_server`, `data.google_agent_registry_agent`, and `data.google_agent_registry_endpoint` using `basename(...registry_resource)`.
+2. **Via Terraform (`terraform/core/`) with `skills_location = "global"` and `skills_source_mode = "local" | "git"`:**
+   [terraform/core/agent_registry_services.tf](../../terraform/core/agent_registry_services.tf) manages the three GA regional `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` in `var.location`, default Bangkok `asia-southeast3`) and reads back their projected IDs & URNs via `data.google_agent_registry_mcp_server`, `data.google_agent_registry_agent`, and `data.google_agent_registry_endpoint` using `basename(...registry_resource)`.
 
-   Standalone Skills are bootstrapped cleanly via [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf) (`terraform_data`), which **always passes `--only-skills --skip-mcp-probe`** so Terraform-managed `google_agent_registry_service` resources are never overwritten. Choose your mode in `terraform/core/terraform.tfvars` (see [terraform/core/variables.tf](../../terraform/core/variables.tf) and [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example)):
+   Standalone Skills are bootstrapped cleanly into `var.skills_location` (`"global"` default, or `"us"`/`"eu"` for CMEK) via [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf) (`terraform_data`), which **always passes `--only-skills --skip-mcp-probe --wait-for-scan`** so Terraform-managed `google_agent_registry_service` resources are never overwritten and async scans settle cleanly. Choose your mode in `terraform/core/terraform.tfvars` (see [terraform/core/variables.tf](../../terraform/core/variables.tf) and [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example)):
 
    ```hcl
+   # Verified live APAC regional split: regional Services (asia-southeast3) + shared global Skills
+   location                       = "asia-southeast3"
+   secondary_location             = "asia-southeast1"
+   skills_location                = "global" # "global" (APAC default), "us", or "eu" (CMEK)
+
    # Option 1 (Default): Local starter plugin + pre-prepared standalone local-skills/
    skills_source_mode             = "local"
    starter_plugin_dir             = "../../starter-marketplace/plugins/gcp-finops-toolkit"
@@ -304,11 +330,13 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
    # skills_per_skill_plugin = false
    ```
 
-3. **Inspect live resources via `gcloud`:**
+3. **Inspect live resources via `gcloud` (note `global` for Skills vs. `asia-southeast3` for Services):**
    ```bash
-   gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
-   gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
-   gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}"
+   # Standalone Skills live in global (or us/eu for CMEK):
+   gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet
+   # Projected MCP Servers & A2A Agents live in Bangkok primary (asia-southeast3) / Singapore secondary (asia-southeast1):
+   gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
+   gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
    ```
 
 ---
@@ -319,6 +347,8 @@ Practice implementing `canonical_private_skill_id`, `enrich_skill_frontmatter`, 
 
 ```bash
 .venv/bin/python starter/lab02_plugin_sync_exercise.py
+# Or verify all starter exercises together:
+make starter-check
 ```
 
 Fill in the `# WORKSHOP-TODO(lab-02)` blocks and re-run until all built-in self-checks print `[PASS]`. Compare against [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py).
@@ -338,9 +368,14 @@ Fill in the `# WORKSHOP-TODO(lab-02)` blocks and re-run until all built-in self-
 
 | Symptom | Cause | Fix |
 | :--- | :--- | :--- |
+| `403 SERVICE_DISABLED` calling `https://agentregistry.googleapis.com/v1` | `agentregistry.googleapis.com` has not been enabled on the fresh project yet | Either complete Lab 02 in Local Mock Mode and let `scripts/deploy_gcp.sh` / `terraform/core` in [Lab 03](03-build-deploy-middleware.md) enable all APIs automatically, or run `gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet` first. |
 | `404 NOT_FOUND` when calling `GET .../skills/cost-anomaly-triage` | Missing `private-` auto-prefix on private publisher skills | Always address the skill as `skills/private-cost-anomaly-triage` after creation. |
 | `400 INVALID_ARGUMENT: Generic 'labels' map is not supported` | Attempted to pass a `labels` object to `Service` or `Skill` | Move custom string attributes into `SKILL.md` `frontmatter.metadata` (`map<string, string>`). |
 | `400 INVALID_ARGUMENT: Top-level 'interfaces' MUST be empty` | Passed both top-level `interfaces` and `agentSpec.type = "A2A_AGENT_CARD"` | Omit top-level `interfaces`; declare endpoints inside `agentSpec.content.supportedInterfaces`. |
+| `400 INVALID_ARGUMENT: proto unmarshal failed: unknown field "stateTransitionHistory"` | Included legacy A2A v0.x `capabilities.stateTransitionHistory` in `agent-card.json` or Terraform `agent_spec.content` | Remove `stateTransitionHistory`; keep only A2A v1.0 `capabilities` (`streaming`, `pushNotifications`). |
+| `400 INVALID_ARGUMENT: duplicate interface url found in agent card` | Declared two `supportedInterfaces` bindings (e.g. `JSONRPC` and `HTTP+JSON`) with the same `/a2a` URL | Split each protocol binding onto a distinct path (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`). |
+| `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results` | Re-deployed an existing skill under `ENABLED_BLOCKING` and patched `defaultRevision` before the new `SkillRevision`'s async scan (~10s) finished | Always pass `--wait-for-scan` to `tools.plugin_sync` so `wait_for_revision_scan_completion()` polls `scanState` to completion before promoting `defaultRevision`. |
+| Live `skills` create/list rejected in `asia-southeast3` / `asia-southeast1` | Standalone `Skill` resources are hosted only in `global`, `us`, or `eu` on live Agent Registry `v1` | Pass `--skills-location global` (or set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"`) while keeping Services in Bangkok (`asia-southeast3`) / Singapore (`asia-southeast1`). |
 
 ---
 

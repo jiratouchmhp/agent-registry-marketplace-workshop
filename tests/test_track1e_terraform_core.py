@@ -341,9 +341,17 @@ def test_variables_and_secure_defaults() -> None:
     required_vars = {
         "project_id",
         "location",
+        "secondary_location",
+        "enable_secondary_region",
+        "agent_registry_location",
+        "skills_location",
+        "force_destroy_staging_bucket",
         "middleware_image",
         "sample_mcp_image",
         "sample_a2a_image",
+        "secondary_middleware_image",
+        "secondary_sample_mcp_image",
+        "secondary_sample_a2a_image",
         "enable_skills_bootstrap",
         "starter_plugin_dir",
         "allow_unauthenticated_workshop_demo",
@@ -351,7 +359,39 @@ def test_variables_and_secure_defaults() -> None:
     missing = required_vars - set(var_blocks)
     assert not missing, f"Missing required variables in variables.tf: {sorted(missing)}"
 
-    assert re.search(r'default\s*=\s*"us-central1"', var_blocks["location"])
+    assert re.search(r'default\s*=\s*"asia-southeast3"', var_blocks["location"]), (
+        "location must default to Bangkok primary (asia-southeast3)"
+    )
+    assert re.search(r'default\s*=\s*"asia-southeast1"', var_blocks["secondary_location"]), (
+        "secondary_location must default to Singapore secondary (asia-southeast1)"
+    )
+    assert "validation" in var_blocks["secondary_location"], (
+        "secondary_location must include a non-empty validation block"
+    )
+    assert re.search(r"default\s*=\s*false\b", var_blocks["enable_secondary_region"]), (
+        "enable_secondary_region must default to false"
+    )
+    assert re.search(r'default\s*=\s*""', var_blocks["agent_registry_location"]), (
+        "agent_registry_location must default to empty string (inherits var.location)"
+    )
+    assert re.search(r'default\s*=\s*"global"', var_blocks["skills_location"]), (
+        'skills_location must default to "global"'
+    )
+    assert re.search(
+        r'contains\(\[\s*"global"\s*,\s*"us"\s*,\s*"eu"\s*\]\s*,\s*var\.skills_location\s*\)',
+        var_blocks["skills_location"],
+    ), 'skills_location validation must enforce contains(["global", "us", "eu"], var.skills_location)'
+    assert re.search(r"default\s*=\s*false\b", var_blocks["force_destroy_staging_bucket"]), (
+        "force_destroy_staging_bucket must default to false (safe default)"
+    )
+    for sec_img_var in (
+        "secondary_middleware_image",
+        "secondary_sample_mcp_image",
+        "secondary_sample_a2a_image",
+    ):
+        assert re.search(r'default\s*=\s*""', var_blocks[sec_img_var]), (
+            f"{sec_img_var} must default to empty string"
+        )
     assert re.search(r"default\s*=\s*true\b", var_blocks["enable_skills_bootstrap"])
     assert re.search(r"default\s*=\s*false\b", var_blocks["allow_unauthenticated_workshop_demo"]), (
         "allow_unauthenticated_workshop_demo must default to false (secure by default)"
@@ -492,14 +532,45 @@ def test_iam_least_privilege_and_p4sa_bucket_access() -> None:
         f"Agent Registry P4SA must receive roles/storage.objectViewer on staging bucket, got: {p4sa_bucket_roles}"
     )
 
-    ar_repos = _extract_hcl_blocks(iam_hcl, "resource", "google_artifact_registry_repository")
-    assert len(ar_repos) == 1
-    assert re.search(r'format\s*=\s*"DOCKER"', ar_repos[0][1])
+    ar_repos = {
+        labels[1]: body
+        for labels, body in _extract_hcl_blocks(
+            iam_hcl, "resource", "google_artifact_registry_repository"
+        )
+    }
+    assert {"workshop_images", "workshop_images_secondary"} == set(ar_repos)
+    assert re.search(r'format\s*=\s*"DOCKER"', ar_repos["workshop_images"])
+    assert re.search(r"location\s*=\s*var\.location\b", ar_repos["workshop_images"])
+    assert re.search(
+        r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0",
+        ar_repos["workshop_images_secondary"],
+    )
+    assert re.search(
+        r"location\s*=\s*var\.secondary_location\b", ar_repos["workshop_images_secondary"]
+    )
+    assert re.search(r'format\s*=\s*"DOCKER"', ar_repos["workshop_images_secondary"])
+
+    ar_iam_members = {
+        labels[1]: body
+        for labels, body in _extract_hcl_blocks(
+            iam_hcl, "resource", "google_artifact_registry_repository_iam_member"
+        )
+    }
+    assert "ci_publisher_ar_writer_secondary" in ar_iam_members
+    assert re.search(
+        r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0",
+        ar_iam_members["ci_publisher_ar_writer_secondary"],
+    )
+    assert re.search(
+        r'role\s*=\s*"roles/artifactregistry\.writer"',
+        ar_iam_members["ci_publisher_ar_writer_secondary"],
+    )
 
     buckets = _extract_hcl_blocks(iam_hcl, "resource", "google_storage_bucket")
     assert len(buckets) == 1
     assert re.search(r"uniform_bucket_level_access\s*=\s*true", buckets[0][1])
     assert re.search(r'public_access_prevention\s*=\s*"enforced"', buckets[0][1])
+    assert re.search(r"force_destroy\s*=\s*var\.force_destroy_staging_bucket\b", buckets[0][1])
 
 
 def test_cloud_run_services_and_middleware_env_vars() -> None:
@@ -510,7 +581,19 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
             cloud_run_hcl, "resource", "google_cloud_run_v2_service"
         )
     }
-    assert {"sample_mcp_server", "sample_a2a_agent", "polyglot_middleware"} == set(services)
+    assert {
+        "sample_mcp_server",
+        "sample_a2a_agent",
+        "polyglot_middleware",
+        "sample_mcp_server_secondary",
+        "sample_a2a_agent_secondary",
+        "polyglot_middleware_secondary",
+    } == set(services)
+
+    assert re.search(
+        r'agent_registry_location\s*=\s*var\.agent_registry_location\s*!=\s*""\s*\?\s*var\.agent_registry_location\s*:\s*var\.location',
+        cloud_run_hcl,
+    ), "cloud_run.tf must define local.agent_registry_location defaulting to var.location"
 
     assert re.search(r'name\s*=\s*"sample-mcp-server"', services["sample_mcp_server"])
     assert re.search(r'name\s*=\s*"sample-a2a-agent"', services["sample_a2a_agent"])
@@ -527,6 +610,9 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
     for env_name in [
         "GCP_PROJECT_ID",
         "GCP_LOCATION",
+        "GCP_SECONDARY_LOCATION",
+        "AGENT_REGISTRY_LOCATION",
+        "AGENT_REGISTRY_SKILLS_LOCATION",
         "AGENT_REGISTRY_BASE_URL",
         "MIDDLEWARE_PUBLIC_URL",
         "REQUIRE_KMS_SIGNATURE",
@@ -535,13 +621,56 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
             f"polyglot_middleware missing env var {env_name}"
         )
 
+    assert re.search(r'GCP_SECONDARY_LOCATION[\s\S]*?var\.secondary_location', mw_body)
+    assert re.search(r'AGENT_REGISTRY_LOCATION[\s\S]*?local\.agent_registry_location', mw_body)
+    assert re.search(r'AGENT_REGISTRY_SKILLS_LOCATION[\s\S]*?var\.skills_location', mw_body)
     assert '"https://agentregistry.googleapis.com/v1"' in mw_body
     assert re.search(r'REQUIRE_KMS_SIGNATURE[\s\S]*?"false"', mw_body)
+
+    # Secondary-region Cloud Run v2 services (Singapore active-standby, opt-in via enable_secondary_region)
+    for sec_svc in (
+        "sample_mcp_server_secondary",
+        "sample_a2a_agent_secondary",
+        "polyglot_middleware_secondary",
+    ):
+        sec_body = services[sec_svc]
+        assert re.search(
+            r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0", sec_body
+        ), f"{sec_svc} must be gated by count = var.enable_secondary_region ? 1 : 0"
+        assert re.search(r"location\s*=\s*var\.secondary_location\b", sec_body), (
+            f"{sec_svc} must deploy to var.secondary_location"
+        )
+
+    assert "google_service_account.middleware_sa.email" in services["polyglot_middleware_secondary"]
+    assert re.search(
+        r'AGENT_REGISTRY_LOCATION[\s\S]*?local\.agent_registry_location',
+        services["polyglot_middleware_secondary"],
+    )
+    assert re.search(
+        r'AGENT_REGISTRY_SKILLS_LOCATION[\s\S]*?var\.skills_location',
+        services["polyglot_middleware_secondary"],
+    )
+    assert re.search(r'name\s*=\s*"A2A_PUBLIC_URL"', services["sample_a2a_agent_secondary"])
+    assert (
+        "https://sample-a2a-agent-${data.google_project.current.number}.${var.secondary_location}.run.app"
+        in cloud_run_hcl
+    )
 
     run_iam_blocks = _extract_hcl_blocks(
         cloud_run_hcl, "resource", "google_cloud_run_v2_service_iam_member"
     )
-    assert len(run_iam_blocks) >= 1
+    run_iam_by_name = {labels[1]: body for labels, body in run_iam_blocks}
+    assert len(run_iam_blocks) == 6
+    for sec_iam in (
+        "middleware_secondary_unauthenticated_demo",
+        "sample_mcp_secondary_unauthenticated_demo",
+        "sample_a2a_secondary_unauthenticated_demo",
+    ):
+        assert sec_iam in run_iam_by_name
+        assert re.search(
+            r"count\s*=\s*var\.enable_secondary_region\s*&&\s*var\.allow_unauthenticated_workshop_demo\s*\?\s*1\s*:\s*0",
+            run_iam_by_name[sec_iam],
+        ), f"{sec_iam} must require both enable_secondary_region and allow_unauthenticated_workshop_demo"
     for labels, body in run_iam_blocks:
         if "allUsers" in body:
             assert "var.allow_unauthenticated_workshop_demo" in body, (
@@ -564,6 +693,9 @@ def test_agent_registry_services_and_a2a_no_top_level_interfaces() -> None:
     for name, body in services.items():
         assert not re.search(r"(?m)^\s*labels\s*=", body), (
             f"google_agent_registry_service.{name} must not define unsupported `labels` attribute"
+        )
+        assert re.search(r"location\s*=\s*local\.agent_registry_location\b", body), (
+            f"google_agent_registry_service.{name} must use local.agent_registry_location"
         )
 
     # 1. MCP Server service: TOOL_SPEC + JSONRPC interfaces
@@ -606,10 +738,12 @@ def test_agent_registry_services_and_a2a_no_top_level_interfaces() -> None:
     ep_ds = _extract_hcl_blocks(ar_hcl, "data", "google_agent_registry_endpoint")
 
     assert len(mcp_ds) == 1
+    assert re.search(r"location\s*=\s*local\.agent_registry_location\b", mcp_ds[0][1])
     assert "basename(google_agent_registry_service.finops_mcp.registry_resource)" in mcp_ds[0][1]
     assert not re.search(r"(?m)^\s*filter\s*=", mcp_ds[0][1])
 
     assert len(agent_ds) == 1
+    assert re.search(r"location\s*=\s*local\.agent_registry_location\b", agent_ds[0][1])
     assert (
         "basename(google_agent_registry_service.finops_a2a_agent.registry_resource)"
         in agent_ds[0][1]
@@ -617,6 +751,7 @@ def test_agent_registry_services_and_a2a_no_top_level_interfaces() -> None:
     assert not re.search(r"(?m)^\s*filter\s*=", agent_ds[0][1])
 
     assert len(ep_ds) == 1
+    assert re.search(r"location\s*=\s*local\.agent_registry_location\b", ep_ds[0][1])
     assert "basename(google_agent_registry_service.finops_endpoint.registry_resource)" in ep_ds[0][1]
     assert not re.search(r"(?m)^\s*filter\s*=", ep_ds[0][1])
 
@@ -691,6 +826,7 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
     assert re.search(r"count\s*=\s*var\.enable_skills_bootstrap\s*\?\s*1\s*:\s*0", body)
     assert "triggers_replace" in body
     for trigger_key in [
+        "skills_location",
         "skills_source_mode",
         "local_skills_dir",
         "local_skills_content_hash",
@@ -718,7 +854,22 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
     assert "precondition" in body, (
         "terraform_data.bootstrap_starter_skills should declare a lifecycle precondition for git mode skills_repo_url"
     )
+    assert re.search(r"location\s*=\s*local\.agent_registry_location\b", body), (
+        "skills_bootstrap.tf must target local.agent_registry_location"
+    )
+    assert re.search(r"skills_location\s*=\s*var\.skills_location\b", body), (
+        "skills_bootstrap.tf must track var.skills_location in triggers_replace"
+    )
+    assert re.search(r"GCP_LOCATION\s*=\s*local\.agent_registry_location\b", body), (
+        "skills_bootstrap.tf local-exec must pass local.agent_registry_location"
+    )
+    assert re.search(r"AGENT_REGISTRY_SKILLS_LOCATION\s*=\s*var\.skills_location\b", body), (
+        "skills_bootstrap.tf local-exec must pass var.skills_location via AGENT_REGISTRY_SKILLS_LOCATION"
+    )
     assert "-m tools.plugin_sync ingest" in body
+    assert "--wait-for-scan" in body, (
+        "skills_bootstrap.tf must pass --wait-for-scan so ENABLED_BLOCKING scans settle during apply"
+    )
     assert "--only-skills" in body
     assert "--skip-mcp-probe" in body
     assert "google_agent_registry_skill" in skills_hcl
@@ -773,6 +924,7 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
             "STUB_LOG_FILE": str(log_file),
             "GCP_PROJECT_ID": spec["project_defaults"]["project_id"],
             "GCP_LOCATION": spec["project_defaults"]["location"],
+            "AGENT_REGISTRY_SKILLS_LOCATION": spec["project_defaults"]["skills_location"],
             "AGENT_REGISTRY_BASE_URL": "https://agentregistry.googleapis.com/v1",
             "SKILL_STAGING_BUCKET": "acme-agent-governance-agent-registry-skills",
             "SKILLS_SOURCE_MODE": "local",
@@ -813,6 +965,9 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
         assert "--source-type" in call and call[call.index("--source-type") + 1] == "local"
         assert "--only-skills" in call, "Every local-mode ingest call MUST pass --only-skills"
         assert "--skip-mcp-probe" in call, "Every local-mode ingest call MUST pass --skip-mcp-probe"
+        assert "--wait-for-scan" in call, "Every local-mode ingest call MUST pass --wait-for-scan"
+        assert call[call.index("--location") + 1] == "global"
+        assert call[call.index("--skills-location") + 1] == "global"
         assert "--target-state" in call and call[call.index("--target-state") + 1] == "TARGET_STATE_ACTIVE"
         assert "--scanning-policy" in call and call[call.index("--scanning-policy") + 1] == "ENABLED_BLOCKING"
     assert calls_local[0][calls_local[0].index("--path") + 1] == str(STARTER_PLUGIN_DIR)
@@ -876,6 +1031,7 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
     assert "--per-skill-plugin" in git_call
     assert "--only-skills" in git_call, "git-mode ingest call MUST pass --only-skills"
     assert "--skip-mcp-probe" in git_call, "git-mode ingest call MUST pass --skip-mcp-probe"
+    assert "--wait-for-scan" in git_call, "git-mode ingest call MUST pass --wait-for-scan"
 
     # 2f. Option 2 (git): minimal optional args omitted cleanly.
     proc_git_min, calls_git_min = _run_bootstrap(
@@ -888,6 +1044,7 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
     assert "--per-skill-plugin" not in calls_git_min[0]
     assert "--only-skills" in calls_git_min[0]
     assert "--skip-mcp-probe" in calls_git_min[0]
+    assert "--wait-for-scan" in calls_git_min[0]
 
     # 2g. Custom command override bypasses default plugin_sync invocations.
     proc_custom, calls_custom = _run_bootstrap(
@@ -915,30 +1072,34 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
         check=False,
     )
     if ingest_help.returncode == 0:
+        dry_run_cmd = [
+            sys.executable,
+            "-m",
+            "tools.plugin_sync",
+            "ingest",
+            "--source-type",
+            "local",
+            "--path",
+            str(STARTER_PLUGIN_DIR),
+            "--registry-url",
+            "https://agentregistry.googleapis.com/v1",
+            "--project",
+            spec["project_defaults"]["project_id"],
+            "--location",
+            spec["project_defaults"]["location"],
+            "--target-state",
+            "TARGET_STATE_ACTIVE",
+            "--scanning-policy",
+            "ENABLED_BLOCKING",
+            "--only-skills",
+            "--skip-mcp-probe",
+            "--dry-run",
+        ]
+        if "--wait-for-scan" in ingest_help.stdout:
+            dry_run_cmd.append("--wait-for-scan")
+
         real_dry_run = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "tools.plugin_sync",
-                "ingest",
-                "--source-type",
-                "local",
-                "--path",
-                str(STARTER_PLUGIN_DIR),
-                "--registry-url",
-                "https://agentregistry.googleapis.com/v1",
-                "--project",
-                spec["project_defaults"]["project_id"],
-                "--location",
-                spec["project_defaults"]["location"],
-                "--target-state",
-                "TARGET_STATE_ACTIVE",
-                "--scanning-policy",
-                "ENABLED_BLOCKING",
-                "--only-skills",
-                "--skip-mcp-probe",
-                "--dry-run",
-            ],
+            dry_run_cmd,
             cwd=REPO_ROOT,
             env=env,
             capture_output=True,
@@ -956,6 +1117,25 @@ def test_skills_bootstrap_uses_terraform_data_and_skills_only_runtime_smoke(
 def test_tfvars_example_documents_both_skill_source_options() -> None:
     tfvars_text = (TF_CORE_DIR / "terraform.tfvars.example").read_text(encoding="utf-8")
     uncommented = _strip_hcl_comments(tfvars_text)
+
+    # Bangkok primary + Singapore secondary multi-region defaults + two-stage Cloud Build guide.
+    assert re.search(r'(?m)^\s*location\s*=\s*"asia-southeast3"', uncommented), (
+        'terraform.tfvars.example must default location to "asia-southeast3" (Bangkok)'
+    )
+    assert re.search(r'(?m)^\s*secondary_location\s*=\s*"asia-southeast1"', uncommented), (
+        'terraform.tfvars.example must default secondary_location to "asia-southeast1" (Singapore)'
+    )
+    assert re.search(r'(?m)^\s*skills_location\s*=\s*"global"', uncommented), (
+        'terraform.tfvars.example must default skills_location to "global"'
+    )
+    assert re.search(r"(?m)^\s*enable_secondary_region\s*=\s*false\b", uncommented), (
+        "terraform.tfvars.example must set enable_secondary_region = false by default"
+    )
+    assert re.search(r"(?m)^\s*force_destroy_staging_bucket\s*=\s*false\b", uncommented)
+    assert "scripts/build_images_cloudbuild.sh" in tfvars_text, (
+        "terraform.tfvars.example must document two-stage Cloud Build image script"
+    )
+    assert "asia-southeast3-docker.pkg.dev" in uncommented
 
     # Option 1 must be active by default.
     assert re.search(r'(?m)^\s*skills_source_mode\s*=\s*"local"', uncommented), (
@@ -987,14 +1167,21 @@ def test_tfvars_example_documents_both_skill_source_options() -> None:
 
 def test_required_outputs_exported() -> None:
     outputs_hcl = (TF_CORE_DIR / "outputs.tf").read_text(encoding="utf-8")
-    exported = {labels[0] for labels, _ in _extract_hcl_blocks(outputs_hcl, "output")}
+    output_blocks = {labels[0]: body for labels, body in _extract_hcl_blocks(outputs_hcl, "output")}
+    exported = set(output_blocks)
 
     required_outputs = {
         "project_id",
         "project_number",
         "location",
+        "secondary_location",
+        "agent_registry_location",
+        "skills_location",
         "middleware_url",
         "middleware_mcp_url",
+        "secondary_middleware_url",
+        "secondary_middleware_mcp_url",
+        "secondary_artifact_registry_repository_url",
         "middleware_sa_email",
         "mcp_server_resource_id",
         "mcp_server_urn",
@@ -1011,6 +1198,14 @@ def test_required_outputs_exported() -> None:
     }
     missing = required_outputs - exported
     assert not missing, f"Missing required outputs in outputs.tf: {sorted(missing)}"
+
+    assert (
+        'try(google_cloud_run_v2_service.polyglot_middleware_secondary[0].uri, "")'
+        in output_blocks["secondary_middleware_url"]
+    )
+    assert "try(" in output_blocks["secondary_middleware_mcp_url"]
+    assert "try(" in output_blocks["secondary_artifact_registry_repository_url"]
+    assert "local.agent_registry_location" in output_blocks["agent_registry_location"]
 
 
 def test_zero_references_to_security_governance() -> None:

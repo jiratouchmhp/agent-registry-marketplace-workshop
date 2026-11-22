@@ -29,6 +29,7 @@ import json
 import os
 import posixpath
 import re
+import shutil
 import stat
 import subprocess
 import time
@@ -47,7 +48,7 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 DEFAULT_REGISTRY_BASE_URL = "https://agentregistry.googleapis.com/v1"
 DEFAULT_PROJECT_ID = "acme-agent-governance"
-DEFAULT_LOCATION = "us-central1"
+DEFAULT_LOCATION = "asia-southeast3"
 PRIVATE_SKILL_PREFIX = "private-"
 APPROVED_SKILL_FILTER = "state=ACTIVE AND defaultRevisionFindingCount=0"
 GCE_METADATA_TOKEN_URL = (
@@ -143,6 +144,7 @@ class DiscoveredCapabilities:
     project_id: str
     location: str
     base_url: str
+    skills_location: str = ""
     skills: list[dict[str, Any]] = field(default_factory=list)
     extracted_skills: list[ExtractedSkill] = field(default_factory=list)
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
@@ -153,6 +155,7 @@ class DiscoveredCapabilities:
         return {
             "project_id": self.project_id,
             "location": self.location,
+            "skills_location": self.skills_location or self.location,
             "base_url": self.base_url,
             "skills": self.skills,
             "extracted_skills": [s.to_summary_dict() for s in self.extracted_skills],
@@ -160,6 +163,28 @@ class DiscoveredCapabilities:
             "agents": self.agents,
             "resolved_bindings": self.resolved_bindings,
         }
+
+
+def is_private_skill(skill: dict[str, Any]) -> bool:
+    """Return True when an Agent Registry Skill belongs to the private enterprise publisher.
+
+    Live Google Cloud Agent Registry ``locations/global/skills`` returns 100+ built-in
+    first-party Google skills (e.g., ``cloud.google.com-*``, ``discoveryengine.googleapis.com-*``).
+    Private enterprise skills always have resource IDs prefixed with ``private-`` (and may omit
+    ``publisher`` on live v1 responses).
+    """
+    name = str(skill.get("name", "")).strip()
+    short_id = name.rsplit("/", 1)[-1] if name else ""
+    if short_id.startswith(PRIVATE_SKILL_PREFIX):
+        return True
+    publisher = str(skill.get("publisher", "")).strip().lower()
+    if publisher and (
+        publisher == "private"
+        or publisher.endswith("/publishers/private")
+        or publisher == "publisher_tier_private"
+    ):
+        return True
+    return False
 
 
 def _url_origin(url: httpx.URL) -> tuple[str, str, int | None]:
@@ -170,6 +195,21 @@ def _url_origin(url: httpx.URL) -> tuple[str, str, int | None]:
     if port is None:
         port = 443 if scheme == "https" else (80 if scheme == "http" else None)
     return (scheme, host, port)
+
+
+def _should_preserve_auth_on_redirect(
+    initial_url: httpx.URL, next_url: httpx.URL
+) -> bool:
+    """Return True ONLY for same-origin Google API media download redirects (/download/...)."""
+    if _url_origin(initial_url) != _url_origin(next_url):
+        return False
+    lower_path = (next_url.path or "").lower()
+    if "/scotty-signed/" in lower_path:
+        return False
+    query_keys = {k.lower() for k in next_url.params.keys()}
+    if query_keys & {"x-goog-signature", "signature", "googleaccessid", "x-goog-credential"}:
+        return False
+    return lower_path.startswith("/download/")
 
 
 def _normalize_sha256(value: str) -> str:
@@ -533,6 +573,8 @@ class PlatformAgentConsumer:
         *,
         project_id: str = DEFAULT_PROJECT_ID,
         location: str = DEFAULT_LOCATION,
+        skills_location: str | None = None,
+        only_private_skills: bool = True,
         base_url: str = DEFAULT_REGISTRY_BASE_URL,
         access_token: str | None = None,
         quota_project_id: str | None = None,
@@ -550,6 +592,14 @@ class PlatformAgentConsumer:
         self.project_id = project_id
         self.location = location
         self.base_url = base_url.rstrip("/")
+        cleaned_skills_loc = skills_location.strip() if isinstance(skills_location, str) else ""
+        if cleaned_skills_loc:
+            self.skills_location = cleaned_skills_loc
+        elif self._is_googleapis and location not in ("global", "us", "eu"):
+            self.skills_location = "global"
+        else:
+            self.skills_location = location
+        self.only_private_skills = only_private_skills
         self.access_token = access_token.strip() if isinstance(access_token, str) and access_token.strip() else None
         self.quota_project_id = quota_project_id or project_id
         self.kms_public_key_pem = kms_public_key_pem
@@ -585,6 +635,13 @@ class PlatformAgentConsumer:
             or DEFAULT_LOCATION
         )
         base_url = os.environ.get("AGENT_REGISTRY_BASE_URL", DEFAULT_REGISTRY_BASE_URL)
+        skills_location = (
+            os.environ.get("AGENT_REGISTRY_SKILLS_LOCATION", "").strip() or None
+        )
+        include_public_skills = (
+            os.environ.get("INCLUDE_PUBLIC_SKILLS", "false").strip().lower()
+            in {"1", "true", "yes"}
+        )
         access_token = (
             os.environ.get("AGENT_REGISTRY_ACCESS_TOKEN")
             or os.environ.get("AGENT_REGISTRY_AUTH_TOKEN")
@@ -603,6 +660,8 @@ class PlatformAgentConsumer:
         return cls(
             project_id=project_id,
             location=location,
+            skills_location=skills_location,
+            only_private_skills=not include_public_skills,
             base_url=base_url,
             access_token=access_token,
             kms_public_key_pem=kms_pem,
@@ -613,6 +672,10 @@ class PlatformAgentConsumer:
     @property
     def parent(self) -> str:
         return f"projects/{self.project_id}/locations/{self.location}"
+
+    @property
+    def skills_parent(self) -> str:
+        return f"projects/{self.project_id}/locations/{self.skills_location}"
 
     def _build_httpx_client(
         self,
@@ -695,9 +758,10 @@ class PlatformAgentConsumer:
         """Fallback for local workstations targeting live googleapis.com via gcloud ADC."""
 
         def _run_gcloud() -> str:
+            gcloud_bin = shutil.which("gcloud") or str(Path.home() / ".local" / "bin" / "gcloud")
             for cmd in (
-                ["gcloud", "auth", "application-default", "print-access-token"],
-                ["gcloud", "auth", "print-access-token"],
+                [gcloud_bin, "auth", "application-default", "print-access-token", "--quiet"],
+                [gcloud_bin, "auth", "print-access-token", "--quiet"],
             ):
                 try:
                     proc = subprocess.run(
@@ -771,7 +835,7 @@ class PlatformAgentConsumer:
             raise ValueError(
                 f"Invalid skill resource ID {segment!r}: expected safe single path segment"
             )
-        return f"{self.parent}/skills/{quote(segment, safe='')}"
+        return f"{self.skills_parent}/skills/{quote(segment, safe='')}"
 
     def _build_url(self, resource_or_relative_path: str) -> str:
         cleaned = resource_or_relative_path.lstrip("/")
@@ -803,6 +867,35 @@ class PlatformAgentConsumer:
 
     # --- Standalone Skills (GA v1) ---
 
+    async def list_skills(
+        self,
+        *,
+        filter_expr: str | None = None,
+        page_size: int = 200,
+        max_pages: int = 20,
+    ) -> list[dict[str, Any]]:
+        """List Skills via ``GET .../{skills_parent}/skills`` with pagination."""
+        skills: list[dict[str, Any]] = []
+        page_token: str | None = None
+        for _ in range(max_pages):
+            params: dict[str, Any] = {"pageSize": str(page_size)}
+            if filter_expr:
+                params["filter"] = filter_expr
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await self._request("GET", f"{self.skills_parent}/skills", params=params)
+            data = resp.json()
+            page_items = data.get("skills", [])
+            if isinstance(page_items, list):
+                skills.extend(page_items)
+            next_token = data.get("nextPageToken")
+            if not next_token or str(next_token) == str(page_token or ""):
+                break
+            page_token = str(next_token)
+        if self.only_private_skills:
+            return [s for s in skills if isinstance(s, dict) and is_private_skill(s)]
+        return skills
+
     async def search_skills_page(
         self,
         search_string: str = "",
@@ -812,7 +905,7 @@ class PlatformAgentConsumer:
         page_size: int | None = None,
         page_token: str | None = None,
     ) -> dict[str, Any]:
-        """Execute one page of ``POST .../skills:search``."""
+        """Execute one page of ``POST .../{skills_parent}/skills:search``."""
         payload: dict[str, Any] = {"searchType": search_type}
         if search_string:
             payload["searchString"] = search_string
@@ -822,7 +915,7 @@ class PlatformAgentConsumer:
             payload["pageSize"] = page_size
         if page_token:
             payload["pageToken"] = page_token
-        resp = await self._request("POST", "skills:search", json_body=payload)
+        resp = await self._request("POST", f"{self.skills_parent}/skills:search", json_body=payload)
         return resp.json()
 
     async def search_skills(
@@ -832,11 +925,12 @@ class PlatformAgentConsumer:
         search_type: Literal["SEMANTIC", "KEYWORD"] = "SEMANTIC",
         filter_expr: str | None = APPROVED_SKILL_FILTER,
         page_size: int | None = None,
+        max_pages: int = 20,
     ) -> list[dict[str, Any]]:
         """Discover approved Skills via ``skills:search`` (follows pagination)."""
         skills: list[dict[str, Any]] = []
         page_token: str | None = None
-        while True:
+        for _ in range(max_pages):
             data = await self.search_skills_page(
                 search_string=search_string,
                 search_type=search_type,
@@ -844,10 +938,16 @@ class PlatformAgentConsumer:
                 page_size=page_size,
                 page_token=page_token,
             )
-            skills.extend(data.get("skills", []))
-            page_token = data.get("nextPageToken")
-            if not page_token:
-                return skills
+            page_items = data.get("skills", [])
+            if isinstance(page_items, list):
+                skills.extend(page_items)
+            next_token = data.get("nextPageToken")
+            if not next_token or str(next_token) == str(page_token or ""):
+                break
+            page_token = str(next_token)
+        if self.only_private_skills:
+            return [s for s in skills if isinstance(s, dict) and is_private_skill(s)]
+        return skills
 
     async def get_skill(self, skill_name: str) -> dict[str, Any]:
         """Fetch logical ``Skill`` metadata (Step 1 of 2-step skill download)."""
@@ -876,13 +976,15 @@ class PlatformAgentConsumer:
         digest when ``expected_sha256`` is provided.
         """
         url = self._build_url(revision_name)
+        api_headers = await self._resolve_api_headers()
         resp = await self._client.request(
             "GET",
             url,
-            headers=await self._resolve_api_headers(),
+            headers=api_headers,
             params={"alt": "media"},
             follow_redirects=False,
         )
+        initial_url = resp.url
         hops = 0
         while resp.is_redirect and "location" in resp.headers:
             if hops >= max_redirects:
@@ -891,10 +993,15 @@ class PlatformAgentConsumer:
                     request=resp.request,
                 )
             next_url = resp.url.join(resp.headers["location"])
+            next_headers = (
+                dict(api_headers)
+                if _should_preserve_auth_on_redirect(initial_url, next_url)
+                else {}
+            )
             resp = await self._client.request(
                 "GET",
                 str(next_url),
-                headers={},
+                headers=next_headers,
                 follow_redirects=False,
             )
             hops += 1
@@ -1224,6 +1331,32 @@ class PlatformAgentConsumer:
         resp = await self._request("GET", agent_name)
         return resp.json()
 
+    # --- Endpoints (GA v1) ---
+
+    async def list_endpoints(
+        self,
+        *,
+        filter_expr: str | None = None,
+        page_size: int | None = None,
+    ) -> list[dict[str, Any]]:
+        """List registered Endpoints via ``GET .../{parent}/endpoints``."""
+        endpoints: list[dict[str, Any]] = []
+        page_token: str | None = None
+        while True:
+            params: dict[str, Any] = {}
+            if filter_expr:
+                params["filter"] = filter_expr
+            if page_size is not None:
+                params["pageSize"] = str(page_size)
+            if page_token:
+                params["pageToken"] = page_token
+            resp = await self._request("GET", "endpoints", params=params or None)
+            data = resp.json()
+            endpoints.extend(data.get("endpoints", []))
+            page_token = data.get("nextPageToken")
+            if not page_token:
+                return endpoints
+
     # --- Auth Manager Bindings (GA v1) ---
 
     async def fetch_available_bindings(
@@ -1323,13 +1456,34 @@ class PlatformAgentConsumer:
         verify_kms_signature: bool | None = None,
     ) -> DiscoveredCapabilities:
         """Discover approved Skills, MCP Servers, A2A Agents, and Auth Bindings."""
-        skills = await self.search_skills(
-            search_string=skill_query,
-            search_type=skill_search_type,
-            filter_expr=skill_filter,
+        if skill_query.strip():
+            skills = await self.search_skills(
+                search_string=skill_query,
+                search_type=skill_search_type,
+                filter_expr=skill_filter,
+            )
+        else:
+            all_skills = await self.list_skills()
+            if skill_filter == APPROVED_SKILL_FILTER:
+                skills = [
+                    s
+                    for s in all_skills
+                    if str(s.get("state") or "") in SERVABLE_SKILL_STATES
+                    and int(s.get("defaultRevisionFindingCount") or 0) == 0
+                    and bool(s.get("defaultRevision"))
+                ]
+            else:
+                skills = all_skills
+        mcp_servers = (
+            await self.search_mcp_servers(search_string=mcp_query)
+            if mcp_query.strip()
+            else await self.list_mcp_servers()
         )
-        mcp_servers = await self.search_mcp_servers(search_string=mcp_query)
-        agents = await self.search_agents(search_string=agent_query)
+        agents = (
+            await self.search_agents(search_string=agent_query)
+            if agent_query.strip()
+            else await self.list_agents()
+        )
 
         extracted_skills: list[ExtractedSkill] = []
         if fetch_skill_contents:
@@ -1360,6 +1514,7 @@ class PlatformAgentConsumer:
         return DiscoveredCapabilities(
             project_id=self.project_id,
             location=self.location,
+            skills_location=self.skills_location,
             base_url=self.base_url,
             skills=skills,
             extracted_skills=extracted_skills,

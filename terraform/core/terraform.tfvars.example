@@ -1,18 +1,67 @@
 # Example Terraform variables for Workstream A (terraform/core/).
 # Copy to terraform.tfvars and replace with your Google Cloud project values.
+#
+# =============================================================================
+# Two-Stage Zero-Docker Cloud Build Deployment (Avoids Chicken-and-Egg AR Error)
+# =============================================================================
+# Cloud Run services require container images to exist in Artifact Registry BEFORE
+# `terraform apply` deploys them. Follow this two-stage flow with zero local Docker:
+#
+#   Stage 1 — Provision APIs & Artifact Registry repo, then build images in Cloud Build:
+#     terraform -chdir=terraform/core init
+#     terraform -chdir=terraform/core apply \
+#       -target=google_project_service.core \
+#       -target=google_artifact_registry_repository.workshop_images
+#     ./scripts/build_images_cloudbuild.sh \
+#       --project "acme-agent-governance" \
+#       --region "asia-southeast3" \
+#       --repo "agent-marketplace" \
+#       --tag "1.0.0"
+#
+#   Stage 2 — Deploy Cloud Run workloads, register Agent Registry services, and
+#   bootstrap scanned skills (with --wait-for-scan):
+#     terraform -chdir=terraform/core apply
+# =============================================================================
 
 project_id = "acme-agent-governance"
-location   = "us-central1"
 
-# Container images (leave empty to default to images in this module's Artifact Registry repo)
-middleware_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/polyglot-middleware:1.0.0"
-sample_mcp_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
-sample_a2a_image = "us-central1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
+# Primary region: Bangkok (asia-southeast3).
+# Secondary region: Singapore (asia-southeast1) for optional active-standby failover.
+location           = "asia-southeast3"
+secondary_location = "asia-southeast1"
+
+# Active-standby multi-region failover toggle (off by default for single-region labs).
+# Uncomment and set true (after pushing images to asia-southeast1 AR) to deploy
+# secondary Cloud Run services + Artifact Registry repository in Singapore:
+# enable_secondary_region    = true
+# secondary_middleware_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/polyglot-middleware:1.0.0"
+# secondary_sample_mcp_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
+# secondary_sample_a2a_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
+enable_secondary_region = false
+
+# Optional: decouple regional Agent Registry Services location from Cloud Run compute region.
+# Leave empty ("") to default to `location` (asia-southeast3).
+agent_registry_location = ""
+
+# Standalone Agent Registry v1 Skill resources are supported only in multi-region
+# locations ("global", "us", or "eu"), while Services & Cloud Run run regionally
+# in Bangkok (asia-southeast3) and Singapore (asia-southeast1).
+skills_location = "global"
+
+# Container images (leave empty to default to `:latest` in this module's AR repo)
+middleware_image = "asia-southeast3-docker.pkg.dev/acme-agent-governance/agent-marketplace/polyglot-middleware:1.0.0"
+sample_mcp_image = "asia-southeast3-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
+sample_a2a_image = "asia-southeast3-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
+
+# Set true ONLY in ephemeral workshop sandboxes so `terraform destroy` removes
+# non-empty skill staging GCS buckets cleanly. Keep false in production.
+force_destroy_staging_bucket = false
 
 # -----------------------------------------------------------------------------
 # Standalone Agent Registry Skills Bootstrapper (Dual-Source Ingestion)
-# Always passes --only-skills so agent_registry_services.tf remains the sole
-# Terraform owner of google_agent_registry_service resources.
+# Always passes --only-skills and --wait-for-scan so agent_registry_services.tf
+# remains the sole Terraform owner of google_agent_registry_service resources
+# and ENABLED_BLOCKING scans settle before Terraform outputs the middleware URL.
 # Set enable_skills_bootstrap = false to manage skills exclusively from CI/CD.
 # -----------------------------------------------------------------------------
 enable_skills_bootstrap = true

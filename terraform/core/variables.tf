@@ -9,14 +9,54 @@ variable "project_id" {
 }
 
 variable "location" {
-  description = "Google Cloud region for Agent Registry services, Cloud Run workloads, Artifact Registry, and skill staging storage."
+  description = "Primary Google Cloud region for Agent Registry services, Cloud Run workloads, Artifact Registry, and skill staging storage (default: asia-southeast3, Bangkok)."
   type        = string
-  default     = "us-central1"
+  default     = "asia-southeast3"
 
   validation {
     condition     = length(trimspace(var.location)) > 0
-    error_message = "location must be a non-empty Google Cloud region (for example, us-central1)."
+    error_message = "location must be a non-empty Google Cloud region (for example, asia-southeast3)."
   }
+}
+
+variable "secondary_location" {
+  description = "Secondary Google Cloud region for optional active-standby Cloud Run and Artifact Registry deployment (default: asia-southeast1, Singapore)."
+  type        = string
+  default     = "asia-southeast1"
+
+  validation {
+    condition     = length(trimspace(var.secondary_location)) > 0
+    error_message = "secondary_location must be a non-empty Google Cloud region (for example, asia-southeast1)."
+  }
+}
+
+variable "enable_secondary_region" {
+  description = "When true, deploys active-standby Cloud Run workloads and an Artifact Registry repository in secondary_location (asia-southeast1, Singapore)."
+  type        = bool
+  default     = false
+}
+
+variable "agent_registry_location" {
+  description = "Optional Google Cloud location for regional Agent Registry Services (MCP Servers, A2A Agents, Endpoints). Leave empty to default to var.location (asia-southeast3), or override to decouple the Agent Registry Services region from Cloud Run compute."
+  type        = string
+  default     = ""
+}
+
+variable "skills_location" {
+  description = "Google Cloud multi-region location for standalone Agent Registry v1 Skill resources (\"global\", \"us\", or \"eu\"). Agent Registry v1 standalone Skill resources are hosted only in global, us, or eu while Services (MCP Servers, A2A Agents, Endpoints) and Cloud Run workloads run regionally in Bangkok (asia-southeast3) and Singapore (asia-southeast1)."
+  type        = string
+  default     = "global"
+
+  validation {
+    condition     = contains(["global", "us", "eu"], var.skills_location)
+    error_message = "skills_location must be one of \"global\", \"us\", or \"eu\" (Agent Registry v1 standalone Skill resources are only supported in global, us, or eu)."
+  }
+}
+
+variable "force_destroy_staging_bucket" {
+  description = "When true, allows Terraform to destroy the GCS skill staging bucket even when it still contains staged ZIP objects. Keep false in production; set true in ephemeral workshop sandboxes so terraform destroy cleans up cleanly."
+  type        = bool
+  default     = false
 }
 
 variable "middleware_image" {
@@ -33,6 +73,24 @@ variable "sample_mcp_image" {
 
 variable "sample_a2a_image" {
   description = "Container image URI for the sample-a2a-agent Cloud Run service. Leave empty to default to the Artifact Registry repository created by this module."
+  type        = string
+  default     = ""
+}
+
+variable "secondary_middleware_image" {
+  description = "Optional container image URI for the secondary-region polyglot-middleware Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
+  type        = string
+  default     = ""
+}
+
+variable "secondary_sample_mcp_image" {
+  description = "Optional container image URI for the secondary-region sample-mcp-server Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
+  type        = string
+  default     = ""
+}
+
+variable "secondary_sample_a2a_image" {
+  description = "Optional container image URI for the secondary-region sample-a2a-agent Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
   type        = string
   default     = ""
 }

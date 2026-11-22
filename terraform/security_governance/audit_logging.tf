@@ -9,10 +9,12 @@
 # 3. Routes Admin Activity, Data Access, and Agent Gateway request logs into
 #    the locked WORM bucket via a dedicated project sink.
 #
-# WARNING: `locked = true` on `google_logging_project_bucket_config` is
-# IRREVERSIBLE once applied in Google Cloud. A locked bucket's retention period
-# cannot be reduced, and the bucket cannot be deleted until its retention window
-# expires and all log entries age out.
+# WARNING: Setting `lock_audit_bucket = true` (`locked = true` on
+# `google_logging_project_bucket_config`) is IRREVERSIBLE once applied in Google
+# Cloud and is STRONGLY RECOMMENDED for production compliance (WORM). A locked
+# bucket's retention period cannot be reduced, and the bucket cannot be deleted
+# until its retention window expires and all log entries age out. Keep
+# `lock_audit_bucket = false` only in ephemeral workshop sandboxes.
 
 resource "google_project_iam_audit_config" "agent_registry" {
   project = var.project_id
@@ -40,7 +42,7 @@ resource "google_logging_project_bucket_config" "agent_governance_audit" {
   bucket_id        = var.audit_bucket_id
   description      = "Locked WORM audit log bucket for Agent Registry, App Hub Endpoint, IAP egress, KMS signing, and Agent Gateway traffic."
   retention_days   = var.audit_retention_days
-  locked           = true
+  locked           = var.lock_audit_bucket
   enable_analytics = true
 
   depends_on = [google_project_service.security_governance["logging.googleapis.com"]]

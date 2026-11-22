@@ -37,7 +37,7 @@ Each file serves a specific IDE/standard while sharing one unified `skills/` tre
 | [skills/cost-anomaly-triage/SKILL.md](../../starter-marketplace/plugins/gcp-finops-toolkit/skills/cost-anomaly-triage/SKILL.md) & [skills/bq-query-optimizer/SKILL.md](../../starter-marketplace/plugins/gcp-finops-toolkit/skills/bq-query-optimizer/SKILL.md) | **All 5 targets** (`agentskills.io`) | Uppercase `SKILL.md`; YAML `name` MUST equal parent directory name; `metadata` holds scalar `map<string, string>` provenance links (`plugin_name`, `mcp_service_id`, `agent_service_id`). |
 | [rules/AGENTS.md](../../starter-marketplace/plugins/gcp-finops-toolkit/rules/AGENTS.md) & [rules/finops-guardrails.md](../../starter-marketplace/plugins/gcp-finops-toolkit/rules/finops-guardrails.md) | **Google Antigravity** (root `AGENTS.md` is ignored) | `rules/finops-guardrails.md` uses `trigger: glob` with **comma-separated string** `globs: "**/*.sql, **/*.tf"` (NEVER a YAML array!). |
 | [hooks.json](../../starter-marketplace/plugins/gcp-finops-toolkit/hooks.json) & [scripts/finops-guard.sh](../../starter-marketplace/plugins/gcp-finops-toolkit/scripts/finops-guard.sh) | **Google Antigravity** | Named top-level group (`"policy-guard"`), **relative paths (`./scripts/finops-guard.sh`) ONLY** (never `${PLUGIN_ROOT}`), script permissions `0755`. |
-| [agents/finops-advisor.md](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor.md), [com.github.copilot/agents/finops-advisor.agent.md](../../starter-marketplace/plugins/gcp-finops-toolkit/com.github.copilot/agents/finops-advisor.agent.md), [agents/finops-advisor/agent-card.json](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor/agent-card.json) | **Antigravity / Claude Code**, **GitHub Copilot**, and **A2A v1.0** | Native subagent definitions (`name: finops-advisor` in the local authored repo) plus A2A v1.0 Agent Card (≤ 10 KB) registered in Agent Registry under Service ID `finops-advisor-agent` in Lab 02 (which the Middleware uses as the hydrated agent slug in Lab 04). |
+| [agents/finops-advisor.md](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor.md), [com.github.copilot/agents/finops-advisor.agent.md](../../starter-marketplace/plugins/gcp-finops-toolkit/com.github.copilot/agents/finops-advisor.agent.md), [agents/finops-advisor/agent-card.json](../../starter-marketplace/plugins/gcp-finops-toolkit/agents/finops-advisor/agent-card.json) | **Antigravity / Claude Code**, **GitHub Copilot**, and **A2A v1.0** | Native subagent definitions (`name: finops-advisor` in the local authored repo) plus A2A v1.0 Agent Card (≤ 10 KB, no legacy v0.x `capabilities.stateTransitionHistory`, and distinct `supportedInterfaces` URLs: `JSONRPC` on `/a2a`, `HTTP+JSON` on `/a2a/http`) registered in Agent Registry under Service ID `finops-advisor-agent` in Lab 02 (which the Middleware uses as the hydrated agent slug in Lab 04). |
 
 ---
 
@@ -134,7 +134,7 @@ Now upgrade `starter/lab01_plugin_skeleton/` (or a temporary copy in `/tmp/my-fi
 4. `rules/AGENTS.md` and `rules/finops-guardrails.md` using a **comma-separated string** for `globs`.
 5. `hooks.json` with a named top-level group pointing to `./scripts/<script>.sh` with mode `chmod 0755`.
 
-Re-run the Python validator snippet above until **both** `validate_agent_plugin_bundle` and `validate_antigravity_bundle` return `valid=True`!
+Re-run the Python validator snippet above (or run `make starter-check`, which verifies all Labs 01–04 exercises completely offline with zero Docker) until **both** `validate_agent_plugin_bundle` and `validate_antigravity_bundle` return `valid=True`!
 
 ---
 
@@ -198,6 +198,7 @@ In GitLab CI ([starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gi
 | `globs must be a comma-separated string` | Wrote `globs: ["**/*.sql", "**/*.tf"]` as a YAML list in `rules/*.md` | Change to `globs: "**/*.sql, **/*.tf"`. |
 | `hooks.json` rejected for `${PLUGIN_ROOT}` | Used `${PLUGIN_ROOT}/scripts/...` in a hook command | Replace with a relative path `./scripts/...` and run `chmod 0755 scripts/*.sh`. |
 | `${ENV_VAR}` error in `mcp.json` | Used `${API_TOKEN}` in remote `url` or `headers` of Agent Plugins 1.0 `mcp.json` | Agent Plugins 1.0 forbids `${VAR}` expansion in remote `url`/`headers`; rely on OAuth / Google Credentials or Agent Registry `Binding`. |
+| Live Agent Registry rejects `agent-card.json` with `unknown field "stateTransitionHistory"` or `duplicate interface url` | Included legacy A2A v0.x `capabilities.stateTransitionHistory` or pointed both `JSONRPC` and `HTTP+JSON` at `/a2a` | Keep only A2A v1.0 `capabilities` (`streaming`, `pushNotifications`) and assign each protocol binding a unique URL (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`). |
 
 ---
 

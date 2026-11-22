@@ -2,6 +2,20 @@
 
 This directory contains hands-on starter skeletons and `# WORKSHOP-TODO(lab-XX)` coding exercises so attendees can build each piece of the Enterprise Agent Marketplace step-by-step while comparing against the complete reference implementations in the repository.
 
+> **100% Zero-Docker & Offline Friendly:** Every starter exercise and self-check harness in this directory runs purely with `.venv/bin/python` — **no Docker daemon, no Terraform, and no GCP account required**.
+
+## One-Command Verification Harness
+
+Run all starter self-checks in a single command (or verify that the reference solutions pass every starter exercise check end-to-end):
+
+```bash
+# Check your current progress across Labs 01-04 (shows [PASS] vs [TODO])
+make starter-check
+
+# Verify the built-in reference solutions against every starter harness
+.venv/bin/python scripts/check_starter.py --verify-reference-solutions
+```
+
 ## Exercise-to-Solution Map
 
 | Lab | Starter File(s) | Concept Practiced | Reference Solution |
@@ -25,11 +39,11 @@ This directory contains hands-on starter skeletons and `# WORKSHOP-TODO(lab-XX)`
    print("Antigravity v1   :", validate_antigravity_bundle("starter/lab01_plugin_skeleton"))
    EOF
    ```
-   Out of the box, `validate_agent_plugin_bundle` passes while `validate_antigravity_bundle` tells you exactly which Antigravity files (`.antigravity-plugin/plugin.json`, 1:1 `assets/logo.svg`, `mcp_config.json`, `rules/`, `hooks.json`, `0755` scripts) to add next!
+   Out of the box, `validate_agent_plugin_bundle` passes while `validate_antigravity_bundle` flags the missing Antigravity `logo` requirement and `make starter-check` displays the full 6-item Lab 01 coexistence checklist (`.antigravity-plugin/plugin.json`, 1:1 `assets/logo.svg`, `mcp_config.json`, `rules/AGENTS.md` + `rules/finops-guardrails.md`, `hooks.json`, and `0755` `scripts/*.sh`)!
 3. **Labs 02–04 — Complete `# WORKSHOP-TODO(lab-XX)` blocks and run the built-in self-checks**:
    ```bash
    .venv/bin/python starter/lab02_plugin_sync_exercise.py
    .venv/bin/python starter/lab03_middleware_redirect_exercise.py
    .venv/bin/python starter/lab04_hub_sync_adapter_exercise.py
    ```
-   Each file ships with a runnable `__main__` self-check harness that tells you which `# WORKSHOP-TODO` functions still raise `NotImplementedError` and validates your implementation once filled in.
+   Each file ships with a runnable `__main__` self-check harness that tests every `# WORKSHOP-TODO` function independently, reports `Progress: X/N checks passed`, and prints `[DONE]` once all checks pass.

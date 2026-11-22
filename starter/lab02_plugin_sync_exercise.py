@@ -71,7 +71,7 @@ class SkillArchiveArtifact:
 def canonical_private_skill_id(raw_skill_id: str) -> str:
     """Return the canonical ``private-{skillId}`` resource ID used after creation.
 
-    Remember from VERIFIED_SPECS.md:
+    Remember from ``docs/architecture.md`` and ``docs/labs/02-register-agent-registry.md``:
     - Creating ``POST .../skills?skillId=cost-anomaly-triage`` creates
       ``projects/{p}/locations/{l}/skills/private-cost-anomaly-triage``.
     - All subsequent ``GET``, ``PATCH``, ``DELETE``, and ``revisions`` calls
@@ -184,14 +184,17 @@ def _run_self_check() -> None:
         Path(__file__).resolve().parent / "lab01_plugin_skeleton" / "skills" / "hello-finops"
     )
     print("Lab 02 Self-Check")
+    passed = 0
+    total = 4
+
     try:
         cid = canonical_private_skill_id("cost-anomaly-triage")
         assert cid == "private-cost-anomaly-triage", f"Expected private-cost-anomaly-triage, got {cid}"
         assert canonical_private_skill_id("private-cost-anomaly-triage") == "private-cost-anomaly-triage"
         print("  [PASS] canonical_private_skill_id")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
 
     meta = {
         "plugin_name": "hello-finops-plugin",
@@ -214,9 +217,9 @@ def _run_self_check() -> None:
             for k, v in enriched_fm["metadata"].items()
         ), "All metadata keys and values must be scalar strings"
         print("  [PASS] enrich_skill_frontmatter")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
 
     try:
         artifact = build_single_skill_zip(sample_skill_dir, meta)
@@ -229,14 +232,75 @@ def _run_self_check() -> None:
             assert err is None and parsed_fm is not None
             assert parsed_fm["metadata"]["plugin_name"] == "hello-finops-plugin"
         print(f"  [PASS] build_single_skill_zip (sha256={artifact.sha256_hex[:12]}...)")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
+
+    try:
+        sample_zip_bytes = b"PK\x05\x06" + b"\x00" * 18
+        synthetic_artifact = SkillArchiveArtifact(
+            skill_id="hello-finops",
+            canonical_skill_id="private-hello-finops",
+            zip_bytes=sample_zip_bytes,
+            sha256_hex=hashlib.sha256(sample_zip_bytes).hexdigest(),
+        )
+        created = {"exists": False}
+
+        def _mock_registry(request: httpx.Request) -> httpx.Response:
+            path = request.url.path
+            if request.method == "GET" and path.endswith("/skills/private-hello-finops"):
+                if not created["exists"]:
+                    return httpx.Response(404, json={"error": {"code": 404}})
+                return httpx.Response(200, json={"name": path.lstrip("/")})
+            if request.method == "POST" and path.endswith("/skills"):
+                assert request.url.params.get("skillId") == "hello-finops"
+                created["exists"] = True
+                return httpx.Response(
+                    200,
+                    json={"name": f"{path.lstrip('/')}/private-hello-finops", "done": True},
+                )
+            if request.method == "POST" and path.endswith("/skills/private-hello-finops/revisions"):
+                return httpx.Response(200, json={"name": f"{path.lstrip('/')}/rev-2"})
+            if request.method == "PATCH" and path.endswith("/skills/private-hello-finops"):
+                return httpx.Response(
+                    200, json={"name": path.lstrip("/"), "defaultRevision": "rev-2"}
+                )
+            return httpx.Response(400, text=f"Unexpected {request.method} {request.url}")
+
+        with httpx.Client(transport=httpx.MockTransport(_mock_registry)) as client:
+            res_create = register_skill_revision(
+                client,
+                registry_base_url="http://127.0.0.1:8090/v1",
+                project_id="acme-agent-governance",
+                location="asia-southeast3",
+                artifact=synthetic_artifact,
+                display_name="Hello FinOps",
+                description="Starter skill",
+            )
+            assert "private-hello-finops" in str(res_create)
+            res_update = register_skill_revision(
+                client,
+                registry_base_url="http://127.0.0.1:8090/v1",
+                project_id="acme-agent-governance",
+                location="asia-southeast3",
+                artifact=synthetic_artifact,
+                display_name="Hello FinOps",
+                description="Starter skill",
+                revision_id="rev-2",
+            )
+            assert res_update.get("defaultRevision") == "rev-2"
+        print("  [PASS] register_skill_revision (create + new revision promotion)")
+        passed += 1
+    except NotImplementedError as exc:
+        print(f"  [TODO] {exc}")
 
     # Sanity-check validate_skill_md & json/yaml/base64/httpx imports are usable
     assert validate_skill_md(sample_skill_dir / "SKILL.md", expected_name="hello-finops").valid
     _ = (base64, hashlib, json, yaml, httpx)
-    print("  [INFO] Now test register_skill_revision() against the mock Agent Registry on :8090!")
+    if passed == total:
+        print(f"  [DONE] Progress: {passed}/{total} checks passed — all Lab 02 checks passed!")
+    else:
+        print(f"  [INFO] Progress: {passed}/{total} checks passed")
 
 
 if __name__ == "__main__":

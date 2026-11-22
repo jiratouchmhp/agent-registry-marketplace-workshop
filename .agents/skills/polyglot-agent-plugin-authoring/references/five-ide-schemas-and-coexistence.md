@@ -229,7 +229,7 @@ tools:
 Analyze billing anomalies and BigQuery SQL plans using read-only MCP telemetry.
 ```
 
-**`agents/finops-advisor/agent-card.json` (A2A v1.0 Agent Card — compact JSON `<= 10,240` bytes):**
+**`agents/finops-advisor/agent-card.json` (A2A v1.0 Agent Card — compact JSON `<= 10,240` bytes; MUST omit legacy A2A v0.x `capabilities.stateTransitionHistory` and assign distinct URLs per `supportedInterfaces` entry — e.g. `/a2a` for `JSONRPC` and `/a2a/http` for `HTTP+JSON` — or live Agent Registry rejects with `400 INVALID_ARGUMENT`):**
 
 ```json
 {
@@ -247,15 +247,14 @@ Analyze billing anomalies and BigQuery SQL plans using read-only MCP telemetry.
       "protocolVersion": "1.0"
     },
     {
-      "url": "https://a2a.example.com/a2a",
+      "url": "https://a2a.example.com/a2a/http",
       "protocolBinding": "HTTP+JSON",
       "protocolVersion": "1.0"
     }
   ],
   "capabilities": {
     "streaming": false,
-    "pushNotifications": false,
-    "stateTransitionHistory": true
+    "pushNotifications": false
   },
   "defaultInputModes": ["text/plain", "application/json"],
   "defaultOutputModes": ["text/plain", "application/json"],

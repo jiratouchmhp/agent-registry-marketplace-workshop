@@ -233,7 +233,10 @@ def test_workshop_spec_contract() -> None:
     assert spec["project_defaults"] == {
         "project_id": "acme-agent-governance",
         "project_number": "123456789012",
-        "location": "us-central1",
+        "location": "asia-southeast3",
+        "secondary_location": "asia-southeast1",
+        "skills_location": "global",
+        "auth_provider_location": "asia-southeast1",
         "cmek_location": "us",
     }
     assert spec["ports"] == {
@@ -276,12 +279,21 @@ def test_workshop_spec_contract() -> None:
         "AGENT_REGISTRY_BASE_URL",
         "GCP_PROJECT_ID",
         "GCP_LOCATION",
+        "GCP_SECONDARY_LOCATION",
+        "AGENT_REGISTRY_SKILLS_LOCATION",
         "MIDDLEWARE_PUBLIC_URL",
         "REQUIRE_KMS_SIGNATURE",
         "KMS_PUBLIC_KEY_PEM_PATH",
         "HUB_MIDDLEWARE_URL",
+        "HUB_FALLBACK_MIDDLEWARE_URL",
         "HUB_AUTH_TOKEN",
     }
+    assert spec["env_vars"]["GCP_LOCATION"] == "asia-southeast3"
+    assert spec["env_vars"]["GCP_SECONDARY_LOCATION"] == "asia-southeast1"
+    assert spec["env_vars"]["AGENT_REGISTRY_SKILLS_LOCATION"] == "global"
+    assert spec["env_vars"]["HUB_FALLBACK_MIDDLEWARE_URL"] == ""
+    assert ":locations:asia-southeast3:" in spec["urns"]["mcp_server"]
+    assert "/locations/asia-southeast3/" in spec["resource_names"]["mcp_service"]
 
 
 def test_pyproject_toml_valid() -> None:
@@ -780,7 +792,7 @@ def test_antigravity_hooks_flat_vs_matcher_events_and_prompt_handlers(tmp_path: 
     stop_script.chmod(0o755)
     hooks_json = bundle / "hooks.json"
 
-    # Verbatim VERIFIED_SPECS.md line 109 structure + SessionStart/PreInvocation/PostInvocation + prompt
+    # Standard Antigravity hooks.json structure + SessionStart/PreInvocation/PostInvocation + prompt
     hooks_json.write_text(
         json.dumps(
             {

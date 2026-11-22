@@ -13,6 +13,7 @@ Exposes:
 
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -31,6 +32,26 @@ from middleware.app.polyglot_builder import (
 )
 from middleware.app.registry_client import AgentRegistryClient, RegistryClientError
 from middleware.app.security_verifier import SecurityVerifier
+
+
+def _format_rejection_reason(
+    skill: dict[str, Any],
+    rev_doc: dict[str, Any] | None,
+    default_reason: str | None,
+) -> str:
+    """Return an actionable rejection message, highlighting live async scans in progress."""
+    state = str(skill.get("state", ""))
+    scan_result = rev_doc.get("scanResult") if isinstance(rev_doc, dict) else None
+    scan_state = str(scan_result.get("scanState", "")) if isinstance(scan_result, dict) else ""
+    if state == "STATE_DRAFT" and scan_state == "RUNNING":
+        skill_name = str(skill.get("name", "<unknown>"))
+        rev_name = str((rev_doc or {}).get("name") or skill.get("defaultRevision") or "")
+        rev_suffix = f" (revision '{rev_name}')" if rev_name else ""
+        return (
+            f"Skill '{skill_name}'{rev_suffix} is in STATE_DRAFT because its Agent Registry "
+            "security scan is still RUNNING; retry in ~15 seconds."
+        )
+    return default_reason or "Rejected by metadata policy."
 
 
 @dataclass
@@ -65,85 +86,106 @@ class CatalogService:
         self.verifier = verifier
 
     async def build_snapshot(self) -> CatalogSnapshot:
-        skills = await self.registry_client.list_skills()
-        mcp_servers = await self.registry_client.list_mcp_servers()
-        agents = await self.registry_client.list_agents()
+        skills, mcp_servers, agents = await asyncio.gather(
+            self.registry_client.list_skills(),
+            self.registry_client.list_mcp_servers(),
+            self.registry_client.list_agents(),
+        )
 
-        verified_skills: list[VerifiedSkillArtifact] = []
-        rejected_skills: list[dict[str, Any]] = []
+        semaphore = asyncio.Semaphore(8)
 
-        for skill in skills:
-            skill_name = str(skill.get("name", "<unknown>"))
-            default_rev = str(skill.get("defaultRevision", ""))
-            rev_doc: dict[str, Any] | None = None
+        async def _verify_one(
+            skill: dict[str, Any],
+        ) -> tuple[VerifiedSkillArtifact | None, dict[str, Any] | None]:
+            async with semaphore:
+                skill_name = str(skill.get("name", "<unknown>"))
+                default_rev = str(skill.get("defaultRevision", ""))
+                rev_doc: dict[str, Any] | None = None
 
-            if default_rev:
-                try:
-                    rev_doc = await self.registry_client.get_skill_revision(default_rev)
-                except RegistryClientError as exc:
-                    rejected_skills.append(
-                        {
+                if default_rev:
+                    try:
+                        rev_doc = await self.registry_client.get_skill_revision(default_rev)
+                    except RegistryClientError as exc:
+                        return None, {
                             "name": skill_name,
                             "state": skill.get("state"),
                             "reason": f"Failed to fetch defaultRevision metadata: {exc}",
                         }
-                    )
-                    continue
 
-            ok, _warnings, reason = self.verifier.check_metadata_policy(skill, rev_doc)
-            if not ok or rev_doc is None:
-                rejected_skills.append(
-                    {
+                ok, _warnings, reason = self.verifier.check_metadata_policy(skill, rev_doc)
+                if not ok or rev_doc is None:
+                    inspect_rev = rev_doc
+                    if (
+                        inspect_rev is None
+                        and skill.get("state") == "STATE_DRAFT"
+                        and skill.get("targetState") == "TARGET_STATE_ACTIVE"
+                    ):
+                        try:
+                            revs = await self.registry_client.list_skill_revisions(skill_name)
+                            for candidate in reversed(revs):
+                                scan_res = candidate.get("scanResult")
+                                if isinstance(scan_res, dict) and scan_res.get("scanState") == "RUNNING":
+                                    inspect_rev = candidate
+                                    break
+                        except Exception:
+                            pass
+                    return None, {
                         "name": skill_name,
                         "state": skill.get("state"),
-                        "reason": reason or "Rejected by metadata policy.",
+                        "reason": _format_rejection_reason(skill, inspect_rev, reason),
                     }
-                )
-                continue
 
-            try:
-                zip_bytes, actual_sha256 = (
-                    await self.registry_client.download_skill_revision_media(
-                        default_rev,
-                        expected_sha256=rev_doc.get("sha256Hash"),
+                try:
+                    zip_bytes, actual_sha256 = (
+                        await self.registry_client.download_skill_revision_media(
+                            default_rev,
+                            expected_sha256=rev_doc.get("sha256Hash"),
+                        )
                     )
-                )
-            except RegistryClientError as exc:
-                rejected_skills.append(
-                    {
+                except RegistryClientError as exc:
+                    return None, {
                         "name": skill_name,
                         "state": skill.get("state"),
                         "revision": default_rev,
                         "reason": f"Media download/integrity check failed: {exc}",
                     }
-                )
-                continue
 
-            verification = self.verifier.verify_skill_package(
-                skill=skill,
-                revision=rev_doc,
-                zip_bytes=zip_bytes,
-                downloaded_sha256=actual_sha256,
-            )
-            if not verification.approved:
-                rejected_skills.append(
-                    {
+                verification = self.verifier.verify_skill_package(
+                    skill=skill,
+                    revision=rev_doc,
+                    zip_bytes=zip_bytes,
+                    downloaded_sha256=actual_sha256,
+                )
+                if not verification.approved:
+                    return None, {
                         "name": skill_name,
                         "state": skill.get("state"),
                         "revision": default_rev,
-                        "reason": verification.rejection_reason or "Verification failed.",
+                        "reason": _format_rejection_reason(
+                            skill,
+                            rev_doc,
+                            verification.rejection_reason or "Verification failed.",
+                        ),
                     }
-                )
-                continue
 
-            verified_skills.append(
-                VerifiedSkillArtifact(
-                    skill=skill,
-                    revision=rev_doc,
-                    verification=verification,
-                    zip_bytes=zip_bytes,
+                return (
+                    VerifiedSkillArtifact(
+                        skill=skill,
+                        revision=rev_doc,
+                        verification=verification,
+                        zip_bytes=zip_bytes,
+                    ),
+                    None,
                 )
-            )
+
+        results = await asyncio.gather(*(_verify_one(skill) for skill in skills))
+        verified_skills: list[VerifiedSkillArtifact] = []
+        rejected_skills: list[dict[str, Any]] = []
+        for verified_art, rejected_entry in results:
+            if verified_art is not None:
+                verified_skills.append(verified_art)
+            elif rejected_entry is not None:
+                rejected_skills.append(rejected_entry)
 
         bundles = build_plugin_bundles(
             verified_skills=verified_skills,
@@ -168,6 +210,7 @@ class CatalogService:
                 "description": self.settings.marketplace_description,
                 "projectId": self.settings.gcp_project_id,
                 "location": self.settings.gcp_location,
+                "skillsLocation": self.settings.effective_skills_location,
             },
             "plugins": [
                 {
@@ -216,6 +259,7 @@ def create_app(
     registry_client: AgentRegistryClient | None = None,
     registry_transport: httpx.AsyncBaseTransport | None = None,
     a2a_transport: httpx.AsyncBaseTransport | None = None,
+    metadata_transport: httpx.AsyncBaseTransport | None = None,
 ) -> FastAPI:
     """Construct the Polyglot Marketplace Middleware FastAPI application."""
     cfg = settings if settings is not None else MiddlewareSettings.from_env()
@@ -226,7 +270,9 @@ def create_app(
         else AgentRegistryClient(
             base_url=cfg.normalized_registry_base_url,
             project_id=cfg.gcp_project_id,
-            location=cfg.gcp_location,
+            location=cfg.effective_registry_location,
+            skills_location=cfg.effective_skills_location,
+            only_private_skills=not cfg.include_public_skills,
             auth_token=cfg.agent_registry_auth_token,
             quota_project=cfg.effective_quota_project,
             transport=registry_transport,
@@ -255,6 +301,7 @@ def create_app(
         verifier=verifier,
         catalog_loader=_load_catalog_dict,
         a2a_transport=a2a_transport,
+        metadata_transport=metadata_transport,
     )
 
     @asynccontextmanager
@@ -299,6 +346,8 @@ def create_app(
             },
         )
 
+    @application.get("/health")
+    @application.get("/v1/health")
     @application.get("/healthz")
     async def healthz() -> dict[str, Any]:
         return {
@@ -306,6 +355,10 @@ def create_app(
             "service": "agent-registry-marketplace-middleware",
             "projectId": cfg.gcp_project_id,
             "location": cfg.gcp_location,
+            "region": cfg.gcp_location,
+            "secondaryRegion": cfg.gcp_secondary_location,
+            "agentRegistryLocation": cfg.effective_registry_location,
+            "skillsLocation": cfg.effective_skills_location,
             "requireKmsSignature": cfg.require_kms_signature,
         }
 

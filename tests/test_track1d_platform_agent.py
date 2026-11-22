@@ -41,13 +41,17 @@ WORKSHOP_SPEC = json.loads((WORKSHOP_ROOT / "WORKSHOP_SPEC.json").read_text(enco
 
 PROJECT_ID = WORKSHOP_SPEC["project_defaults"]["project_id"]
 LOCATION = WORKSHOP_SPEC["project_defaults"]["location"]
+SKILLS_LOCATION = WORKSHOP_SPEC["project_defaults"]["skills_location"]
 PARENT = f"projects/{PROJECT_ID}/locations/{LOCATION}"
+SKILLS_PARENT = f"projects/{PROJECT_ID}/locations/{SKILLS_LOCATION}"
 SAMPLE_PLUGIN = WORKSHOP_SPEC["sample_plugin"]
 MCP_URN = WORKSHOP_SPEC["urns"]["mcp_server"]
 AGENT_URN = WORKSHOP_SPEC["urns"]["agent"]
 SKILL_RESOURCE = WORKSHOP_SPEC["resource_names"]["skills"]["cost-anomaly-triage"]
+GLOBAL_SKILL_RESOURCE = f"{SKILLS_PARENT}/skills/private-cost-anomaly-triage"
 SKILL_URN = WORKSHOP_SPEC["urns"]["skills"]["cost-anomaly-triage"]
 REVISION_RESOURCE = f"{SKILL_RESOURCE}/revisions/rev-20260401-a1"
+GLOBAL_REVISION_RESOURCE = f"{GLOBAL_SKILL_RESOURCE}/revisions/rev-20260401-a1"
 
 
 def _make_skill_md(
@@ -104,13 +108,17 @@ def _build_mock_registry_transport(
     revision_metadata: dict[str, str] | None = None,
     redirect_url: str = "https://storage.googleapis.com/agentregistry-skills-signed/rev-20260401-a1.zip?X-Goog-Signature=deadbeef",
     recorded_requests: list[dict[str, Any]] | None = None,
+    skills_parent: str = SKILLS_PARENT,
 ) -> httpx.MockTransport:
     """In-process Agent Registry v1 + GCS signed-URL 302 redirect mock transport."""
     actual_sha = hashlib.sha256(zip_bytes).hexdigest()
     sha_to_report = reported_sha256 if reported_sha256 is not None else actual_sha
 
+    effective_skill_resource = f"{skills_parent}/skills/private-cost-anomaly-triage"
+    effective_revision_resource = f"{effective_skill_resource}/revisions/rev-20260401-a1"
+
     skill_payload = {
-        "name": SKILL_RESOURCE,
+        "name": effective_skill_resource,
         "uid": "11111111-2222-4333-8444-555555555555",
         "skillId": SKILL_URN,
         "displayName": "Cost Anomaly Triage",
@@ -118,7 +126,7 @@ def _build_mock_registry_transport(
         "type": "SIMPLE",
         "state": skill_state,
         "targetState": "TARGET_STATE_ACTIVE",
-        "defaultRevision": REVISION_RESOURCE,
+        "defaultRevision": effective_revision_resource,
         "frontmatter": {
             "name": "cost-anomaly-triage",
             "description": "Triage GCP billing anomalies safely.",
@@ -128,7 +136,7 @@ def _build_mock_registry_transport(
     }
 
     revision_payload = {
-        "name": REVISION_RESOURCE,
+        "name": effective_revision_resource,
         "uid": "66666666-7777-4888-8999-000000000000",
         "state": "ACTIVE",
         "sha256Hash": sha_to_report,
@@ -273,16 +281,31 @@ def _build_mock_registry_transport(
             )
 
         path = request.url.path
-        if request.method == "POST" and path == f"/v1/{PARENT}/skills:search":
+        if request.method == "POST" and path in (
+            f"/v1/{skills_parent}/skills:search",
+            f"/v1/{PARENT}/skills:search",
+        ):
             page_token = (body_json or {}).get("pageToken")
             if page_token == "page-2":
                 return httpx.Response(200, json={"skills": []})
             return httpx.Response(200, json={"skills": [skill_payload]})
 
-        if request.method == "GET" and path == f"/v1/{SKILL_RESOURCE}":
+        if request.method == "GET" and path in (
+            f"/v1/{skills_parent}/skills",
+            f"/v1/{PARENT}/skills",
+        ):
+            return httpx.Response(200, json={"skills": [skill_payload]})
+
+        if request.method == "GET" and path in (
+            f"/v1/{effective_skill_resource}",
+            f"/v1/{SKILL_RESOURCE}",
+        ):
             return httpx.Response(200, json=skill_payload)
 
-        if request.method == "GET" and path == f"/v1/{REVISION_RESOURCE}":
+        if request.method == "GET" and path in (
+            f"/v1/{effective_revision_resource}",
+            f"/v1/{REVISION_RESOURCE}",
+        ):
             if request.url.params.get("alt") == "media":
                 return httpx.Response(302, headers={"Location": redirect_url})
             return httpx.Response(200, json=revision_payload)
@@ -323,12 +346,12 @@ def test_skills_search_sends_semantic_query_and_zero_finding_filter() -> None:
 
     results = asyncio.run(_run())
     assert len(results) == 1
-    assert results[0]["name"] == SKILL_RESOURCE
+    assert results[0]["name"] == GLOBAL_SKILL_RESOURCE
     assert results[0]["skillId"] == SKILL_URN
 
     req = recorded[0]
     assert req["method"] == "POST"
-    assert req["path"] == f"/v1/{PARENT}/skills:search"
+    assert req["path"] == f"/v1/{SKILLS_PARENT}/skills:search"
     assert req["json"] == {
         "searchType": "SEMANTIC",
         "searchString": "cost anomaly billing spike",
@@ -363,8 +386,8 @@ def test_skill_alt_media_302_redirect_strips_x_goog_and_authorization_headers() 
 
     extracted = asyncio.run(_run())
     assert extracted.name == "cost-anomaly-triage"
-    assert extracted.resource_name == SKILL_RESOURCE
-    assert extracted.revision_name == REVISION_RESOURCE
+    assert extracted.resource_name == GLOBAL_SKILL_RESOURCE
+    assert extracted.revision_name == GLOBAL_REVISION_RESOURCE
     assert extracted.sha256_hash == hashlib.sha256(zip_bytes).hexdigest()
     assert "Query billing anomalies" in extracted.instructions
     assert "bigquery-slots.md" in extracted.references
@@ -624,13 +647,26 @@ def test_bindings_fetch_available_and_resolution_prefers_source_and_latest_updat
 def test_private_skill_auto_prefix_helper() -> None:
     consumer = PlatformAgentConsumer(project_id=PROJECT_ID, location=LOCATION)
     try:
-        assert consumer.private_skill_name("cost-anomaly-triage") == SKILL_RESOURCE
-        assert consumer.private_skill_name("private-cost-anomaly-triage") == SKILL_RESOURCE
+        # Live googleapis.com auto-defaults single-region location to global for standalone skills
+        assert consumer.skills_location == "global"
+        assert consumer.private_skill_name("cost-anomaly-triage") == GLOBAL_SKILL_RESOURCE
+        assert consumer.private_skill_name("private-cost-anomaly-triage") == GLOBAL_SKILL_RESOURCE
         assert consumer.private_skill_name(SKILL_RESOURCE) == SKILL_RESOURCE
         with pytest.raises(ValueError, match="Invalid skill resource ID"):
             consumer.normalize_skill_name("../bad/path")
     finally:
         asyncio.run(consumer.aclose())
+
+    local_consumer = PlatformAgentConsumer(
+        project_id=PROJECT_ID,
+        location=LOCATION,
+        base_url="http://127.0.0.1:8090/v1",
+    )
+    try:
+        assert local_consumer.skills_location == LOCATION
+        assert local_consumer.private_skill_name("cost-anomaly-triage") == SKILL_RESOURCE
+    finally:
+        asyncio.run(local_consumer.aclose())
 
 
 def test_build_adk_agent_config_matches_verified_specs() -> None:
@@ -766,7 +802,7 @@ def test_build_live_adk_agent_wiring_with_fake_adk_classes() -> None:
     # Auth provider MUST be registered first before building AgentRegistry toolsets
     assert events[0] == ("register_auth_provider", "FakeGcpAuthProvider")
     assert ("AgentRegistry.__init__", (PROJECT_ID, LOCATION)) in events
-    assert ("GCPSkillRegistry.__init__", (PROJECT_ID, LOCATION)) in events
+    assert ("GCPSkillRegistry.__init__", (PROJECT_ID, SKILLS_LOCATION)) in events
     assert ("SkillToolset.__init__", "FakeGCPSkillRegistry") in events
 
 
@@ -1294,3 +1330,185 @@ def test_platform_agent_unified_oauth_env_and_metadata_server_fallback(
     assert len(gcs_reqs) == 1
     assert "authorization" not in gcs_reqs[0]["headers"]
     assert not any(k.startswith("x-goog-") for k in gcs_reqs[0]["headers"])
+
+
+def test_platform_agent_bangkok_default_location_and_gcloud_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify PlatformAgentConsumer & OrchestratorConfig default to asia-southeast3 and use --quiet."""
+    monkeypatch.delenv("GCP_LOCATION", raising=False)
+    monkeypatch.delenv("GOOGLE_CLOUD_LOCATION", raising=False)
+
+    cfg = OrchestratorConfig.from_env()
+    assert cfg.location == "asia-southeast3"
+
+    consumer = PlatformAgentConsumer.from_env()
+    try:
+        assert consumer.location == "asia-southeast3"
+    finally:
+        asyncio.run(consumer.aclose())
+
+    monkeypatch.setattr("platform_agent.rest_consumer.shutil.which", lambda _name: None)
+    seen_cmds: list[list[str]] = []
+
+    def _fake_run(cmd: list[str], **_kwargs: Any) -> Any:
+        seen_cmds.append(list(cmd))
+
+        class _Proc:
+            returncode = 0
+            stdout = "gcloud-fallback-token\n"
+
+        return _Proc()
+
+    monkeypatch.setattr("platform_agent.rest_consumer.subprocess.run", _fake_run)
+
+    async def _fetch_token() -> tuple[str, float] | None:
+        async with PlatformAgentConsumer(
+            base_url="https://agentregistry.googleapis.com/v1",
+            enable_adc_fallback=True,
+        ) as c:
+            return await c._fetch_gcloud_adc_token()
+
+    token_pair = asyncio.run(_fetch_token())
+    assert token_pair is not None and token_pair[0] == "gcloud-fallback-token"
+    assert seen_cmds[0][0].endswith(".local/bin/gcloud")
+    assert "--quiet" in seen_cmds[0]
+
+
+def test_platform_agent_global_skills_pagination_and_private_filtering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Verify live googleapis.com skills pagination, private-* filtering, and regional service routing."""
+    zip_bytes = _build_skill_zip(skill_md=_make_skill_md())
+    zip_sha = hashlib.sha256(zip_bytes).hexdigest()
+    seen_paths: list[tuple[str, str, dict[str, str]]] = []
+
+    def _handler(request: httpx.Request) -> httpx.Response:
+        seen_paths.append((request.method, request.url.path, dict(request.url.params)))
+        if request.url.host == "storage.googleapis.com":
+            return httpx.Response(200, content=zip_bytes)
+
+        path = request.url.path
+        if request.method == "GET" and path == f"/v1/{SKILLS_PARENT}/skills":
+            token = request.url.params.get("pageToken", "")
+            if not token:
+                return httpx.Response(
+                    200,
+                    json={
+                        "skills": [
+                            {
+                                "name": f"{SKILLS_PARENT}/skills/cloud.google.com-gke-debug",
+                                "state": "STATE_ACTIVE",
+                                "defaultRevision": f"{SKILLS_PARENT}/skills/cloud.google.com-gke-debug/revisions/rev-1",
+                            },
+                            {
+                                "name": f"{SKILLS_PARENT}/skills/discoveryengine.googleapis.com-rag",
+                                "publisher": f"{SKILLS_PARENT}/publishers/discoveryengine.googleapis.com",
+                                "state": "STATE_ACTIVE",
+                                "defaultRevision": f"{SKILLS_PARENT}/skills/discoveryengine.googleapis.com-rag/revisions/rev-1",
+                            },
+                        ],
+                        "nextPageToken": "page-2",
+                    },
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "skills": [
+                        {
+                            "name": GLOBAL_SKILL_RESOURCE,
+                            "state": "STATE_ACTIVE",
+                            "defaultRevision": GLOBAL_REVISION_RESOURCE,
+                            "defaultRevisionFindingCount": 0,
+                        }
+                    ]
+                },
+            )
+        if request.method == "GET" and path == f"/v1/{GLOBAL_SKILL_RESOURCE}":
+            return httpx.Response(
+                200,
+                json={
+                    "name": GLOBAL_SKILL_RESOURCE,
+                    "state": "STATE_ACTIVE",
+                    "defaultRevision": GLOBAL_REVISION_RESOURCE,
+                    "defaultRevisionFindingCount": 0,
+                    "scanningConfig": {"policy": "ENABLED_BLOCKING"},
+                },
+            )
+        if request.method == "GET" and path == f"/v1/{GLOBAL_REVISION_RESOURCE}":
+            if request.url.params.get("alt") == "media":
+                return httpx.Response(
+                    302,
+                    headers={"Location": "https://storage.googleapis.com/signed-bucket/global-rev.zip"},
+                )
+            return httpx.Response(
+                200,
+                json={
+                    "name": GLOBAL_REVISION_RESOURCE,
+                    "sha256Hash": zip_sha,
+                    "scanResult": {"scanState": "SUCCEEDED", "findings": []},
+                },
+            )
+        if request.method == "GET" and path == f"/v1/{PARENT}/mcpServers":
+            return httpx.Response(
+                200,
+                json={"mcpServers": [{"name": f"{PARENT}/mcpServers/finops-mcp-server"}]},
+            )
+        if request.method == "GET" and path == f"/v1/{PARENT}/agents":
+            return httpx.Response(
+                200,
+                json={"agents": [{"name": f"{PARENT}/agents/finops-advisor-agent"}]},
+            )
+        if request.method == "GET" and path == f"/v1/{PARENT}/endpoints":
+            return httpx.Response(
+                200,
+                json={"endpoints": [{"name": f"{PARENT}/endpoints/finops-billing-api"}]},
+            )
+        return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
+
+    async def _run() -> tuple[Any, list[dict[str, Any]], list[dict[str, Any]]]:
+        orchestrator = PlatformAgentOrchestrator(
+            OrchestratorConfig(
+                project_id=PROJECT_ID,
+                location=LOCATION,
+                mode="rest",
+                registry_base_url="https://agentregistry.googleapis.com/v1",
+                access_token="live-test-tok",
+            ),
+            transport=httpx.MockTransport(_handler),
+        )
+        discovered = await orchestrator.discover_rest(fetch_skill_contents=True)
+
+        async with PlatformAgentConsumer(
+            project_id=PROJECT_ID,
+            location=LOCATION,
+            skills_location="global",
+            only_private_skills=False,
+            base_url="https://agentregistry.googleapis.com/v1",
+            access_token="live-test-tok",
+            transport=httpx.MockTransport(_handler),
+        ) as pub_consumer:
+            all_skills = await pub_consumer.list_skills()
+            endpoints = await pub_consumer.list_endpoints()
+
+        return discovered, all_skills, endpoints
+
+    discovered, all_skills, endpoints = asyncio.run(_run())
+    assert discovered.skills_location == "global"
+    assert [s["name"] for s in discovered.skills] == [GLOBAL_SKILL_RESOURCE]
+    assert len(discovered.extracted_skills) == 1
+    assert discovered.extracted_skills[0].name == "cost-anomaly-triage"
+    assert len(discovered.mcp_servers) == 1
+    assert len(discovered.agents) == 1
+    assert len(all_skills) == 3  # 2 built-in first-party + 1 private skill
+    assert len(endpoints) == 1
+    assert endpoints[0]["name"].startswith(f"{PARENT}/endpoints/")
+
+    # Env var override
+    monkeypatch.setenv("AGENT_REGISTRY_SKILLS_LOCATION", "eu")
+    assert OrchestratorConfig.from_env().effective_skills_location == "eu"
+    env_c = PlatformAgentConsumer.from_env()
+    try:
+        assert env_c.skills_location == "eu"
+    finally:
+        asyncio.run(env_c.aclose())

@@ -28,7 +28,8 @@ variables:
   PYTHON_IMAGE: "python:3.12-slim"
   AGENT_REGISTRY_BASE_URL: "https://agentregistry.googleapis.com/v1"
   GCP_PROJECT_ID: "acme-agent-governance"
-  GCP_LOCATION: "us-central1"
+  GCP_LOCATION: "asia-southeast3"
+  AGENT_REGISTRY_SKILLS_LOCATION: "global"
   SCANNING_POLICY: "ENABLED_BLOCKING"
   DIST_DIR: "dist"
   # Leave empty to auto-detect `plugins` (standalone repo) or `starter-marketplace/plugins` (monorepo).
@@ -276,6 +277,7 @@ package-and-sign:
           --registry-url "${AGENT_REGISTRY_BASE_URL}" \
           --project "${GCP_PROJECT_ID}" \
           --location "${GCP_LOCATION}" \
+          --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
           --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
           --git-commit "${CI_COMMIT_SHA:-HEAD}" \
           --scanning-policy "${SCANNING_POLICY}" \
@@ -323,8 +325,10 @@ register:draft-mr:
           --registry-url "${AGENT_REGISTRY_BASE_URL}" \
           --project "${GCP_PROJECT_ID}" \
           --location "${GCP_LOCATION}" \
+          --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
           --target-state TARGET_STATE_DRAFT \
           --scanning-policy "${SCANNING_POLICY}" \
+          --wait-for-scan \
           --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
           --git-commit "${CI_COMMIT_SHA:-HEAD}" \
           "${SIGN_ARGS[@]}"
@@ -359,8 +363,10 @@ register:active-release:
           --registry-url "${AGENT_REGISTRY_BASE_URL}" \
           --project "${GCP_PROJECT_ID}" \
           --location "${GCP_LOCATION}" \
+          --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION:-global}" \
           --target-state TARGET_STATE_ACTIVE \
           --scanning-policy "${SCANNING_POLICY}" \
+          --wait-for-scan \
           --source-repo "${CI_PROJECT_URL:-https://gitlab.acme.example.com/platform/starter-marketplace}" \
           --git-commit "${CI_COMMIT_SHA:-HEAD}" \
           "${SIGN_ARGS[@]}"

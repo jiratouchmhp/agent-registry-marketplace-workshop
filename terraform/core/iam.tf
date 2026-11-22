@@ -107,6 +107,30 @@ resource "google_artifact_registry_repository_iam_member" "ci_publisher_ar_write
   member     = "serviceAccount:${google_service_account.ci_publisher_sa.email}"
 }
 
+# Optional secondary-region Artifact Registry repository (Singapore, asia-southeast1)
+# for active-standby multi-region Cloud Run failover.
+resource "google_artifact_registry_repository" "workshop_images_secondary" {
+  count = var.enable_secondary_region ? 1 : 0
+
+  project       = var.project_id
+  location      = var.secondary_location
+  repository_id = var.artifact_registry_repo_id
+  description   = "Secondary-region Docker container images for active-standby polyglot-middleware, sample-mcp-server, and sample-a2a-agent."
+  format        = "DOCKER"
+
+  depends_on = [google_project_service.core["artifactregistry.googleapis.com"]]
+}
+
+resource "google_artifact_registry_repository_iam_member" "ci_publisher_ar_writer_secondary" {
+  count = var.enable_secondary_region ? 1 : 0
+
+  project    = var.project_id
+  location   = google_artifact_registry_repository.workshop_images_secondary[0].location
+  repository = google_artifact_registry_repository.workshop_images_secondary[0].name
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.ci_publisher_sa.email}"
+}
+
 # -----------------------------------------------------------------------------
 # GCS Skill Staging Bucket & Agent Registry P4SA Access
 # -----------------------------------------------------------------------------
@@ -117,7 +141,7 @@ resource "google_storage_bucket" "skill_staging" {
   location                    = var.location
   uniform_bucket_level_access = true
   public_access_prevention    = "enforced"
-  force_destroy               = false
+  force_destroy               = var.force_destroy_staging_bucket
 
   versioning {
     enabled = true

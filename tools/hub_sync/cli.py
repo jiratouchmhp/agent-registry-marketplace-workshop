@@ -43,6 +43,7 @@ from tools.hub_sync.hydration import (
     SyncManifest,
     ZipSecurityError,
     ensure_contained_path,
+    fetch_catalog_with_failover,
     inspect_extracted_plugin,
     load_sync_manifest,
     resolve_hub_dir,
@@ -70,6 +71,7 @@ class SyncResult:
     pruned_plugins: list[str] = field(default_factory=list)
     adapter_reports: dict[str, AdapterReport] = field(default_factory=dict)
     manifest: SyncManifest = field(default_factory=SyncManifest)
+    failover_used: bool = False
 
 
 def parse_tools_option(tools_spec: str) -> list[str]:
@@ -119,6 +121,7 @@ def sync_hub(
     *,
     middleware_url: str,
     home_dir: Path,
+    fallback_middleware_url: str | None = None,
     tools: list[str] | str = "all",
     token: str | None = None,
     quota_project: str | None = None,
@@ -143,26 +146,26 @@ def sync_hub(
     previous_manifest = load_sync_manifest(resolved_hub)
 
     # Phase 1: Fetch catalog & validate all plugin archives before touching disk
-    with HubClient(
+    # (with automatic primary -> fallback regional failover when configured)
+    def _notify_failover(primary: str, fallback: str, exc: Exception) -> None:
+        click.echo(
+            f"FAILOVER: Primary middleware '{primary}' failed ({exc}); "
+            f"retrying against fallback middleware '{fallback}'.",
+            err=True,
+        )
+
+    catalog, downloaded, active_middleware_url, failover_used = fetch_catalog_with_failover(
         middleware_url,
+        fallback_url=fallback_middleware_url,
+        marketplace_name_override=marketplace_name,
         token=token,
         quota_project=quota_project,
         extra_headers=extra_headers,
-        client=http_client,
-        transport=http_transport,
-    ) as client:
-        catalog = client.fetch_catalog(marketplace_name_override=marketplace_name)
-
-        downloaded: list[tuple[CatalogPlugin, bytes, str]] = []
-        if not bootstrap_mcp_only:
-            for plugin in catalog.plugins:
-                validate_safe_identifier(
-                    plugin.name, label="plugin.name", error_cls=CatalogFetchError
-                )
-                zip_bytes, verified_sha = client.download_plugin_zip(plugin)
-                # Validate ZIP traversal / symlink / agent-name safety in memory before disk writes
-                validate_zip_bytes(zip_bytes)
-                downloaded.append((plugin, zip_bytes, verified_sha))
+        bootstrap_mcp_only=bootstrap_mcp_only,
+        http_client=http_client,
+        http_transport=http_transport,
+        on_failover=_notify_failover,
+    )
 
     # Catalog fetch + all downloads/SHA-256/ZIP checks succeeded cleanly!
     catalog_complete = True
@@ -231,7 +234,7 @@ def sync_hub(
     desired_mcp_servers = collect_desired_mcp_servers(
         extracted_plugins,
         catalog.mcp_servers,
-        middleware_url,
+        active_middleware_url,
         bootstrap_mcp_only=bootstrap_mcp_only,
     )
 
@@ -328,7 +331,7 @@ def sync_hub(
 
     merged_tools = sorted(set(previous_manifest.tools) | set(selected_tools))
     updated_manifest = SyncManifest(
-        middleware_url=middleware_url.rstrip("/"),
+        middleware_url=active_middleware_url,
         marketplace_name=catalog.marketplace.name,
         last_synced_at=utc_now_iso(),
         last_sync_complete=catalog_complete,
@@ -349,7 +352,7 @@ def sync_hub(
 
     return SyncResult(
         hub_dir=resolved_hub,
-        middleware_url=middleware_url.rstrip("/"),
+        middleware_url=active_middleware_url,
         marketplace_name=catalog.marketplace.name,
         tools=selected_tools,
         dry_run=dry_run,
@@ -360,6 +363,7 @@ def sync_hub(
         pruned_plugins=pruned_plugins,
         adapter_reports=reports,
         manifest=updated_manifest,
+        failover_used=failover_used,
     )
 
 
@@ -442,6 +446,8 @@ def _print_sync_summary(result: SyncResult) -> None:
     prefix = "[DRY-RUN] " if result.dry_run else ""
     click.echo(f"{prefix}Acme Agent Hub Sync Complete")
     click.echo(f"  Middleware : {result.middleware_url}")
+    if result.failover_used:
+        click.echo("  Failover   : active (fell back from primary middleware)")
     click.echo(f"  Hub Dir    : {result.hub_dir}")
     click.echo(f"  Marketplace: {result.marketplace_name}")
     click.echo(f"  Tools      : {', '.join(result.tools)}")
@@ -489,6 +495,15 @@ def cli() -> None:
     default=lambda: os.environ.get("HUB_MIDDLEWARE_URL", "http://127.0.0.1:8080"),
     show_default="http://127.0.0.1:8080 (or $HUB_MIDDLEWARE_URL)",
     help="Base URL of the enterprise Agent Hub Middleware.",
+)
+@click.option(
+    "--fallback-middleware-url",
+    default=None,
+    envvar="HUB_FALLBACK_MIDDLEWARE_URL",
+    help=(
+        "Optional secondary/fallback Middleware URL (e.g. Singapore asia-southeast1) "
+        "used automatically if the primary Middleware fails (or $HUB_FALLBACK_MIDDLEWARE_URL)."
+    ),
 )
 @click.option(
     "--home",
@@ -546,6 +561,7 @@ def cli() -> None:
 )
 def sync_command(
     middleware_url: str,
+    fallback_middleware_url: str | None,
     home_path: Path,
     hub_dir: Path | None,
     tools: str,
@@ -565,6 +581,7 @@ def sync_command(
     try:
         result = sync_hub(
             middleware_url=middleware_url,
+            fallback_middleware_url=fallback_middleware_url,
             home_dir=home_path,
             tools=parsed_tools,
             token=token,

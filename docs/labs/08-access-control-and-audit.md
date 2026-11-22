@@ -35,17 +35,18 @@ By the end of this lab, you will:
 
 ### Live GCP Mode — Grant Per-`Skill` Resource-Level IAM
 
-Restrict a sensitive private skill (e.g. `private-cost-anomaly-triage`) to a specific team or agent service account:
+Restrict a sensitive private skill (e.g. `private-cost-anomaly-triage` in `global` — or `us`/`eu` if using CMEK) to a specific team or agent service account:
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
-export GCP_LOCATION="us-central1"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
 
 gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
   --project="${GCP_PROJECT_ID}" \
-  --location="${GCP_LOCATION}" \
+  --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
   --member="serviceAccount:agent-marketplace-middleware@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/agentregistry.viewer"
+  --role="roles/agentregistry.viewer" \
+  --quiet
 ```
 
 ---
@@ -54,6 +55,13 @@ gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage 
 
 In [terraform/security_governance/auth_bindings.tf](../../terraform/security_governance/auth_bindings.tf), `google_agent_identity_auth_provider` + `google_agent_registry_binding` bind the FinOps A2A Agent (`source.identifier`) to the FinOps MCP Server (`target.identifier`) with scoped OAuth (`cloud-billing.readonly`, `bigquery.readonly`) and explicitly blocked directory admin scopes.
 
+> **Workstream B APAC Regional Split & Toggles (`terraform/security_governance/terraform.tfvars`):**
+> - **`location = "asia-southeast3"`** (Bangkok primary for regional Agent Registry `Services`/`Bindings`, IAP egressor IAM, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing, and regional Cloud Logging bucket; optional secondary/DR compute & `Services` in Singapore `asia-southeast1`).
+> - **Standalone `Skills` location (`global`, or `us`/`eu` for CMEK):** Skills and per-`Skill` IAM live in **`global`** for APAC (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `skills_location = "global"` in `terraform/core/`), shared across Bangkok and Singapore.
+> - **`auth_provider_location = "asia-southeast1"`** (Singapore — verified APAC GA region for `agentidentity.googleapis.com`; Bangkok `asia-southeast3` does not host Agent Identity yet).
+> - **`enable_agent_gateway = false`** (Network Services Agent Gateway on Cloud Run is currently GA only in `us-central1` and `europe-west1`; set `enable_agent_gateway = true` and `agent_gateway_location = "us-central1"` only when evaluating live Agent Gateway in US/EU).
+> - **`lock_audit_bucket = false`** in ephemeral workshop sandboxes so `terraform destroy` works cleanly (**set `lock_audit_bucket = true` in production** for irreversible WORM log retention!).
+
 At runtime, calling `GET .../bindings:fetchAvailable` **actively filters out** any binding whose `AuthProvider` the caller lacks `roles/agentidentity.user` on.
 
 ### Mode A: Local Mock Mode — Demonstrate IAM-Filtered `bindings:fetchAvailable`
@@ -61,10 +69,10 @@ At runtime, calling `GET .../bindings:fetchAvailable` **actively filters out** a
 Ensure `make run-mock` is running on `:8090`, then create a Binding and test authorized vs. unauthorized callers using `X-Mock-Allowed-Auth-Providers`:
 
 ```bash
-BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/us-central1"
-AGENT_URN="urn:agent:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-advisor-agent"
-MCP_URN="urn:mcp:projects-123456789012:projects:123456789012:locations:us-central1:agentregistry:services:finops-mcp-server"
-AUTH_PROV="projects/acme-agent-governance/locations/us-central1/authProviders/finops-mcp-oauth"
+BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3"
+AGENT_URN="urn:agent:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-advisor-agent"
+MCP_URN="urn:mcp:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-mcp-server"
+AUTH_PROV="projects/acme-agent-governance/locations/asia-southeast1/authProviders/finops-mcp-oauth"
 
 # 1. Create the Agent Registry Binding
 curl -fsSL -X POST "${BASE}/bindings?bindingId=finops-agent-to-mcp-binding" \
@@ -127,6 +135,8 @@ Inspect [security-governance/iap-uap/mcp-tool-annotations-uap.json](../../securi
 
 ### Mode A: Validate Rules & Preview Commands (`--dry-run`, Zero GCP Needed)
 
+*(Note: Network Services Agent Gateway is currently GA in `us-central1` and `europe-west1`; keep `enable_agent_gateway = false` in APAC-only Terraform deployments and use `us-central1` or `europe-west1` when evaluating live Agent Gateway + IAP v2 UAP.)*
+
 ```bash
 bash security-governance/iap-uap/apply-uap.sh \
   --project acme-agent-governance \
@@ -180,7 +190,7 @@ Verify `/tmp/policy-guard-demo.jsonl` records `"arg_keys": ["project_id", "token
 
 Inspect [terraform/security_governance/audit_logging.tf](../../terraform/security_governance/audit_logging.tf):
 1. Enables `ADMIN_READ` Data Access audit logs on **both** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com` (Admin Activity is always on).
-2. Creates a **locked WORM Cloud Logging bucket** (`agent-governance-audit`, `locked = true`, `enable_analytics = true`) with a dedicated sink routing:
+2. Creates a regional Cloud Logging bucket (`agent-governance-audit` in `asia-southeast3`, `enable_analytics = true`) controlled by `var.lock_audit_bucket` (**`false` in ephemeral workshop sandboxes** so `terraform destroy` cleans up; **`true` in production** for irreversible WORM retention) with a dedicated sink routing:
    - `cloudaudit.googleapis.com/activity` (`agentregistry`, `apphubendpoint`, `agentidentity`, `iap`, `networkservices`, `cloudkms`)
    - `cloudaudit.googleapis.com/data_access` (`agentregistry`, `apphubendpoint`, `iap`, `cloudkms`)
    - `networkservices.googleapis.com/gateway_requests`
@@ -190,7 +200,36 @@ Inspect [terraform/security_governance/audit_logging.tf](../../terraform/securit
    - IAP UAP `DRY_RUN` readiness breakdown before flipping to enforced mode
    - Cloud KMS `AsymmetricSign` / `GetPublicKey` audit trail
 
-> **Irreversibility Warning:** Once `locked = true` is applied on `google_logging_project_bucket_config`, the bucket's retention policy cannot be shortened and the bucket cannot be deleted until all log entries expire.
+> **Irreversibility Warning:** Once `lock_audit_bucket = true` (`locked = true`) is applied on `google_logging_project_bucket_config`, the bucket's retention policy cannot be shortened and the bucket cannot be deleted until all log entries expire. Keep `lock_audit_bucket = false` in workshop sandboxes and always flip `lock_audit_bucket = true` in production!
+
+---
+
+## Step 6: Clean Teardown (Live GCP Workshop Cleanup)
+
+Always tear down ephemeral workshop resources once you finish so no billable Cloud Run services, Artifact Registry images, or Agent Registry test skills remain running:
+
+```bash
+export GCP_PROJECT_ID="<your-gcp-project-id>"
+
+# 1. Destroy Workstream B Terraform stack (clean when lock_audit_bucket = false)
+#    Note: Cloud KMS CryptoKeyVersions schedule for destruction rather than instant deletion.
+terraform -chdir=terraform/security_governance destroy
+
+# 2. Destroy Workstream A resources (choose the Track you used in Lab 03):
+# Track 2 (Zero-Terraform gcloud + Cloud Build):
+make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
+# Or with Singapore secondary cleanup:
+# scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+
+# Track 3 (Terraform Core — set force_destroy_staging_bucket = true in sandbox .tfvars if objects exist):
+# terraform -chdir=terraform/core destroy
+
+# 3. Verify zero workshop Cloud Run services remain in Bangkok and Singapore
+gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast3" --limit=50 --quiet
+gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast1" --limit=50 --quiet
+```
+
+> **Tip for Deleting Leftover Skills with Revisions:** Because `gcloud agent-registry skills delete` does **not** accept `--force`, delete any remaining test skill with revisions via REST `DELETE "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true"` with `Authorization: Bearer $(gcloud auth print-access-token --quiet)` and `x-goog-user-project: ${GCP_PROJECT_ID}` headers (handled automatically by `scripts/destroy_gcp.sh`).
 
 ---
 
@@ -213,6 +252,7 @@ Inspect [terraform/security_governance/audit_logging.tf](../../terraform/securit
 | `bindings:fetchAvailable` returns all bindings when testing locally | `X-Mock-Allowed-Auth-Providers` header omitted | Pass `-H "X-Mock-Allowed-Auth-Providers: <provider-id>"` to simulate IAM filtering in `mock_registry`. |
 | `gcloud beta iam access-policies create` fails with invalid principal format | Used a short email instead of IAM v3 Workload / Agent Identity principal URI | Format principals per IAP v2 UAP syntax (e.g. `principal://agents.global.proj-<NUM>.system.id.goog/...` or `principal://iam.googleapis.com/...`). |
 | Missing `apphubendpoint.googleapis.com` discovery audit records | Only enabled `ADMIN_READ` on `agentregistry.googleapis.com` | Enable `ADMIN_READ` Data Access on **both** `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com` (configured in `audit_logging.tf`). |
+| `gcloud agent-registry skills add-iam-policy-binding` returns `404` in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu` for CMEK) on live Agent Registry `v1` | Pass `--location=global` (matching `AGENT_REGISTRY_SKILLS_LOCATION`) for per-`Skill` IAM while keeping `Bindings` and IAP egressor IAM in `asia-southeast3` and `AuthProvider` in `asia-southeast1`. |
 
 ---
 

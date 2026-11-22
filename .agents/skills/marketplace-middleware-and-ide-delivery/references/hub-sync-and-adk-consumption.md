@@ -24,7 +24,8 @@ Authoritative reference for `tools/hub_sync/` (`cli.py`, `hydration.py`, `adapte
 
 | Option | Env / Default | Purpose |
 |---|---|---|
-| `--middleware-url` | `$HUB_MIDDLEWARE_URL` or `http://127.0.0.1:8080` | Base URL of the Polyglot Marketplace Middleware |
+| `--middleware-url` | `$HUB_MIDDLEWARE_URL` or `http://127.0.0.1:8080` | Base URL of the primary Polyglot Marketplace Middleware (e.g. Bangkok `asia-southeast3`) |
+| `--fallback-middleware-url` | `$HUB_FALLBACK_MIDDLEWARE_URL` or `None` | Optional secondary Middleware URL (e.g. Singapore `asia-southeast1`) used automatically if primary is unreachable |
 | `--home` | `~` | Target developer home directory (use `/tmp/acme-agent-hub-demo-home` for safe workshop testing) |
 | `--hub-dir` | `<home>/.acme-agent-hub` | Override local hub storage directory |
 | `--tools` | `all` | `all` or comma-separated subset of `claude,copilot,codex,antigravity` |
@@ -115,7 +116,9 @@ Headless Platform Agents on **Vertex AI Agent Engine** or **Cloud Run** bypass t
 | Setting | Env Var Precedence (Highest → Lowest) | Default |
 |---|---|---|
 | Project ID | `GCP_PROJECT_ID` → `GOOGLE_CLOUD_PROJECT` | `acme-agent-governance` |
-| Location | `GCP_LOCATION` → `GOOGLE_CLOUD_LOCATION` | `us-central1` |
+| Location (Services) | `GCP_LOCATION` → `GOOGLE_CLOUD_LOCATION` | `asia-southeast3` |
+| Skills Location | `--skills-location` → `AGENT_REGISTRY_SKILLS_LOCATION` (auto-defaults to `global` on `googleapis.com` when `GCP_LOCATION` is regional) | `global` (live) / `asia-southeast3` (local mock) |
+| Private-Only Skill Filter | `only_private_skills=True` (default in `OrchestratorConfig` / `PlatformAgentConsumer`) | `true` (filters out built-in Google 1P skills) |
 | Registry Base URL | `AGENT_REGISTRY_BASE_URL` (also temporarily sets `AGENT_REGISTRY_ENDPOINT` during `GCPSkillRegistry(...)` init) | `https://agentregistry.googleapis.com/v1` |
 | Mode | `--mode` CLI flag → `PLATFORM_AGENT_MODE` (`adk` \| `rest`) | `rest` |
 | Model | `PLATFORM_AGENT_MODEL` | `gemini-2.5-flash` |
@@ -127,7 +130,7 @@ Headless Platform Agents on **Vertex AI Agent Engine** or **Cloud Run** bypass t
 ### CLI Usage (`python -m platform_agent.adk_orchestrator`)
 ```bash
 .venv/bin/python -m platform_agent.adk_orchestrator \
-  [--mode rest|adk] [--project-id ID] [--location LOC] [--base-url URL] \
+  [--mode rest|adk] [--project-id ID] [--location LOC] [--skills-location LOC] [--base-url URL] \
   [--skill-query Q] [--mcp-query Q] [--agent-query Q] \
   [--source-agent-urn URN] [--no-download-skills] [--print-config]
 ```
@@ -149,9 +152,10 @@ from google.adk.tools.skill_toolset import SkillToolset
 CredentialManager.register_auth_provider(GcpAuthProvider())
 
 project_id = os.environ["GCP_PROJECT_ID"]   # Catalog project (skills are strictly project-scoped!)
-location = os.environ.get("GCP_LOCATION", "us-central1")
+location = os.environ.get("GCP_LOCATION", "asia-southeast3")  # Regional Services (Bangkok / Singapore)
+skills_location = os.environ.get("AGENT_REGISTRY_SKILLS_LOCATION", "global")  # Standalone Skills (global / us / eu)
 
-# 2. Discover & materialize governed MCP Toolsets and Remote A2A sub-agents
+# 2. Discover & materialize governed regional MCP Toolsets and Remote A2A sub-agents
 registry = AgentRegistry(project_id=project_id, location=location)
 mcp_names = [s["name"] for s in registry.search_mcp_servers(search_string="finops").get("mcpServers", [])]
 mcp_toolsets = [registry.get_mcp_toolset(name) for name in mcp_names]
@@ -159,8 +163,8 @@ mcp_toolsets = [registry.get_mcp_toolset(name) for name in mcp_names]
 agent_names = [a["name"] for a in registry.search_agents(search_string="finops").get("agents", [])]
 remote_agents = [registry.get_remote_a2a_agent(name) for name in agent_names]
 
-# 3. Dynamic semantic skill discovery & verified ?alt=media ZIP loading
-skill_registry = GCPSkillRegistry(project_id=project_id, location=location)
+# 3. Dynamic semantic skill discovery & verified ?alt=media ZIP loading (global / us / eu)
+skill_registry = GCPSkillRegistry(project_id=project_id, location=skills_location)
 skill_toolset = SkillToolset(registry=skill_registry)
 
 # 4. Assemble root LlmAgent (or use platform_agent.adk_orchestrator.build_live_adk_agent)
@@ -178,5 +182,5 @@ root_agent = LlmAgent(
 
 ### `PlatformAgentConsumer` REST `v1` Contract (`platform_agent/rest_consumer.py`)
 - **Search asymmetry:** `skills:search` accepts `searchType: "SEMANTIC" | "KEYWORD"` and `filter: "state=ACTIVE AND defaultRevisionFindingCount=0"`. `mcpServers:search` and `agents:search` accept `{"searchString": "..."}` only (never `searchType`).
-- **2-Step Skill Fetch (`fetch_and_extract_skill`):** `GET .../skills/{private-id}` → checks `SERVABLE_SKILL_STATES` & `defaultRevision` → `GET .../{defaultRevision}` → enforces `findings == []` & `scanState` in `SUCCEEDED`/`DISABLED` → `GET .../{defaultRevision}?alt=media` (`follow_redirects=False` loop stripping all `Authorization` and `x-goog-*` headers on every redirect hop) → verifies `sha256Hash` → enforces `agentskills.io` ZIP limits (`<= 1 MiB` compressed, `<= 10 MiB` total uncompressed, `<= 1 MiB`/file, depth `<= 8`, strictly one uppercase `SKILL.md`, zero symlinks) → optionally verifies Cloud KMS `EC_SIGN_P256_SHA256` signature (supports raw SHA-256 digest, hex digest, `agent-registry-skill-v1` canonical ZIP digest, and structured canonical digest; fails closed with `SkillSignatureError` if enabled without `KMS_PUBLIC_KEY_PEM_PATH`).
+- **2-Step Skill Fetch (`fetch_and_extract_skill`):** `GET .../locations/{skills_loc}/skills/{private-id}` (filtering strictly to `private-*` when `only_private_skills=True`) → checks `SERVABLE_SKILL_STATES` & `defaultRevision` → `GET .../{defaultRevision}` → enforces `findings == []` & `scanState` in `SUCCEEDED`/`DISABLED` → `GET .../{defaultRevision}?alt=media` (`follow_redirects=False` loop preserving `Authorization` strictly on live same-origin `/download/...` redirects without signed-URL tokens while stripping `Authorization` and all `x-goog-*` headers on cross-origin and signed-URL `/scotty-signed/` / `X-Goog-Signature` hops) → verifies `sha256Hash` → enforces `agentskills.io` ZIP limits (`<= 1 MiB` compressed, `<= 10 MiB` total uncompressed, `<= 1 MiB`/file, depth `<= 8`, strictly one uppercase `SKILL.md`, zero symlinks) → optionally verifies Cloud KMS `EC_SIGN_P256_SHA256` signature (supports raw SHA-256 digest, hex digest, `agent-registry-skill-v1` canonical ZIP digest, and structured canonical digest; fails closed with `SkillSignatureError` if enabled without `KMS_PUBLIC_KEY_PEM_PATH`).
 - **Binding Resolution (`resolve_auth_binding`):** Calls `GET .../bindings:fetchAvailable?sourceIdentifier=...&targetIdentifier=...`, prefers bindings scoped explicitly to `source_identifier` over wildcard bindings, and selects the entry with the latest RFC-3339 `updateTime`.

@@ -337,6 +337,7 @@ def _jsonrpc_result(
     )
 
 
+@app.get("/health")
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     return {

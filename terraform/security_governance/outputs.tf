@@ -28,19 +28,24 @@ output "auth_provider_name" {
   value       = google_agent_identity_auth_provider.finops_oauth.name
 }
 
+output "auth_provider_location" {
+  description = "Google Cloud region hosting the Agent Identity AuthProvider (defaults to asia-southeast1, Singapore, for APAC GA coverage)."
+  value       = var.auth_provider_location
+}
+
 output "binding_name" {
   description = "Full resource name of the Agent Registry Binding connecting the A2A agent to the MCP server."
   value       = google_agent_registry_binding.finops_agent_to_mcp.name
 }
 
 output "agent_gateway_name" {
-  description = "Name of the Google-managed Network Services Agent Gateway."
-  value       = google_network_services_agent_gateway.marketplace.name
+  description = "Name of the optional Google-managed Network Services Agent Gateway (empty when enable_agent_gateway is false)."
+  value       = try(google_network_services_agent_gateway.marketplace[0].name, "")
 }
 
 output "agent_gateway_id" {
-  description = "Full resource ID of the Google-managed Network Services Agent Gateway (for IAP UAP policy binding targets)."
-  value       = google_network_services_agent_gateway.marketplace.id
+  description = "Full resource ID of the optional Google-managed Network Services Agent Gateway (empty when enable_agent_gateway is false)."
+  value       = try(google_network_services_agent_gateway.marketplace[0].id, "")
 }
 
 output "audit_log_bucket_id" {

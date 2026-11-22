@@ -1,0 +1,27 @@
+# Zero-Docker Cloud Build configuration for Polyglot Marketplace Middleware.
+# Submit from repository root:
+#   gcloud builds submit --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" \
+#     --default-buckets-behavior=regional-user-owned-bucket \
+#     --config=cloudbuild/middleware.yaml \
+#     --substitutions=_IMAGE_URI="${GCP_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/agent-marketplace/polyglot-middleware:1.0.0" \
+#     . --quiet
+
+steps:
+  - id: build-middleware-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - middleware/Dockerfile
+      - -t
+      - ${_IMAGE_URI}
+      - .
+
+images:
+  - ${_IMAGE_URI}
+
+substitutions:
+  _IMAGE_URI: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY

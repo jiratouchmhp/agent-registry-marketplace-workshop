@@ -130,6 +130,8 @@ def assemble_polyglot_plugin_zip(
 def _run_self_check() -> None:
     """Offline MockTransport self-check for Lab 03."""
     print("Lab 03 Self-Check")
+    passed = 0
+    total = 3
     sample_zip = b"PK\x05\x06" + b"\x00" * 18
     sample_sha = hashlib.sha256(sample_zip).hexdigest()
 
@@ -165,24 +167,24 @@ def _run_self_check() -> None:
         assert not any(k.lower().startswith("x-goog-") for k in cleaned)
         assert cleaned.get("Accept") == "*/*"
         print("  [PASS] strip_headers_for_cross_origin_redirect")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
 
     try:
         with httpx.Client(transport=httpx.MockTransport(mock_handler)) as client:
             data = download_skill_revision_media(
                 client,
-                media_url="https://agentregistry.googleapis.com/v1/projects/p/locations/us-central1/skills/private-cost-anomaly-triage/revisions/rev-1?alt=media",
+                media_url="https://agentregistry.googleapis.com/v1/projects/p/locations/asia-southeast3/skills/private-cost-anomaly-triage/revisions/rev-1?alt=media",
                 auth_token="test-token",
                 quota_project="acme-agent-governance",
                 expected_sha256=sample_sha,
             )
         assert data == sample_zip
         print("  [PASS] download_skill_revision_media (302 GCS redirect + SHA-256 verified)")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
 
     try:
         bundle_bytes, bundle_sha = assemble_polyglot_plugin_zip(
@@ -212,12 +214,15 @@ def _run_self_check() -> None:
             ):
                 assert req in names, f"Missing {req} in Polyglot ZIP"
         print(f"  [PASS] assemble_polyglot_plugin_zip (sha256={bundle_sha[:12]}...)")
+        passed += 1
     except NotImplementedError as exc:
         print(f"  [TODO] {exc}")
-        return
 
     _ = (json, urljoin, urlparse, Any)
-    print("  [DONE] All Lab 03 checks passed!")
+    if passed == total:
+        print(f"  [DONE] Progress: {passed}/{total} checks passed — all Lab 03 checks passed!")
+    else:
+        print(f"  [INFO] Progress: {passed}/{total} checks passed")
 
 
 if __name__ == "__main__":

@@ -48,10 +48,19 @@ def cli() -> None:
 )
 @click.option(
     "--location",
-    default="us-central1",
+    default="asia-southeast3",
     show_default=True,
     envvar="GCP_LOCATION",
-    help="Agent Registry location (e.g. us-central1, global, us, eu).",
+    help="Agent Registry location for Services (e.g. asia-southeast3, asia-southeast1, global, us, eu).",
+)
+@click.option(
+    "--skills-location",
+    default=None,
+    envvar="AGENT_REGISTRY_SKILLS_LOCATION",
+    help=(
+        "Optional Agent Registry location for standalone Skill resources "
+        "(e.g. global, us, eu). Defaults to --location when unset."
+    ),
 )
 @click.option(
     "--target-state",
@@ -115,11 +124,28 @@ def cli() -> None:
     default=False,
     help="Validate, package, and sign locally without making mutating API calls.",
 )
+@click.option(
+    "--wait-for-scan",
+    is_flag=True,
+    default=False,
+    help=(
+        "Wait for live Agent Registry async security scanning to transition STATE_DRAFT "
+        "skills to STATE_ACTIVE (or a terminal scan state)."
+    ),
+)
+@click.option(
+    "--scan-timeout",
+    default=90.0,
+    show_default=True,
+    type=float,
+    help="Maximum seconds to poll per skill when --wait-for-scan is enabled.",
+)
 def sync_command(
     plugin_dir: Path,
     registry_url: str,
     project: str,
     location: str,
+    skills_location: str | None,
     target_state: str,
     scanning_policy: str,
     source_repo: str | None,
@@ -130,6 +156,8 @@ def sync_command(
     output_dir: Path | None,
     skip_mcp_probe: bool,
     dry_run: bool,
+    wait_for_scan: bool,
+    scan_timeout: float,
 ) -> None:
     """Decompose, package, optionally sign, and sync a plugin to Agent Registry."""
     try:
@@ -137,6 +165,7 @@ def sync_command(
             plugin_dir,
             project=project,
             location=location,
+            skills_location=skills_location,
             target_state=target_state,
             scanning_policy=scanning_policy,
             source_repo=source_repo,
@@ -152,6 +181,8 @@ def sync_command(
             auth_token=auth_token,
             dry_run=dry_run,
             output_dir=output_dir,
+            wait_for_scan=wait_for_scan,
+            scan_timeout=scan_timeout,
         )
     except PluginSyncError as exc:
         click.echo(f"Error: {exc}", err=True)
@@ -237,10 +268,19 @@ def sync_command(
 )
 @click.option(
     "--location",
-    default="us-central1",
+    default="asia-southeast3",
     show_default=True,
     envvar="GCP_LOCATION",
-    help="Agent Registry location (e.g. us-central1, global, us, eu).",
+    help="Agent Registry location for Services (e.g. asia-southeast3, asia-southeast1, global, us, eu).",
+)
+@click.option(
+    "--skills-location",
+    default=None,
+    envvar="AGENT_REGISTRY_SKILLS_LOCATION",
+    help=(
+        "Optional Agent Registry location for standalone Skill resources "
+        "(e.g. global, us, eu). Defaults to --location when unset."
+    ),
 )
 @click.option(
     "--target-state",
@@ -304,6 +344,22 @@ def sync_command(
     default=False,
     help="Validate, package, and sign locally without making mutating API calls.",
 )
+@click.option(
+    "--wait-for-scan",
+    is_flag=True,
+    default=False,
+    help=(
+        "Wait for live Agent Registry async security scanning to transition STATE_DRAFT "
+        "skills to STATE_ACTIVE (or a terminal scan state)."
+    ),
+)
+@click.option(
+    "--scan-timeout",
+    default=90.0,
+    show_default=True,
+    type=float,
+    help="Maximum seconds to poll per skill when --wait-for-scan is enabled.",
+)
 def ingest_command(
     source_type: str | None,
     local_path: Path | None,
@@ -319,6 +375,7 @@ def ingest_command(
     registry_url: str,
     project: str,
     location: str,
+    skills_location: str | None,
     target_state: str,
     scanning_policy: str,
     source_repo: str | None,
@@ -329,6 +386,8 @@ def ingest_command(
     output_dir: Path | None,
     skip_mcp_probe: bool,
     dry_run: bool,
+    wait_for_scan: bool,
+    scan_timeout: float,
 ) -> None:
     """Auto-discover and ingest local or centralized Git skills/plugins into Agent Registry."""
     cleaned_repo_url = repo_url.strip() if isinstance(repo_url, str) and repo_url.strip() else None
@@ -371,6 +430,7 @@ def ingest_command(
             registry_url=registry_url,
             project=project,
             location=location,
+            skills_location=skills_location,
             target_state=target_state,
             scanning_policy=scanning_policy,
             source_repo=source_repo,
@@ -381,6 +441,8 @@ def ingest_command(
             output_dir=output_dir,
             probe_mcp=not skip_mcp_probe,
             dry_run=dry_run,
+            wait_for_scan=wait_for_scan,
+            scan_timeout=scan_timeout,
         )
     except PluginSyncError as exc:
         click.echo(f"Error: {exc}", err=True)

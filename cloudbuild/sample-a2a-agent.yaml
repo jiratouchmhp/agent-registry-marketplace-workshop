@@ -1,0 +1,27 @@
+# Zero-Docker Cloud Build configuration for Sample FinOps A2A Agent.
+# Submit from repository root:
+#   gcloud builds submit --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" \
+#     --default-buckets-behavior=regional-user-owned-bucket \
+#     --config=cloudbuild/sample-a2a-agent.yaml \
+#     --substitutions=_IMAGE_URI="${GCP_LOCATION}-docker.pkg.dev/${GCP_PROJECT_ID}/agent-marketplace/sample-a2a-agent:1.0.0" \
+#     . --quiet
+
+steps:
+  - id: build-sample-a2a-agent-image
+    name: gcr.io/cloud-builders/docker
+    args:
+      - build
+      - -f
+      - samples/a2a-agent/Dockerfile
+      - -t
+      - ${_IMAGE_URI}
+      - samples/a2a-agent
+
+images:
+  - ${_IMAGE_URI}
+
+substitutions:
+  _IMAGE_URI: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY

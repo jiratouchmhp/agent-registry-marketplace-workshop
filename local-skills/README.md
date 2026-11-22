@@ -49,8 +49,10 @@ python -m tools.plugin_sync ingest \
   --plugin-name local-ops-toolkit \
   --registry-url http://127.0.0.1:8090/v1 \
   --project acme-agent-governance \
-  --location us-central1
+  --location asia-southeast3
 ```
+
+*(Against live `https://agentregistry.googleapis.com/v1`, pass `--skills-location global --wait-for-scan --only-skills` so standalone skills are hosted in `global` — or `us`/`eu` for CMEK — and async `ENABLED_BLOCKING` scans complete before promoting `defaultRevision`.)*
 
 ### 2. Ingest with ECDSA P-256 signing and dry-run artifact inspection
 
@@ -62,7 +64,7 @@ python -m tools.plugin_sync ingest \
   --sign-pem /path/to/signing-private.pem \
   --output-dir dist/local-skills \
   --project acme-agent-governance \
-  --location us-central1 \
+  --location asia-southeast3 \
   --dry-run
 ```
 
@@ -75,7 +77,7 @@ python -m tools.plugin_sync ingest \
   --per-skill-plugin \
   --registry-url http://127.0.0.1:8090/v1 \
   --project acme-agent-governance \
-  --location us-central1
+  --location asia-southeast3
 ```
 
 ### 4. Ingest a single standalone skill directory
@@ -86,7 +88,7 @@ python -m tools.plugin_sync ingest \
   --path local-skills/cloud-run-debugger \
   --registry-url http://127.0.0.1:8090/v1 \
   --project acme-agent-governance \
-  --location us-central1
+  --location asia-southeast3
 ```
 
 Once registered, Agent Registry stores each skill with the automatic `private-` resource ID prefix (for example, `private-cloud-run-debugger`), and the Polyglot Marketplace Middleware automatically serves `local-ops-toolkit` across `/v1/catalog`, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, and `/mcp`.

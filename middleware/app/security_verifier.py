@@ -16,6 +16,7 @@ import hmac
 import io
 import json
 import os
+import shutil
 import subprocess
 import zipfile
 from dataclasses import dataclass, field
@@ -237,7 +238,7 @@ def sign_skill_zip(
     zip_bytes: bytes,
     private_key_pem: bytes,
     *,
-    key_version: str = "projects/acme-agent-governance/locations/us-central1/keyRings/skill-signing/cryptoKeys/skill-signer/cryptoKeyVersions/1",
+    key_version: str = "projects/acme-agent-governance/locations/asia-southeast3/keyRings/skill-signing/cryptoKeys/skill-signer/cryptoKeyVersions/1",
 ) -> tuple[bytes, str]:
     """Sign a skill ZIP canonically and return `(signed_zip_bytes, base64_signature)`.
 
@@ -301,9 +302,14 @@ def _resolve_kms_oauth_token_sync(
     except (httpx.HTTPError, ValueError, TypeError, KeyError):
         pass
 
+    gcloud_bin = (
+        os.getenv("GCLOUD_BIN", "").strip()
+        or shutil.which("gcloud")
+        or str(Path.home() / ".local" / "bin" / "gcloud")
+    )
     for cmd in (
-        ["gcloud", "auth", "application-default", "print-access-token"],
-        ["gcloud", "auth", "print-access-token"],
+        [gcloud_bin, "auth", "application-default", "print-access-token", "--quiet"],
+        [gcloud_bin, "auth", "print-access-token", "--quiet"],
     ):
         try:
             proc = subprocess.run(cmd, capture_output=True, text=True, check=False, timeout=5)
@@ -342,8 +348,12 @@ def fetch_kms_public_key_pem(
         metadata_transport=metadata_transport,
     )
     url = f"{kms_endpoint.rstrip('/')}/{key_version}/publicKey"
+    headers = {"Authorization": f"Bearer {token}"}
+    parts = key_version.split("/")
+    if len(parts) >= 2 and parts[0] == "projects" and parts[1]:
+        headers["x-goog-user-project"] = parts[1]
     with httpx.Client(timeout=15.0, transport=kms_transport) as client:
-        resp = client.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp = client.get(url, headers=headers)
     if resp.status_code != 200:
         raise RuntimeError(
             f"Cloud KMS publicKey fetch failed (HTTP {resp.status_code}) for '{key_version}': "
