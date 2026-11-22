@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Zero-Docker, Zero-Terraform live Google Cloud deployer for the Enterprise Agent
-# Marketplace Workshop (Bangkok asia-southeast3 primary + optional Singapore
-# asia-southeast1 secondary failover).
+# Marketplace Workshop (Bangkok asia-southeast3 primary + global Skills).
 #
 # Every gcloud command uses --quiet and explicit --project / --region / --location.
 
@@ -12,10 +11,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 
 PROJECT_ID="${GCP_PROJECT_ID:-}"
-PRIMARY_REGION="${GCP_LOCATION:-asia-southeast3}"
-SECONDARY_REGION="${GCP_SECONDARY_LOCATION:-asia-southeast1}"
+REGION="${GCP_LOCATION:-asia-southeast3}"
 SKILLS_LOCATION="${AGENT_REGISTRY_SKILLS_LOCATION:-global}"
-ENABLE_SECONDARY="false"
 REPO="${ARTIFACT_REGISTRY_REPO:-agent-marketplace}"
 TAG="${IMAGE_TAG:-1.0.0}"
 DEPLOY_MODE="cloudbuild"
@@ -40,10 +37,8 @@ Docker and zero Terraform required.
 
 Options:
   --project ID                  Google Cloud project ID (required, or $GCP_PROJECT_ID)
-  --primary-region REGION       Primary GCP region (default: asia-southeast3)
-  --secondary-region REGION     Secondary GCP region (default: asia-southeast1)
+  --region REGION               Primary GCP region (default: asia-southeast3, Bangkok; alias: --primary-region)
   --skills-location LOC         Agent Registry Skills location: global|us|eu (default: global)
-  --enable-secondary            Also deploy full secondary stack in --secondary-region
   --repo REPO                   Artifact Registry repo ID (default: agent-marketplace)
   --tag TAG                     Container image tag (default: 1.0.0)
   --deploy-mode MODE            cloudbuild|source (default: cloudbuild)
@@ -68,21 +63,13 @@ while [[ $# -gt 0 ]]; do
       PROJECT_ID="$2"
       shift 2
       ;;
-    --primary-region)
-      PRIMARY_REGION="$2"
-      shift 2
-      ;;
-    --secondary-region)
-      SECONDARY_REGION="$2"
+    --region|--primary-region)
+      REGION="$2"
       shift 2
       ;;
     --skills-location)
       SKILLS_LOCATION="$2"
       shift 2
-      ;;
-    --enable-secondary)
-      ENABLE_SECONDARY="true"
-      shift
       ;;
     --repo)
       REPO="$2"
@@ -229,11 +216,6 @@ if [[ "${ALLOW_UNAUTH_DEMO}" == "true" ]]; then
   AUTH_FLAG="--allow-unauthenticated"
 fi
 
-TARGET_REGIONS=("${PRIMARY_REGION}")
-if [[ "${ENABLE_SECONDARY}" == "true" && -n "${SECONDARY_REGION}" && "${SECONDARY_REGION}" != "${PRIMARY_REGION}" ]]; then
-  TARGET_REGIONS+=("${SECONDARY_REGION}")
-fi
-
 run_cmd() {
   if [[ "${DRY_RUN}" == "true" ]]; then
     printf '[DRY-RUN]'
@@ -250,7 +232,7 @@ echo "========================================================================"
 echo "Enterprise Agent Marketplace — Live GCP Deploy (Zero-Docker / Zero-TF)"
 echo "========================================================================"
 echo "Project           : ${PROJECT_ID}"
-echo "Regions           : ${TARGET_REGIONS[*]} (secondary_enabled=${ENABLE_SECONDARY})"
+echo "Region            : ${REGION}"
 echo "Skills Location   : ${SKILLS_LOCATION}"
 echo "Deploy Mode       : ${DEPLOY_MODE}"
 echo "Skills Source     : ${SKILLS_SOURCE}"
@@ -328,13 +310,10 @@ echo "[Step 2/7] Building container images (mode=${DEPLOY_MODE}, skip_build=${SK
 if [[ "${SKIP_BUILD}" == "false" ]]; then
   BUILD_ARGS=(
     --project "${PROJECT_ID}"
-    --region "${PRIMARY_REGION}"
+    --region "${REGION}"
     --repo "${REPO}"
     --tag "${TAG}"
   )
-  if [[ "${ENABLE_SECONDARY}" == "true" && -n "${SECONDARY_REGION}" && "${SECONDARY_REGION}" != "${PRIMARY_REGION}" ]]; then
-    BUILD_ARGS+=(--secondary-region "${SECONDARY_REGION}")
-  fi
   if [[ "${DEPLOY_MODE}" == "source" ]]; then
     BUILD_ARGS+=(--only-middleware)
   fi
@@ -370,12 +349,11 @@ trap 'rm -rf "${WORK_TMP}"' EXIT
 
 deploy_and_register_region() {
   local region="$1"
-  local peer_region="$2"
   local ar_prefix="${region}-docker.pkg.dev/${PROJECT_ID}/${REPO}"
 
   echo ""
   echo "========================================================================"
-  echo "Deploying Region: ${region} (secondary reference: ${peer_region})"
+  echo "Deploying Region: ${region}"
   echo "========================================================================"
 
   # Step 3: Deploy Cloud Run Services
@@ -447,7 +425,7 @@ deploy_and_register_region() {
     --image="${ar_prefix}/polyglot-middleware:${TAG}" \
     --service-account="${MW_SA_EMAIL}" \
     --port=8080 \
-    --set-env-vars="AGENT_REGISTRY_BASE_URL=https://agentregistry.googleapis.com/v1,GCP_PROJECT_ID=${PROJECT_ID},GCP_LOCATION=${region},GCP_SECONDARY_LOCATION=${peer_region},AGENT_REGISTRY_SKILLS_LOCATION=${SKILLS_LOCATION},REQUIRE_KMS_SIGNATURE=false" \
+    --set-env-vars="AGENT_REGISTRY_BASE_URL=https://agentregistry.googleapis.com/v1,GCP_PROJECT_ID=${PROJECT_ID},GCP_LOCATION=${region},AGENT_REGISTRY_SKILLS_LOCATION=${SKILLS_LOCATION},REQUIRE_KMS_SIGNATURE=false" \
     "${AUTH_FLAG}" \
     --quiet
 
@@ -728,13 +706,7 @@ out_file.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 PYEOF
 }
 
-for reg in "${TARGET_REGIONS[@]}"; do
-  peer="${SECONDARY_REGION}"
-  if [[ "${reg}" == "${SECONDARY_REGION}" ]]; then
-    peer="${PRIMARY_REGION}"
-  fi
-  deploy_and_register_region "${reg}" "${peer}"
-done
+deploy_and_register_region "${REGION}"
 
 # ----------------------------------------------------------------------------
 # Step 6: Ingest Standalone Skills ONCE into multi-region location (global/us/eu)
@@ -821,10 +793,10 @@ echo "[Step 7/7] Writing deployment manifest JSON..."
 if [[ "${DRY_RUN}" == "true" ]]; then
   echo "[DRY-RUN] Would write deployment manifest to ${STATE_FILE}"
 else
-  "${PYTHON_BIN}" - "${STATE_FILE}" "${WORK_TMP}" "${PROJECT_ID}" "${PRIMARY_REGION}" \
-    "${SECONDARY_REGION}" "${SKILLS_LOCATION}" "${ENABLE_SECONDARY}" "${REPO}" "${TAG}" "${NAME_PREFIX}" \
+  "${PYTHON_BIN}" - "${STATE_FILE}" "${WORK_TMP}" "${PROJECT_ID}" "${REGION}" \
+    "${SKILLS_LOCATION}" "${REPO}" "${TAG}" "${NAME_PREFIX}" \
     "${DEPLOY_MODE}" "${SKILLS_SOURCE}" "${ALLOW_UNAUTH_DEMO}" \
-    "${MW_SA_EMAIL}" "${WORKLOADS_SA_EMAIL}" "${INGEST_OUT_1}" "${INGEST_OUT_2}" "${TARGET_REGIONS[@]}" <<'PYEOF'
+    "${MW_SA_EMAIL}" "${WORKLOADS_SA_EMAIL}" "${INGEST_OUT_1}" "${INGEST_OUT_2}" <<'PYEOF'
 import datetime as dt
 import json
 import sys
@@ -833,20 +805,17 @@ from pathlib import Path
 state_path = Path(sys.argv[1])
 work_tmp = Path(sys.argv[2])
 project_id = sys.argv[3]
-primary_region = sys.argv[4]
-secondary_region = sys.argv[5]
-skills_location = sys.argv[6]
-enable_secondary = sys.argv[7] == "true"
-repo = sys.argv[8]
-tag = sys.argv[9]
-name_prefix = sys.argv[10]
-deploy_mode = sys.argv[11]
-skills_source = sys.argv[12]
-allow_unauth = sys.argv[13] == "true"
-mw_sa = sys.argv[14]
-workloads_sa = sys.argv[15]
-ingest_files = [Path(sys.argv[16]), Path(sys.argv[17])]
-regions_list = sys.argv[18:]
+region = sys.argv[4]
+skills_location = sys.argv[5]
+repo = sys.argv[6]
+tag = sys.argv[7]
+name_prefix = sys.argv[8]
+deploy_mode = sys.argv[9]
+skills_source = sys.argv[10]
+allow_unauth = sys.argv[11] == "true"
+mw_sa = sys.argv[12]
+workloads_sa = sys.argv[13]
+ingest_files = [Path(sys.argv[14]), Path(sys.argv[15])]
 
 skill_ids: list[str] = []
 for f in ingest_files:
@@ -868,19 +837,17 @@ if not skill_ids:
     ]
 
 regions_map = {}
-for reg in regions_list:
-    frag = work_tmp / f"region_{reg}.json"
-    if frag.is_file():
-        regions_map[reg] = json.loads(frag.read_text(encoding="utf-8"))
+frag = work_tmp / f"region_{region}.json"
+if frag.is_file():
+    regions_map[region] = json.loads(frag.read_text(encoding="utf-8"))
 
 manifest = {
     "schema_version": "1.0.0",
     "deployed_at": dt.datetime.now(dt.timezone.utc).isoformat(),
     "project_id": project_id,
-    "primary_region": primary_region,
-    "secondary_region": secondary_region,
+    "region": region,
+    "primary_region": region,
     "skills_location": skills_location,
-    "enable_secondary": enable_secondary,
     "artifact_registry_repo": repo,
     "image_tag": tag,
     "name_prefix": name_prefix,
@@ -906,14 +873,6 @@ echo "Deployment Complete!"
 echo "========================================================================"
 echo "Next Steps:"
 echo "  1. Validate end-to-end live GCP deployment:"
-if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-  echo "     scripts/validate_live_gcp.sh --project ${PROJECT_ID} --primary-region ${PRIMARY_REGION} --secondary-region ${SECONDARY_REGION} --skills-location ${SKILLS_LOCATION} --enable-secondary --state-file ${STATE_FILE}"
-else
-  echo "     scripts/validate_live_gcp.sh --project ${PROJECT_ID} --primary-region ${PRIMARY_REGION} --skills-location ${SKILLS_LOCATION} --state-file ${STATE_FILE}"
-fi
+echo "     scripts/validate_live_gcp.sh --project ${PROJECT_ID} --region ${REGION} --skills-location ${SKILLS_LOCATION} --state-file ${STATE_FILE}"
 echo "  2. Clean up all workshop GCP resources when finished:"
-if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-  echo "     scripts/destroy_gcp.sh --project ${PROJECT_ID} --primary-region ${PRIMARY_REGION} --secondary-region ${SECONDARY_REGION} --skills-location ${SKILLS_LOCATION} --enable-secondary --state-file ${STATE_FILE}"
-else
-  echo "     scripts/destroy_gcp.sh --project ${PROJECT_ID} --primary-region ${PRIMARY_REGION} --skills-location ${SKILLS_LOCATION} --state-file ${STATE_FILE}"
-fi
+echo "     scripts/destroy_gcp.sh --project ${PROJECT_ID} --region ${REGION} --skills-location ${SKILLS_LOCATION} --state-file ${STATE_FILE}"

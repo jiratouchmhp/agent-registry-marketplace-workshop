@@ -1,5 +1,10 @@
 # Agent Identity AuthProvider & Agent Registry Binding (GA, hashicorp/google >= 7.39.0)
 #
+# Regional architecture:
+#   Aim for Bangkok (`asia-southeast3`) for all supported services; use Singapore
+#   (`asia-southeast1`) only for services not yet available in Bangkok (Agent
+#   Identity AuthProvider).
+#
 # Connects the FinOps A2A Agent (source URN) to the FinOps MCP Server (target URN)
 # with scoped, delegated OAuth 2.0 credentials via `google_agent_identity_auth_provider`.
 #
@@ -9,10 +14,12 @@
 #     actively filters out bindings whose AuthProvider the caller lacks
 #     `roles/agentidentity.user` on.
 
+# Service-specific regional fallback ONLY:
 # Agent Identity (`agentidentity.googleapis.com`) is provisioned in
-# `var.auth_provider_location` (default: `asia-southeast1`, Singapore) — the
-# verified GA region for Thailand/APAC coverage, because Bangkok
-# (`asia-southeast3`) is not yet supported for Agent Identity AuthProviders.
+# `var.auth_provider_location` (default: `asia-southeast1`, Singapore) ONLY
+# because Agent Identity is GA in Singapore and not yet available in Bangkok
+# (`asia-southeast3`). The Agent Registry Binding below stays in `var.location`
+# (Bangkok `asia-southeast3`).
 resource "google_agent_identity_auth_provider" "finops_oauth" {
   project          = var.project_id
   location         = var.auth_provider_location

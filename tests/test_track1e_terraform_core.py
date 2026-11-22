@@ -341,17 +341,12 @@ def test_variables_and_secure_defaults() -> None:
     required_vars = {
         "project_id",
         "location",
-        "secondary_location",
-        "enable_secondary_region",
         "agent_registry_location",
         "skills_location",
         "force_destroy_staging_bucket",
         "middleware_image",
         "sample_mcp_image",
         "sample_a2a_image",
-        "secondary_middleware_image",
-        "secondary_sample_mcp_image",
-        "secondary_sample_a2a_image",
         "enable_skills_bootstrap",
         "starter_plugin_dir",
         "allow_unauthenticated_workshop_demo",
@@ -359,17 +354,21 @@ def test_variables_and_secure_defaults() -> None:
     missing = required_vars - set(var_blocks)
     assert not missing, f"Missing required variables in variables.tf: {sorted(missing)}"
 
+    forbidden_secondary_vars = {
+        "secondary_location",
+        "enable_secondary_region",
+        "secondary_middleware_image",
+        "secondary_sample_mcp_image",
+        "secondary_sample_a2a_image",
+    }
+    present_forbidden = forbidden_secondary_vars & set(var_blocks)
+    assert not present_forbidden, (
+        f"terraform/core/variables.tf must NOT declare duplicate secondary-region variables: "
+        f"{sorted(present_forbidden)}"
+    )
+
     assert re.search(r'default\s*=\s*"asia-southeast3"', var_blocks["location"]), (
         "location must default to Bangkok primary (asia-southeast3)"
-    )
-    assert re.search(r'default\s*=\s*"asia-southeast1"', var_blocks["secondary_location"]), (
-        "secondary_location must default to Singapore secondary (asia-southeast1)"
-    )
-    assert "validation" in var_blocks["secondary_location"], (
-        "secondary_location must include a non-empty validation block"
-    )
-    assert re.search(r"default\s*=\s*false\b", var_blocks["enable_secondary_region"]), (
-        "enable_secondary_region must default to false"
     )
     assert re.search(r'default\s*=\s*""', var_blocks["agent_registry_location"]), (
         "agent_registry_location must default to empty string (inherits var.location)"
@@ -384,14 +383,6 @@ def test_variables_and_secure_defaults() -> None:
     assert re.search(r"default\s*=\s*false\b", var_blocks["force_destroy_staging_bucket"]), (
         "force_destroy_staging_bucket must default to false (safe default)"
     )
-    for sec_img_var in (
-        "secondary_middleware_image",
-        "secondary_sample_mcp_image",
-        "secondary_sample_a2a_image",
-    ):
-        assert re.search(r'default\s*=\s*""', var_blocks[sec_img_var]), (
-            f"{sec_img_var} must default to empty string"
-        )
     assert re.search(r"default\s*=\s*true\b", var_blocks["enable_skills_bootstrap"])
     assert re.search(r"default\s*=\s*false\b", var_blocks["allow_unauthenticated_workshop_demo"]), (
         "allow_unauthenticated_workshop_demo must default to false (secure by default)"
@@ -538,17 +529,11 @@ def test_iam_least_privilege_and_p4sa_bucket_access() -> None:
             iam_hcl, "resource", "google_artifact_registry_repository"
         )
     }
-    assert {"workshop_images", "workshop_images_secondary"} == set(ar_repos)
+    assert {"workshop_images"} == set(ar_repos), (
+        f"iam.tf must define only the single primary Artifact Registry repo, got: {sorted(ar_repos)}"
+    )
     assert re.search(r'format\s*=\s*"DOCKER"', ar_repos["workshop_images"])
     assert re.search(r"location\s*=\s*var\.location\b", ar_repos["workshop_images"])
-    assert re.search(
-        r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0",
-        ar_repos["workshop_images_secondary"],
-    )
-    assert re.search(
-        r"location\s*=\s*var\.secondary_location\b", ar_repos["workshop_images_secondary"]
-    )
-    assert re.search(r'format\s*=\s*"DOCKER"', ar_repos["workshop_images_secondary"])
 
     ar_iam_members = {
         labels[1]: body
@@ -556,14 +541,12 @@ def test_iam_least_privilege_and_p4sa_bucket_access() -> None:
             iam_hcl, "resource", "google_artifact_registry_repository_iam_member"
         )
     }
-    assert "ci_publisher_ar_writer_secondary" in ar_iam_members
-    assert re.search(
-        r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0",
-        ar_iam_members["ci_publisher_ar_writer_secondary"],
+    assert {"ci_publisher_ar_writer"} == set(ar_iam_members), (
+        f"iam.tf must define only primary AR IAM binding, got: {sorted(ar_iam_members)}"
     )
     assert re.search(
         r'role\s*=\s*"roles/artifactregistry\.writer"',
-        ar_iam_members["ci_publisher_ar_writer_secondary"],
+        ar_iam_members["ci_publisher_ar_writer"],
     )
 
     buckets = _extract_hcl_blocks(iam_hcl, "resource", "google_storage_bucket")
@@ -585,15 +568,19 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
         "sample_mcp_server",
         "sample_a2a_agent",
         "polyglot_middleware",
-        "sample_mcp_server_secondary",
-        "sample_a2a_agent_secondary",
-        "polyglot_middleware_secondary",
-    } == set(services)
+    } == set(services), (
+        f"cloud_run.tf must define ONLY the single Bangkok primary Cloud Run stack, got: {sorted(services)}"
+    )
 
     assert re.search(
         r'agent_registry_location\s*=\s*var\.agent_registry_location\s*!=\s*""\s*\?\s*var\.agent_registry_location\s*:\s*var\.location',
         cloud_run_hcl,
     ), "cloud_run.tf must define local.agent_registry_location defaulting to var.location"
+
+    for svc_key, svc_body in services.items():
+        assert re.search(r"location\s*=\s*var\.location\b", svc_body), (
+            f"{svc_key} must deploy to primary var.location (Bangkok asia-southeast3)"
+        )
 
     assert re.search(r'name\s*=\s*"sample-mcp-server"', services["sample_mcp_server"])
     assert re.search(r'name\s*=\s*"sample-a2a-agent"', services["sample_a2a_agent"])
@@ -610,7 +597,6 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
     for env_name in [
         "GCP_PROJECT_ID",
         "GCP_LOCATION",
-        "GCP_SECONDARY_LOCATION",
         "AGENT_REGISTRY_LOCATION",
         "AGENT_REGISTRY_SKILLS_LOCATION",
         "AGENT_REGISTRY_BASE_URL",
@@ -621,60 +607,51 @@ def test_cloud_run_services_and_middleware_env_vars() -> None:
             f"polyglot_middleware missing env var {env_name}"
         )
 
-    assert re.search(r'GCP_SECONDARY_LOCATION[\s\S]*?var\.secondary_location', mw_body)
+    assert "GCP_SECONDARY_LOCATION" not in mw_body, (
+        "polyglot_middleware must NOT set GCP_SECONDARY_LOCATION (single-region Bangkok primary stack)"
+    )
+    assert re.search(r'GCP_LOCATION[\s\S]*?var\.location\b', mw_body)
     assert re.search(r'AGENT_REGISTRY_LOCATION[\s\S]*?local\.agent_registry_location', mw_body)
     assert re.search(r'AGENT_REGISTRY_SKILLS_LOCATION[\s\S]*?var\.skills_location', mw_body)
     assert '"https://agentregistry.googleapis.com/v1"' in mw_body
     assert re.search(r'REQUIRE_KMS_SIGNATURE[\s\S]*?"false"', mw_body)
 
-    # Secondary-region Cloud Run v2 services (Singapore active-standby, opt-in via enable_secondary_region)
-    for sec_svc in (
-        "sample_mcp_server_secondary",
-        "sample_a2a_agent_secondary",
-        "polyglot_middleware_secondary",
-    ):
-        sec_body = services[sec_svc]
-        assert re.search(
-            r"count\s*=\s*var\.enable_secondary_region\s*\?\s*1\s*:\s*0", sec_body
-        ), f"{sec_svc} must be gated by count = var.enable_secondary_region ? 1 : 0"
-        assert re.search(r"location\s*=\s*var\.secondary_location\b", sec_body), (
-            f"{sec_svc} must deploy to var.secondary_location"
-        )
-
-    assert "google_service_account.middleware_sa.email" in services["polyglot_middleware_secondary"]
-    assert re.search(
-        r'AGENT_REGISTRY_LOCATION[\s\S]*?local\.agent_registry_location',
-        services["polyglot_middleware_secondary"],
-    )
-    assert re.search(
-        r'AGENT_REGISTRY_SKILLS_LOCATION[\s\S]*?var\.skills_location',
-        services["polyglot_middleware_secondary"],
-    )
-    assert re.search(r'name\s*=\s*"A2A_PUBLIC_URL"', services["sample_a2a_agent_secondary"])
-    assert (
-        "https://sample-a2a-agent-${data.google_project.current.number}.${var.secondary_location}.run.app"
-        in cloud_run_hcl
-    )
-
     run_iam_blocks = _extract_hcl_blocks(
         cloud_run_hcl, "resource", "google_cloud_run_v2_service_iam_member"
     )
     run_iam_by_name = {labels[1]: body for labels, body in run_iam_blocks}
-    assert len(run_iam_blocks) == 6
-    for sec_iam in (
-        "middleware_secondary_unauthenticated_demo",
-        "sample_mcp_secondary_unauthenticated_demo",
-        "sample_a2a_secondary_unauthenticated_demo",
-    ):
-        assert sec_iam in run_iam_by_name
-        assert re.search(
-            r"count\s*=\s*var\.enable_secondary_region\s*&&\s*var\.allow_unauthenticated_workshop_demo\s*\?\s*1\s*:\s*0",
-            run_iam_by_name[sec_iam],
-        ), f"{sec_iam} must require both enable_secondary_region and allow_unauthenticated_workshop_demo"
+    assert {
+        "middleware_unauthenticated_demo",
+        "sample_mcp_unauthenticated_demo",
+        "sample_a2a_unauthenticated_demo",
+    } == set(run_iam_by_name), (
+        f"cloud_run.tf must define ONLY the 3 primary unauthenticated demo IAM bindings, got: {sorted(run_iam_by_name)}"
+    )
     for labels, body in run_iam_blocks:
         if "allUsers" in body:
             assert "var.allow_unauthenticated_workshop_demo" in body, (
                 f"{labels[1]} grants allUsers without allow_unauthenticated_workshop_demo guard"
+            )
+
+
+def test_single_region_bangkok_primary_zero_secondary_resources() -> None:
+    """Verify terraform/core/ defines zero duplicate *_secondary resources or active-standby toggles."""
+    for name, content in _all_tf_texts().items():
+        for kind in ("resource", "variable", "output"):
+            for labels, _body in _extract_hcl_blocks(content, kind):
+                label_str = ".".join(labels)
+                assert "_secondary" not in label_str and "secondary" not in label_str.lower(), (
+                    f"terraform/core/{name} must not define secondary {kind}: {label_str}"
+                )
+        for forbidden_token in (
+            "enable_secondary_region",
+            "secondary_location",
+            "GCP_SECONDARY_LOCATION",
+            "asia-southeast1",
+        ):
+            assert forbidden_token not in content, (
+                f"terraform/core/{name} must not reference {forbidden_token} "
+                "(Workstream A Core is single-region Bangkok asia-southeast3 primary + global Skills)"
             )
 
 
@@ -1118,19 +1095,17 @@ def test_tfvars_example_documents_both_skill_source_options() -> None:
     tfvars_text = (TF_CORE_DIR / "terraform.tfvars.example").read_text(encoding="utf-8")
     uncommented = _strip_hcl_comments(tfvars_text)
 
-    # Bangkok primary + Singapore secondary multi-region defaults + two-stage Cloud Build guide.
+    # Single-region Bangkok primary + global Skills + two-stage Cloud Build guide.
     assert re.search(r'(?m)^\s*location\s*=\s*"asia-southeast3"', uncommented), (
         'terraform.tfvars.example must default location to "asia-southeast3" (Bangkok)'
-    )
-    assert re.search(r'(?m)^\s*secondary_location\s*=\s*"asia-southeast1"', uncommented), (
-        'terraform.tfvars.example must default secondary_location to "asia-southeast1" (Singapore)'
     )
     assert re.search(r'(?m)^\s*skills_location\s*=\s*"global"', uncommented), (
         'terraform.tfvars.example must default skills_location to "global"'
     )
-    assert re.search(r"(?m)^\s*enable_secondary_region\s*=\s*false\b", uncommented), (
-        "terraform.tfvars.example must set enable_secondary_region = false by default"
-    )
+    for forbidden_token in ("enable_secondary_region", "secondary_location", "asia-southeast1"):
+        assert forbidden_token not in tfvars_text, (
+            f"terraform/core/terraform.tfvars.example must not reference {forbidden_token}"
+        )
     assert re.search(r"(?m)^\s*force_destroy_staging_bucket\s*=\s*false\b", uncommented)
     assert "scripts/build_images_cloudbuild.sh" in tfvars_text, (
         "terraform.tfvars.example must document two-stage Cloud Build image script"
@@ -1174,14 +1149,10 @@ def test_required_outputs_exported() -> None:
         "project_id",
         "project_number",
         "location",
-        "secondary_location",
         "agent_registry_location",
         "skills_location",
         "middleware_url",
         "middleware_mcp_url",
-        "secondary_middleware_url",
-        "secondary_middleware_mcp_url",
-        "secondary_artifact_registry_repository_url",
         "middleware_sa_email",
         "mcp_server_resource_id",
         "mcp_server_urn",
@@ -1199,13 +1170,20 @@ def test_required_outputs_exported() -> None:
     missing = required_outputs - exported
     assert not missing, f"Missing required outputs in outputs.tf: {sorted(missing)}"
 
-    assert (
-        'try(google_cloud_run_v2_service.polyglot_middleware_secondary[0].uri, "")'
-        in output_blocks["secondary_middleware_url"]
+    forbidden_outputs = {
+        "secondary_location",
+        "secondary_middleware_url",
+        "secondary_middleware_mcp_url",
+        "secondary_artifact_registry_repository_url",
+    }
+    present_forbidden = forbidden_outputs & exported
+    assert not present_forbidden, (
+        f"outputs.tf must NOT export secondary-region outputs: {sorted(present_forbidden)}"
     )
-    assert "try(" in output_blocks["secondary_middleware_mcp_url"]
-    assert "try(" in output_blocks["secondary_artifact_registry_repository_url"]
+    assert not any("secondary" in name.lower() for name in exported)
+    assert "var.location" in output_blocks["location"]
     assert "local.agent_registry_location" in output_blocks["agent_registry_location"]
+    assert "var.skills_location" in output_blocks["skills_location"]
 
 
 def test_zero_references_to_security_governance() -> None:

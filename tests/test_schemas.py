@@ -234,7 +234,7 @@ def test_workshop_spec_contract() -> None:
         "project_id": "acme-agent-governance",
         "project_number": "123456789012",
         "location": "asia-southeast3",
-        "secondary_location": "asia-southeast1",
+        "fallback_region": "asia-southeast1",
         "skills_location": "global",
         "auth_provider_location": "asia-southeast1",
         "cmek_location": "us",
@@ -279,19 +279,16 @@ def test_workshop_spec_contract() -> None:
         "AGENT_REGISTRY_BASE_URL",
         "GCP_PROJECT_ID",
         "GCP_LOCATION",
-        "GCP_SECONDARY_LOCATION",
         "AGENT_REGISTRY_SKILLS_LOCATION",
         "MIDDLEWARE_PUBLIC_URL",
         "REQUIRE_KMS_SIGNATURE",
         "KMS_PUBLIC_KEY_PEM_PATH",
         "HUB_MIDDLEWARE_URL",
-        "HUB_FALLBACK_MIDDLEWARE_URL",
         "HUB_AUTH_TOKEN",
     }
     assert spec["env_vars"]["GCP_LOCATION"] == "asia-southeast3"
-    assert spec["env_vars"]["GCP_SECONDARY_LOCATION"] == "asia-southeast1"
     assert spec["env_vars"]["AGENT_REGISTRY_SKILLS_LOCATION"] == "global"
-    assert spec["env_vars"]["HUB_FALLBACK_MIDDLEWARE_URL"] == ""
+    assert spec["env_vars"]["HUB_MIDDLEWARE_URL"] == "http://127.0.0.1:8080"
     assert ":locations:asia-southeast3:" in spec["urns"]["mcp_server"]
     assert "/locations/asia-southeast3/" in spec["resource_names"]["mcp_service"]
 

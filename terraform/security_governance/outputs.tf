@@ -29,7 +29,7 @@ output "auth_provider_name" {
 }
 
 output "auth_provider_location" {
-  description = "Google Cloud region hosting the Agent Identity AuthProvider (defaults to asia-southeast1, Singapore, for APAC GA coverage)."
+  description = "Google Cloud region hosting the Agent Identity AuthProvider (defaults to asia-southeast1, Singapore, as a service-specific fallback ONLY because Agent Identity is GA in Singapore and not yet available in Bangkok)."
   value       = var.auth_provider_location
 }
 

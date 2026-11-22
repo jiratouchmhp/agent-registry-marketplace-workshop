@@ -356,7 +356,6 @@ def create_app(
             "projectId": cfg.gcp_project_id,
             "location": cfg.gcp_location,
             "region": cfg.gcp_location,
-            "secondaryRegion": cfg.gcp_secondary_location,
             "agentRegistryLocation": cfg.effective_registry_location,
             "skillsLocation": cfg.effective_skills_location,
             "requireKmsSignature": cfg.require_kms_signature,

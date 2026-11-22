@@ -1483,58 +1483,64 @@ def test_starter_exercises_compile_and_have_todo_markers() -> None:
         assert "[TODO]" in proc.stdout
 
 
-def test_hub_sync_bangkok_to_singapore_failover_and_cli_env(tmp_path: Path) -> None:
-    """Verify automatic Bangkok -> Singapore failover on CatalogFetchError / HTTP error."""
+def test_hub_sync_single_bangkok_endpoint_and_cli_options(tmp_path: Path) -> None:
+    """Verify hub_sync targets the single Bangkok Middleware endpoint without 2-region failover flags."""
     zip_bytes, zip_sha = _build_polyglot_plugin_zip()
-    bangkok_url = "https://bkk-mw.example.com"
-    singapore_url = "https://sg-mw.example.com"
+    bangkok_url = "https://polyglot-middleware-abc123.asia-southeast3.run.app"
     seen_hosts: list[str] = []
 
-    def _failover_handler(request: httpx.Request) -> httpx.Response:
+    def _bangkok_handler(request: httpx.Request) -> httpx.Response:
         seen_hosts.append(request.url.host)
-        if request.url.host == "bkk-mw.example.com":
-            return httpx.Response(503, text="Bangkok region temporarily unavailable")
-        if request.url.host == "sg-mw.example.com":
-            if request.url.path == "/v1/catalog":
-                return httpx.Response(
-                    200,
-                    json={
-                        "marketplace": {"name": "acme-enterprise-marketplace"},
-                        "plugins": [
-                            {
-                                "name": "gcp-finops-toolkit",
-                                "displayName": "GCP FinOps Toolkit",
-                                "version": "1.0.0",
-                                "sha256": zip_sha,
-                                "bundleUrl": f"{singapore_url}/v1/plugins/gcp-finops-toolkit.zip",
-                            }
-                        ],
-                    },
-                )
-            if request.url.path == "/v1/plugins/gcp-finops-toolkit.zip":
-                return httpx.Response(200, content=zip_bytes)
+        if request.url.path == "/v1/catalog":
+            return httpx.Response(
+                200,
+                json={
+                    "marketplace": {"name": "acme-enterprise-marketplace"},
+                    "plugins": [
+                        {
+                            "name": "gcp-finops-toolkit",
+                            "displayName": "GCP FinOps Toolkit",
+                            "version": "1.0.0",
+                            "sha256": zip_sha,
+                            "bundleUrl": f"{bangkok_url}/v1/plugins/gcp-finops-toolkit.zip",
+                        }
+                    ],
+                },
+            )
+        if request.url.path == "/v1/plugins/gcp-finops-toolkit.zip":
+            return httpx.Response(200, content=zip_bytes)
         return httpx.Response(404)
 
     home_dir = tmp_path / "home"
     result = sync_hub(
-        middleware_url=bangkok_url,
-        fallback_middleware_url=singapore_url,
+        middleware_url=f"{bangkok_url}/",
         home_dir=home_dir,
         tools=["claude", "antigravity"],
         no_exec=True,
-        http_transport=httpx.MockTransport(_failover_handler),
+        http_transport=httpx.MockTransport(_bangkok_handler),
     )
 
-    assert result.failover_used is True
-    assert result.middleware_url == singapore_url
-    assert result.manifest.middleware_url == singapore_url
-    assert "bkk-mw.example.com" in seen_hosts
-    assert "sg-mw.example.com" in seen_hosts
+    assert not hasattr(result, "failover_used")
+    assert result.middleware_url == bangkok_url
+    assert result.manifest.middleware_url == bangkok_url
+    assert set(seen_hosts) == {"polyglot-middleware-abc123.asia-southeast3.run.app"}
     assert [p.name for p in result.plugins] == ["gcp-finops-toolkit"]
     assert (home_dir / ".acme-agent-hub" / "plugins" / "gcp-finops-toolkit" / "plugin.json").is_file()
 
-    # Verify IntegrityError (tampered ZIP) on primary is NOT swallowed by failover
-    def _tampered_primary_handler(request: httpx.Request) -> httpx.Response:
+    # HTTP 503 from the Bangkok endpoint surfaces CatalogFetchError cleanly
+    with pytest.raises(CatalogFetchError):
+        sync_hub(
+            middleware_url=bangkok_url,
+            home_dir=tmp_path / "home-503",
+            tools=["claude"],
+            no_exec=True,
+            http_transport=httpx.MockTransport(
+                lambda _req: httpx.Response(503, text="Bangkok middleware temporarily unavailable")
+            ),
+        )
+
+    # Verify IntegrityError (tampered ZIP) aborts cleanly without extracting
+    def _tampered_handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/v1/catalog":
             return httpx.Response(
                 200,
@@ -1555,15 +1561,16 @@ def test_hub_sync_bangkok_to_singapore_failover_and_cli_env(tmp_path: Path) -> N
     with pytest.raises(IntegrityError):
         sync_hub(
             middleware_url=bangkok_url,
-            fallback_middleware_url=singapore_url,
             home_dir=tmp_path / "home-tampered",
             tools=["claude"],
             no_exec=True,
-            http_transport=httpx.MockTransport(_tampered_primary_handler),
+            http_transport=httpx.MockTransport(_tampered_handler),
         )
 
-    # Verify CLI exposes --fallback-middleware-url option with HUB_FALLBACK_MIDDLEWARE_URL envvar
+    # Verify CLI exposes --middleware-url / HUB_MIDDLEWARE_URL and does NOT expose 2-region failover flags
     help_res = CliRunner().invoke(cli, ["sync", "--help"])
     assert help_res.exit_code == 0
-    assert "--fallback-middleware-url" in help_res.output
-    assert "HUB_FALLBACK_MIDDLEWARE_URL" in help_res.output
+    assert "--middleware-url" in help_res.output
+    assert "HUB_MIDDLEWARE_URL" in help_res.output
+    assert "--fallback-middleware-url" not in help_res.output
+    assert "HUB_FALLBACK_MIDDLEWARE_URL" not in help_res.output

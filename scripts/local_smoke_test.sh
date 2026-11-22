@@ -8,8 +8,7 @@
 #   3. Middleware endpoints (/healthz, /v1/catalog, 4x /v1/marketplace/*.json,
 #      plugin ZIPs + X-Bundle-Sha256, POST /mcp initialize/tools/list/
 #      load_verified_skill/call_remote_a2a_agent)
-#   4. tools.hub_sync sync (full, --bootstrap-mcp-only, safe merge preservation,
-#      and --fallback-middleware-url failover)
+#   4. tools.hub_sync sync (full, --bootstrap-mcp-only, and safe merge preservation)
 #   5. platform_agent.adk_orchestrator (--mode rest discovery + ?alt=media,
 #      --mode adk --print-config)
 #   6. Workstream B offline checks (KMS keygen/sign/verify/tamper-reject,
@@ -28,7 +27,6 @@ A2A_PORT_OVERRIDE="${A2A_PORT:-}"
 MIDDLEWARE_PORT_OVERRIDE="${MIDDLEWARE_PORT:-}"
 PROJECT_ID="${GCP_PROJECT_ID:-acme-agent-governance}"
 LOCATION="${GCP_LOCATION:-asia-southeast3}"
-SECONDARY_LOCATION="${GCP_SECONDARY_LOCATION:-asia-southeast1}"
 HEALTH_TIMEOUT="${HEALTH_TIMEOUT:-20}"
 
 usage() {
@@ -170,7 +168,6 @@ PIDS+=("${PID_A2A}")
 AGENT_REGISTRY_BASE_URL="${REGISTRY_URL}" \
 GCP_PROJECT_ID="${PROJECT_ID}" \
 GCP_LOCATION="${LOCATION}" \
-GCP_SECONDARY_LOCATION="${SECONDARY_LOCATION}" \
 MIDDLEWARE_PUBLIC_URL="${MIDDLEWARE_URL}" \
 REQUIRE_KMS_SIGNATURE="false" \
 "${PYTHON_BIN}" -m uvicorn middleware.app.main:app \
@@ -424,15 +421,14 @@ PYEOF
 record_pass "Middleware /healthz (${LOCATION}), /v1/catalog, 4x manifests, ZIP SHA-256, and /mcp gateway"
 
 # ----------------------------------------------------------------------------
-# Step 4: tools.hub_sync (full, bootstrap-mcp-only, safe-merge, failover)
+# Step 4: tools.hub_sync (full, bootstrap-mcp-only, safe-merge)
 # ----------------------------------------------------------------------------
 echo ""
-echo "[4/6] IDE Hydration CLI (full sync, bootstrap-mcp-only, safe merge, failover)"
+echo "[4/6] IDE Hydration CLI (full sync, bootstrap-mcp-only, safe merge)"
 
 DEMO_HOME="${TMP_DIR}/demo-home"
 DEMO_HOME_MCP="${TMP_DIR}/demo-home-mcp-only"
-DEMO_HOME_FAILOVER="${TMP_DIR}/demo-home-failover"
-mkdir -p "${DEMO_HOME}" "${DEMO_HOME_MCP}" "${DEMO_HOME_FAILOVER}"
+mkdir -p "${DEMO_HOME}" "${DEMO_HOME_MCP}"
 
 # 4a. Full sync
 "${PYTHON_BIN}" -m tools.hub_sync sync \
@@ -499,27 +495,7 @@ plugins_dir = demo_mcp / ".acme-agent-hub" / "plugins"
 assert not plugins_dir.exists() or not any(plugins_dir.iterdir()), "bootstrap-mcp-only downloaded plugins!"
 PYEOF
 
-# 4d. --fallback-middleware-url failover test (dead primary -> live local fallback)
-echo "  [INFO] Simulating intentional Bangkok primary outage (http://127.0.0.1:19999) to verify regional failover..."
-"${PYTHON_BIN}" -m tools.hub_sync sync \
-  --middleware-url "http://127.0.0.1:19999" \
-  --fallback-middleware-url "${MIDDLEWARE_URL}" \
-  --home "${DEMO_HOME_FAILOVER}" \
-  --tools all \
-  --no-exec \
-  >"${TMP_DIR}/hub_sync_failover.out"
-
-"${PYTHON_BIN}" - "${DEMO_HOME_FAILOVER}" <<'PYEOF'
-import json, sys
-from pathlib import Path
-
-manifest_path = Path(sys.argv[1]) / ".acme-agent-hub" / ".sync-manifest.json"
-assert manifest_path.is_file(), "Failover sync did not write .sync-manifest.json"
-manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-assert "gcp-finops-toolkit" in manifest.get("owned_plugins", {}), "Failover sync missed gcp-finops-toolkit"
-PYEOF
-
-record_pass "tools.hub_sync full sync, --bootstrap-mcp-only, safe-merge preservation, and --fallback-middleware-url failover"
+record_pass "tools.hub_sync full sync, --bootstrap-mcp-only, and safe-merge preservation"
 
 # ----------------------------------------------------------------------------
 # Step 5: Platform Agent Orchestrator (--mode rest + ?alt=media & --mode adk)

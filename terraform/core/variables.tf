@@ -9,7 +9,7 @@ variable "project_id" {
 }
 
 variable "location" {
-  description = "Primary Google Cloud region for Agent Registry services, Cloud Run workloads, Artifact Registry, and skill staging storage (default: asia-southeast3, Bangkok)."
+  description = "Primary Google Cloud region for all supported services: Agent Registry Services, Cloud Run workloads, Cloud Build, Artifact Registry, and skill staging storage (default: asia-southeast3, Bangkok)."
   type        = string
   default     = "asia-southeast3"
 
@@ -19,23 +19,6 @@ variable "location" {
   }
 }
 
-variable "secondary_location" {
-  description = "Secondary Google Cloud region for optional active-standby Cloud Run and Artifact Registry deployment (default: asia-southeast1, Singapore)."
-  type        = string
-  default     = "asia-southeast1"
-
-  validation {
-    condition     = length(trimspace(var.secondary_location)) > 0
-    error_message = "secondary_location must be a non-empty Google Cloud region (for example, asia-southeast1)."
-  }
-}
-
-variable "enable_secondary_region" {
-  description = "When true, deploys active-standby Cloud Run workloads and an Artifact Registry repository in secondary_location (asia-southeast1, Singapore)."
-  type        = bool
-  default     = false
-}
-
 variable "agent_registry_location" {
   description = "Optional Google Cloud location for regional Agent Registry Services (MCP Servers, A2A Agents, Endpoints). Leave empty to default to var.location (asia-southeast3), or override to decouple the Agent Registry Services region from Cloud Run compute."
   type        = string
@@ -43,7 +26,7 @@ variable "agent_registry_location" {
 }
 
 variable "skills_location" {
-  description = "Google Cloud multi-region location for standalone Agent Registry v1 Skill resources (\"global\", \"us\", or \"eu\"). Agent Registry v1 standalone Skill resources are hosted only in global, us, or eu while Services (MCP Servers, A2A Agents, Endpoints) and Cloud Run workloads run regionally in Bangkok (asia-southeast3) and Singapore (asia-southeast1)."
+  description = "Google Cloud multi-region location for standalone Agent Registry v1 Skill resources (\"global\", \"us\", or \"eu\"). Agent Registry v1 standalone Skill resources are API-mandated to global, us, or eu (single-region /skills endpoints are unsupported and time out), while Services (MCP Servers, A2A Agents, Endpoints) and Cloud Run workloads run regionally in Bangkok (asia-southeast3)."
   type        = string
   default     = "global"
 
@@ -73,24 +56,6 @@ variable "sample_mcp_image" {
 
 variable "sample_a2a_image" {
   description = "Container image URI for the sample-a2a-agent Cloud Run service. Leave empty to default to the Artifact Registry repository created by this module."
-  type        = string
-  default     = ""
-}
-
-variable "secondary_middleware_image" {
-  description = "Optional container image URI for the secondary-region polyglot-middleware Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
-  type        = string
-  default     = ""
-}
-
-variable "secondary_sample_mcp_image" {
-  description = "Optional container image URI for the secondary-region sample-mcp-server Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
-  type        = string
-  default     = ""
-}
-
-variable "secondary_sample_a2a_image" {
-  description = "Optional container image URI for the secondary-region sample-a2a-agent Cloud Run service when enable_secondary_region is true. Leave empty to default to the secondary Artifact Registry repository in secondary_location."
   type        = string
   default     = ""
 }

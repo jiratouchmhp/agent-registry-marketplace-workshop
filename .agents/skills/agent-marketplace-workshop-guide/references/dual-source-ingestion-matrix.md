@@ -67,7 +67,7 @@ Both Option 1 (`--source-type local`) and Option 2 (`--source-type git`) share `
 | `--per-skill-plugin` | Both | Emit 1 separate IDE plugin per standalone skill instead of grouping under `--plugin-name`. |
 | `--git-token-env <VAR_NAME>` | Option 2 | Env var NAME holding private Git token (never pass the secret value directly). |
 | `--only-skills` | Both | Ingest `Skill` resources only; skip MCP/A2A `Service` registration (**mandatory when `terraform/core` owns Services**). |
-| `--registry-url`, `--project`, `--location`, `--skills-location`, `--auth-token` | Both | Env fallbacks: `AGENT_REGISTRY_BASE_URL`, `GCP_PROJECT_ID`, `GCP_LOCATION` (Services: `asia-southeast3`/`asia-southeast1`), `AGENT_REGISTRY_SKILLS_LOCATION` (live Skills: `global` default, or `us`/`eu` for CMEK), `AGENT_REGISTRY_AUTH_TOKEN`. |
+| `--registry-url`, `--project`, `--location`, `--skills-location`, `--auth-token` | Both | Env fallbacks: `AGENT_REGISTRY_BASE_URL`, `GCP_PROJECT_ID`, `GCP_LOCATION` (Services: Bangkok `asia-southeast3`), `AGENT_REGISTRY_SKILLS_LOCATION` (live Skills: `global` default, or `us`/`eu` for CMEK), `AGENT_REGISTRY_AUTH_TOKEN`. |
 | `--target-state`, `--scanning-policy`, `--wait-for-scan` | Both | Defaults: `TARGET_STATE_ACTIVE`, `ENABLED_BLOCKING`; pass `--wait-for-scan` on live GCP so initial `STATE_DRAFT` → `STATE_ACTIVE` AND idempotent re-deploy `SkillRevision` scans (`wait_for_revision_scan_completion()`) finish before promoting `defaultRevision` (`x-goog-user-project` is auto-attached for `googleapis.com`). |
 | `--source-repo`, `--git-commit` | Both | Optional explicit provenance overrides injected into `SKILL.md` `frontmatter.metadata`. |
 | `--sign-pem`, `--kms-key-version` | Both | Local ECDSA P-256 PEM or Cloud KMS `projects/.../cryptoKeyVersions/1` signing. |
@@ -82,7 +82,6 @@ Both Option 1 (`--source-type local`) and Option 2 (`--source-type git`) share `
 ### Option 1 (`terraform/core/terraform.tfvars` — Default)
 ```hcl
 location                       = "asia-southeast3"
-secondary_location             = "asia-southeast1"
 skills_location                = "global" # APAC default (or "us"/"eu" for CMEK)
 enable_skills_bootstrap        = true
 skills_source_mode             = "local"

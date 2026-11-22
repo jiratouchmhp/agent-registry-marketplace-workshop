@@ -269,6 +269,12 @@ if [[ -n "${GCLOUD_BIN}" && "${GCLOUD_ON_PATH}" == "false" ]]; then
   echo ""
 fi
 
+echo "Regional Architecture (Single Primary + Service-Specific Fallbacks):"
+echo "  - Primary (Bangkok, asia-southeast3) : Cloud Run, Cloud Build, Artifact Registry, Agent Registry Services, GCS staging, KMS, Audit Logging"
+echo "  - API-Mandated Global                : Agent Registry standalone Skills (global)"
+echo "  - Service-Specific Fallback          : Workstream B Agent Identity AuthProvider in Singapore (asia-southeast1; unavailable in Bangkok)"
+echo ""
+
 echo "Recommended Workshop Tracks (Zero Local Docker Required):"
 if [[ "${VENV_OK}" == "true" ]]; then
   echo "  Track 1 — Offline Local Mode (READY):"
@@ -282,29 +288,30 @@ echo ""
 
 if [[ -n "${GCLOUD_BIN}" && "${GCLOUD_AUTH_OK}" == "true" && "${VENV_OK}" == "true" ]]; then
   PROJ_HINT="${GCLOUD_PROJECT:-<your-sandbox-project-id>}"
-  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (READY):"
+  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (READY — Bangkok asia-southeast3 + global Skills):"
   echo "     [SAFETY] Confirm GCP_PROJECT_ID (${PROJ_HINT}) is a disposable workshop sandbox before deploying!"
-  echo "     make gcp-deploy GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 [ENABLE_SECONDARY=true]"
-  echo "     make gcp-validate GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 [ENABLE_SECONDARY=true]"
-  echo "     make gcp-destroy GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 [ENABLE_SECONDARY=true]"
+  echo "     make gcp-deploy GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 AGENT_REGISTRY_SKILLS_LOCATION=global"
+  echo "     make gcp-validate GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 AGENT_REGISTRY_SKILLS_LOCATION=global"
+  echo "     make gcp-destroy GCP_PROJECT_ID=${PROJ_HINT} GCP_LOCATION=asia-southeast3 AGENT_REGISTRY_SKILLS_LOCATION=global"
 elif [[ -n "${GCLOUD_BIN}" && "${GCLOUD_AUTH_OK}" == "true" ]]; then
-  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (NEEDS .venv):"
-  echo "     Create .venv first, confirm your sandbox project, then run: make gcp-deploy GCP_PROJECT_ID=<your-sandbox-project-id>"
+  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (NEEDS .venv — Bangkok asia-southeast3 + global Skills):"
+  echo "     Create .venv first, confirm your sandbox project, then run: make gcp-deploy GCP_PROJECT_ID=<your-sandbox-project-id> GCP_LOCATION=asia-southeast3"
 else
-  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (NEEDS GCLOUD AUTH):"
+  echo "  Track 2 — Live GCP Zero-Docker / Zero-Terraform (NEEDS GCLOUD AUTH — Bangkok asia-southeast3 + global Skills):"
   echo "     Install gcloud CLI, run 'gcloud auth login --quiet' + 'gcloud auth application-default login --quiet',"
-  echo "     then run: make gcp-deploy GCP_PROJECT_ID=<your-sandbox-project-id>"
+  echo "     then run: make gcp-deploy GCP_PROJECT_ID=<your-sandbox-project-id> GCP_LOCATION=asia-southeast3"
 fi
 echo ""
 
 if [[ "${TERRAFORM_OK}" == "true" && -n "${GCLOUD_BIN}" && "${GCLOUD_AUTH_OK}" == "true" ]]; then
   echo "  Track 3 — Live GCP Full Terraform IaC (READY):"
   echo "     make validate-hcl"
-  echo "     make tf-core-plan"
-  echo "     make tf-sec-plan"
+  echo "     make tf-core-plan        # Bangkok (asia-southeast3) primary + global Skills"
+  echo "     make tf-sec-plan         # Bangkok (asia-southeast3) KMS/Logging; Singapore (asia-southeast1) fallback for Agent Identity AuthProvider only"
 else
   echo "  Track 3 — Live GCP Full Terraform IaC (OPTIONAL — use Track 2 'make gcp-deploy' if skipping Terraform):"
   echo "     Install Terraform >= 1.6.0 to run 'make validate-hcl', 'make tf-core-plan', and 'make tf-sec-plan'."
+  echo "     (Workstream B uses Singapore asia-southeast1 ONLY for Agent Identity AuthProvider because it is not yet available in Bangkok.)"
 fi
 echo ""
 echo "Summary flags: python=${PYTHON_OK} venv=${VENV_OK} ports_free=${PORTS_OK} gcloud_on_path=${GCLOUD_ON_PATH} gcloud_auth=${GCLOUD_AUTH_OK} gcloud_adc=${GCLOUD_ADC_OK} agent_registry_cli=${GCLOUD_AR_CLI_OK} docker=${DOCKER_OK} terraform=${TERRAFORM_OK} agy=${AGY_OK}"

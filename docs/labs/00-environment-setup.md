@@ -13,7 +13,7 @@
 By the end of this lab, you will:
 1. Verify your Python virtual environment (`.venv`), run `make preflight`, and pass the full local unit and schema test suites (plus optional Terraform HCL formatting for Track 3).
 2. Run a 1-command **Local Mock Mode** end-to-end smoke test (`make smoke-local`), and learn how to launch the offline stack either via `make run-local-stack` (single terminal) or across 4 dedicated terminals.
-3. *(Optional — Live GCP Mode)* Authenticate `gcloud`, verify the **Bangkok (`asia-southeast3`)** primary + **Singapore (`asia-southeast1`)** secondary + **`global` Skills** regional split environment settings, and complete pre-flight checks — leaving API enablement, container builds, and Cloud Run deployment for [Lab 03](03-build-deploy-middleware.md) so fresh projects never hit chicken-and-egg Terraform failures.
+3. *(Optional — Live GCP Mode)* Authenticate `gcloud`, verify the **Bangkok (`asia-southeast3`)** primary + service-specific **Singapore (`asia-southeast1`)** fallback (Workstream B Agent Identity `AuthProvider`) + **`global` Skills** regional placement settings, and complete pre-flight checks — leaving API enablement, container builds, and Cloud Run deployment for [Lab 03](03-build-deploy-middleware.md) so fresh projects never hit chicken-and-egg Terraform failures.
 
 ---
 
@@ -52,7 +52,10 @@ make test
 
 Every lab in Workstream A and Workstream B supports **two modes** (with **zero local Docker**):
 - **Local Mock Mode (Track 1 — Default):** Runs completely offline against `mock_registry` on `http://127.0.0.1:8090/v1`, faithfully simulating `private-` skill auto-prefixing, `ENABLED_BLOCKING` secret/injection scanning, `A2A_AGENT_CARD` validation, `bindings:fetchAvailable` IAM filtering, and `?alt=media` HTTP 302 signed-URL header enforcement.
-- **Live GCP Mode (Track 2 `gcloud` + Cloud Build, or Track 3 Terraform IaC):** Targets `https://agentregistry.googleapis.com/v1` using the **verified live APAC regional split**: Cloud Run, Cloud Build, Artifact Registry, and Agent Registry **`Services`** (`McpServer`, `Agent`, `Endpoint`) run regionally in **Bangkok (`asia-southeast3`)** primary and optional **Singapore (`asia-southeast1`)** secondary/DR, while standalone **`Skills`** live once in **`global`** (default `AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK) and are shared seamlessly by both regions.
+- **Live GCP Mode (Track 2 `gcloud` + Cloud Build, or Track 3 Terraform IaC):** Targets `https://agentregistry.googleapis.com/v1` using a **single Bangkok-first deployment with service-specific fallbacks**:
+  - **Bangkok (`asia-southeast3`) — Primary Region:** Cloud Run (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), Agent Registry **`Services`** (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`) & `Bindings`, GCS skill staging bucket, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), and Cloud Logging audit bucket.
+  - **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`AuthProvider`)** (`auth_provider_location = "asia-southeast1"`), because Agent Identity is GA in Singapore and not yet available in Bangkok.
+  - **Global / Multi-Region (API-Required):** Standalone **`Skills`** live in **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK — single-region `/skills` endpoints time out), auto-registered Google/GCP remote MCP servers live in **`global`**, optional native CMEK (`SkillEncryptionSpec`) uses `us`/`eu`, and optional Network Services Agent Gateway uses `us-central1`/`europe-west1` (`enable_agent_gateway = false` by default for APAC).
 
 ### Mode A: Local Mock Mode Smoke Test
 
@@ -95,13 +98,12 @@ Verify that three publishers are returned: `FIRST_PARTY` (`google-`), `THIRD_PAR
 
 ### Mode B: Live GCP Mode — Authentication & Pre-Flight ONLY
 
-> **Live GCP Journey Across Labs 00 → 03:** On a fresh GCP project, Cloud Run v2 requires container images to exist in Artifact Registry **before** `terraform -chdir=terraform/core apply` runs. Complete **authentication and pre-flight ONLY** here in Lab 00, author and test your plugins/skills locally in **[Lab 01](01-author-agent-plugin.md)** and **[Lab 02](02-register-agent-registry.md)**, and let **[Lab 03](03-build-deploy-middleware.md)** enable APIs, build images remotely via Cloud Build (zero local Docker!), deploy Cloud Run to Bangkok (`asia-southeast3`) + optional Singapore (`asia-southeast1`), register Services, and ingest Skills cleanly (via either **Track 2** `scripts/deploy_gcp.sh` or **Track 3** `scripts/build_images_cloudbuild.sh` + `terraform/core`).
+> **Live GCP Journey Across Labs 00 → 03:** On a fresh GCP project, Cloud Run v2 requires container images to exist in Artifact Registry **before** `terraform -chdir=terraform/core apply` runs. Complete **authentication and pre-flight ONLY** here in Lab 00, author and test your plugins/skills locally in **[Lab 01](01-author-agent-plugin.md)** and **[Lab 02](02-register-agent-registry.md)**, and let **[Lab 03](03-build-deploy-middleware.md)** enable APIs, build images remotely via Cloud Build (zero local Docker!), deploy Cloud Run to Bangkok (`asia-southeast3`), register Bangkok Services, and ingest `global` Skills cleanly (via either **Track 2** `scripts/deploy_gcp.sh` or **Track 3** `scripts/build_images_cloudbuild.sh` + `terraform/core`).
 
-1. Authenticate `gcloud` and set your **Bangkok (`asia-southeast3`)** primary, **Singapore (`asia-southeast1`)** secondary, and **`global` Skills** environment variables:
+1. Authenticate `gcloud` and set your **Bangkok (`asia-southeast3`)** primary and **`global` Skills** environment variables:
    ```bash
    export GCP_PROJECT_ID="<your-gcp-project-id>"
    export GCP_LOCATION="asia-southeast3"
-   export GCP_SECONDARY_LOCATION="asia-southeast1"
    export AGENT_REGISTRY_SKILLS_LOCATION="global"
    export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
 
@@ -119,7 +121,7 @@ Verify that three publishers are returned: `FIRST_PARTY` (`google-`), `THIRD_PAR
    make preflight
    ```
 
-3. *(Optional for Track 3 Terraform users)* Verify HCL formatting and copy [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars` now (fill in `project_id`, `location = "asia-southeast3"`, `secondary_location = "asia-southeast1"`, and `skills_location = "global"` — **do not run full `terraform apply` until Stage 1 Cloud Build completes in [Lab 03](03-build-deploy-middleware.md)**):
+3. *(Optional for Track 3 Terraform users)* Verify HCL formatting and copy [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars` now (fill in `project_id`, `location = "asia-southeast3"`, and `skills_location = "global"` — **do not run full `terraform apply` until Stage 1 Cloud Build completes in [Lab 03](03-build-deploy-middleware.md)**):
    ```bash
    make validate-hcl
    cp terraform/core/terraform.tfvars.example terraform/core/terraform.tfvars
@@ -135,7 +137,7 @@ Before moving to Lab 01, confirm all checks pass:
 - [ ] `make test` completes with zero failures.
 - [ ] *(Track 3 Terraform only)* `make validate-hcl` passes cleanly on both `terraform/core/` and `terraform/security_governance/`.
 - [ ] *(Track 1 Local Mode)* `make smoke-local` passes, or `curl -fsSL http://127.0.0.1:8090/healthz` returns `{"status": "ok", "service": "mock-agent-registry"}`.
-- [ ] *(Track 2 / Track 3 Live GCP Mode)* `gcloud projects describe "${GCP_PROJECT_ID}" --project="${GCP_PROJECT_ID}" --quiet` succeeds and `GCP_LOCATION=asia-southeast3`, `GCP_SECONDARY_LOCATION=asia-southeast1`, and `AGENT_REGISTRY_SKILLS_LOCATION=global` are exported.
+- [ ] *(Track 2 / Track 3 Live GCP Mode)* `gcloud projects describe "${GCP_PROJECT_ID}" --project="${GCP_PROJECT_ID}" --quiet` succeeds and `GCP_LOCATION=asia-southeast3` and `AGENT_REGISTRY_SKILLS_LOCATION=global` are exported.
 
 ---
 

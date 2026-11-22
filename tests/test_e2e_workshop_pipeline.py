@@ -453,12 +453,26 @@ def test_e2e_complete_workshop_pipeline(
         # =====================================================================
         # STAGE 1: Verify all 4 live HTTP servers (mock_registry, MCP, A2A, middleware)
         # =====================================================================
+        assert LOCATION == "asia-southeast3"
+        assert WORKSHOP_SPEC["project_defaults"]["fallback_region"] == "asia-southeast1"
+        assert WORKSHOP_SPEC["project_defaults"]["skills_location"] == "global"
+        assert WORKSHOP_SPEC["project_defaults"]["auth_provider_location"] == "asia-southeast1"
+        assert "secondary_location" not in WORKSHOP_SPEC["project_defaults"]
+        assert "GCP_SECONDARY_LOCATION" not in WORKSHOP_SPEC["env_vars"]
+        assert "HUB_FALLBACK_MIDDLEWARE_URL" not in WORKSHOP_SPEC["env_vars"]
+
         assert client.get(f"{stack.mock_registry_url}/healthz").json()["status"] == "ok"
         assert client.get(f"{stack.mcp_server_url}/healthz").json()["status"] == "ok"
         assert client.get(f"{stack.a2a_agent_url}/healthz").json()["status"] == "ok"
-        mw_health = client.get(f"{stack.middleware_url}/healthz").json()
-        assert mw_health["status"] == "ok"
-        assert mw_health["requireKmsSignature"] is True
+        for health_path in ("/healthz", "/health", "/v1/health"):
+            mw_health = client.get(f"{stack.middleware_url}{health_path}").json()
+            assert mw_health["status"] == "ok"
+            assert mw_health["location"] == "asia-southeast3"
+            assert mw_health["region"] == "asia-southeast3"
+            assert mw_health["agentRegistryLocation"] == "asia-southeast3"
+            assert mw_health["skillsLocation"] == "asia-southeast3"
+            assert "secondaryRegion" not in mw_health
+            assert mw_health["requireKmsSignature"] is True
 
         # Exercise live sample MCP server (initialize, tools/list, tools/call)
         mcp_endpoint = f"{stack.mcp_server_url}/mcp"

@@ -6,9 +6,9 @@ Build a **governed, multi-IDE Enterprise Agent Marketplace** backed by **Google 
 
 ## Executive & Architecture Documentation
 
-- **[Attendee Quickstart & Cheat Sheet](docs/attendee-quickstart.md)** — **Start here!** 1-page laptop decision tree (Track 1 Offline Local, Track 2 Zero-Docker/Zero-Terraform `gcloud` + Cloud Build, Track 3 Full Terraform IaC), verified **Bangkok (`asia-southeast3`) + Singapore (`asia-southeast1`) + `global` Skills** regional split matrix, port map, and 1-command `Makefile` reference.
+- **[Attendee Quickstart & Cheat Sheet](docs/attendee-quickstart.md)** — **Start here!** 1-page laptop decision tree (Track 1 Offline Local, Track 2 Zero-Docker/Zero-Terraform `gcloud` + Cloud Build, Track 3 Full Terraform IaC), verified **Bangkok (`asia-southeast3`) Primary + Service-Specific Singapore (`asia-southeast1`) Fallback + `global` Skills** regional placement matrix, port map, and 1-command `Makefile` reference.
 - **[Customer Use Case 3 Executive Brief](docs/customer-usecase-3-brief.md)** — Verified architectural Q&A answering all 4 enterprise design questions (`agent-plugins.org` vs `agentskills.io`, 4-IDE + ADK Developer/Platform UX, Governance/KMS/IAP/Audit, and GitLab vs. Agent Registry Dual-Role Source of Truth).
-- **[Technical Architecture Deep Dive](docs/architecture.md)** — End-to-end Mermaid diagrams covering ingest decomposition, `?alt=media` HTTP 302 signed-URL header stripping, Polyglot 5-IDE single-bundle synthesis, Bangkok/Singapore multi-region failover, safe ownership-tracked workstation hydration, and defense-in-depth security planes.
+- **[Technical Architecture Deep Dive](docs/architecture.md)** — End-to-end Mermaid diagrams covering ingest decomposition, `?alt=media` HTTP 302 signed-URL header stripping, Polyglot 5-IDE single-bundle synthesis, Bangkok-first regional placement with service-specific fallbacks, safe ownership-tracked workstation hydration, and defense-in-depth security planes.
 - **[Guided Starter Exercises](starter/README.md)** — Hands-on `# WORKSHOP-TODO` exercises for Labs 01–04 with 1-command `make starter-check` offline self-checks (100% zero-Docker).
 - **[Platform Agent Reference Guide](platform_agent/README.md)** — Direct Google ADK (`AgentRegistry` + `GCPSkillRegistry` + `SkillToolset`) and REST `v1` consumption patterns.
 
@@ -41,13 +41,13 @@ flowchart LR
     end
 
     subgraph Registry["2. Governed Runtime Catalog (Google Cloud Agent Registry v1)"]
-        SK["Standalone Skills in global (or us/eu CMEK)<br/>private-* auto-filtered | agentskills.io ZIP <= 1 MB<br/>ENABLED_BLOCKING Scan + Immutable Revisions"]
-        SV["Regional Services (asia-southeast3 / asia-southeast1)<br/>McpServer (TOOL_SPEC) | A2A v1.0 Agent (/a2a + /a2a/http)<br/>Endpoint (NO_SPEC) -> Projected Discovery"]
-        BD["Governance & Auth (Workstream B)<br/>AuthProvider (asia-southeast1) + Bindings<br/>KMS Signing (asia-southeast3) + CMEK (us/eu) + Org Policy + WORM Audit"]
+        SK["Standalone Skills in global (or us/eu CMEK)<br/>private-* auto-filtered | agentskills.io ZIP <= 1 MB<br/>Auto-registered Google MCP (global) | ENABLED_BLOCKING Scan"]
+        SV["Regional Services in Bangkok (asia-southeast3)<br/>McpServer (TOOL_SPEC) | A2A v1.0 Agent (/a2a + /a2a/http)<br/>Endpoint (NO_SPEC) -> Projected Discovery"]
+        BD["Governance & Auth (Workstream B)<br/>AuthProvider Fallback (asia-southeast1) + Bindings (asia-southeast3)<br/>KMS Signing (asia-southeast3) + CMEK (us/eu) + Org Policy + WORM Audit"]
     end
 
     subgraph Egress["3. Consumption Planes"]
-        MW["Polyglot Middleware (Cloud Run :8080)<br/>Bangkok (asia-southeast3) + Singapore (asia-southeast1)<br/>?alt=media 302 Redirect + SHA-256 + KMS Verify<br/>/health + /v1/marketplace/{tool}.json + /v1/plugins/*.zip + /mcp"]
+        MW["Polyglot Middleware (Cloud Run :8080 — asia-southeast3)<br/>?alt=media 302 Redirect + SHA-256 + KMS Verify<br/>/health + /v1/marketplace/{tool}.json + /v1/plugins/*.zip + /mcp"]
         HS["1-Command Installer<br/>python -m tools.hub_sync sync"]
         ADK["Platform Agents (ADK / Vertex AI)<br/>AgentRegistry + GCPSkillRegistry + SkillToolset"]
         GW["Agent Gateway + IAP v2 UAP (us-central1 / europe-west1)<br/>CEL: read_only_hint ALLOW / destructive_hint DENY"]
@@ -97,9 +97,9 @@ This workshop is explicitly structured into **two independent workstreams**. Tea
 | :---: | :--- | :---: | :--- |
 | **00** | [Environment Setup](docs/labs/00-environment-setup.md) | 20 min | `.venv` verification, `make preflight`, 1-command offline smoke test (`make smoke-local` / `make run-local-stack`), and Live GCP authentication & pre-flight (no container builds yet) |
 | **01** | [Author a Polyglot Agent Plugin](docs/labs/01-author-agent-plugin.md) | 35 min | Authoring `gcp-finops-toolkit` (`agent-plugins.org` 1.0 + Antigravity `build-plugins` multi-tool coexistence, `rules/`, `assets/logo.svg`, `agy plugin validate --json` CI filter, `starter/lab01_plugin_skeleton/`) plus standalone skills in `local-skills/` |
-| **02** | [Register Assets in Agent Registry](docs/labs/02-register-agent-registry.md) | 35 min | Dual-source ingestion via `python -m tools.plugin_sync ingest` (**Option 1:** local `local-skills/` + `starter-marketplace/` via `make demo-sync-local`; **Option 2:** shallow-cloning a centralized GitLab/GitHub repo via `make demo-sync-repo`) targeting live `global` Skills (`--skills-location global`, `--wait-for-scan`) + regional `asia-southeast3`/`asia-southeast1` Services (`v1` REST, `gcloud`, and Terraform `skills_source_mode`) |
-| **03** | [Build & Deploy Polyglot Middleware](docs/labs/03-build-deploy-middleware.md) | 40 min | Cloud Run Polyglot Middleware (`/health`, `?alt=media` 302 redirect auth/header handling, bounded concurrent skill verification, single-bundle ZIP synthesis, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, Streamable HTTP `/mcp`) + Zero-Docker Cloud Build (`cloudbuild/*.yaml`) deploy to **Bangkok (`asia-southeast3`)** primary & optional **Singapore (`asia-southeast1`)** secondary sharing **`global`** Skills |
-| **04** | [1-Command Multi-IDE Developer UX](docs/labs/04-ide-developer-experience.md) | 40 min | Zero-friction developer onboarding via `python -m tools.hub_sync` (incl. Bangkok → Singapore `--fallback-middleware-url` failover) & Bootstrap `/mcp` across **Claude Code**, **OpenAI Codex**, **GitHub Copilot / VS Code**, and **Google Antigravity** (`agy plugin install`, `agy plugin list --json`, `agy --agent`) |
+| **02** | [Register Assets in Agent Registry](docs/labs/02-register-agent-registry.md) | 35 min | Dual-source ingestion via `python -m tools.plugin_sync ingest` (**Option 1:** local `local-skills/` + `starter-marketplace/` via `make demo-sync-local`; **Option 2:** shallow-cloning a centralized GitLab/GitHub repo via `make demo-sync-repo`) targeting live `global` Skills (`--skills-location global`, `--wait-for-scan`) + Bangkok (`asia-southeast3`) Services (`v1` REST, `gcloud`, and Terraform `skills_source_mode`) |
+| **03** | [Build & Deploy Polyglot Middleware](docs/labs/03-build-deploy-middleware.md) | 40 min | Cloud Run Polyglot Middleware (`/health`, `?alt=media` 302 redirect auth/header handling, bounded concurrent skill verification, single-bundle ZIP synthesis, `/v1/marketplace/{claude,copilot,codex,antigravity}.json`, Streamable HTTP `/mcp`) + Zero-Docker Cloud Build (`cloudbuild/*.yaml`) deploy to **Bangkok (`asia-southeast3`)** reading **`global`** Skills |
+| **04** | [1-Command Multi-IDE Developer UX](docs/labs/04-ide-developer-experience.md) | 40 min | Zero-friction developer onboarding via `python -m tools.hub_sync` & Bootstrap `/mcp` across **Claude Code**, **OpenAI Codex**, **GitHub Copilot / VS Code**, and **Google Antigravity** (`agy plugin install`, `agy plugin list --json`, `agy --agent`) |
 | **05** | [Platform Agents & GitLab Dual-SoT](docs/labs/05-platform-agents-gitlab-sot.md) | 40 min | Direct ADK consumption (`AgentRegistry` + `GCPSkillRegistry` + `SkillToolset`), GitLab CI/CD ([starter-marketplace/.gitlab-ci.yml](starter-marketplace/.gitlab-ci.yml)), plus Workstream A Live GCP Validation (`make gcp-validate`) & Cleanup Checkpoint (`make gcp-destroy`) |
 
 ### Workstream B — Security & Governance Standalone Track (Modules 6–8, ~2 hours)
@@ -164,25 +164,25 @@ curl -fsSL http://127.0.0.1:8080/v1/marketplace/claude.json | .venv/bin/python -
 
 ### Track 2: Live GCP — Zero Docker & Zero Terraform (`gcloud` + Cloud Build)
 
-Deploy the entire Workstream A stack remotely via Cloud Build + Cloud Run to **Bangkok (`asia-southeast3`)** primary (and optional **Singapore (`asia-southeast1`)** secondary/DR failover) with **regional Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`)** in each deployed region and **standalone `Skills` shared once in `global`** (or `us`/`eu` for CMEK) — with zero local Docker or Terraform:
+Deploy a single, clean Workstream A stack remotely via Cloud Build + Cloud Run to **Bangkok (`asia-southeast3`)** with **Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`) in Bangkok (`asia-southeast3`)** and **standalone `Skills` in `global`** (or `us`/`eu` for CMEK) — with zero local Docker or Terraform:
 
-> **Verified Live APAC Regional Split:** Cloud Run, Cloud Build, Artifact Registry, and Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`) run regionally in **Bangkok (`asia-southeast3`)** (primary) and **Singapore (`asia-southeast1`)** (secondary/DR), while standalone **`Skills`** live in **`global`** (default `AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK) and are shared seamlessly by both regional Middlewares (automatically filtered to `private-*` skills so built-in Google first-party skills do not pollute enterprise catalogs). For Workstream B in APAC, host `AuthProvider` in **Singapore (`asia-southeast1`)**, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`) in **Bangkok (`asia-southeast3`)** / **Singapore (`asia-southeast1`)**, and keep `enable_agent_gateway = false` (currently `us-central1`/`europe-west1`).
+> **Verified Live Bangkok-First Regional Architecture:**
+> - **Bangkok (`asia-southeast3`) — Primary Region:** Cloud Run (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), Agent Registry `Services` (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api`), GCS skill staging bucket, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), and Cloud Logging audit bucket.
+> - **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`)** uses `auth_provider_location = "asia-southeast1"` because Agent Identity is GA in Singapore and not yet available in Bangkok.
+> - **Global / Multi-Region (API-Required):** Agent Registry standalone **`Skills`** live in **`global`** (API supports `global`, `us`, `eu` only; default `AGENT_REGISTRY_SKILLS_LOCATION=global`, automatically filtered to `private-*` skills so built-in Google first-party skills do not pollute enterprise catalogs), auto-registered Google/GCP remote MCP servers live in **`global`**, optional native Skill CMEK (`SkillEncryptionSpec`) uses **`us`/`eu`** multi-regions only, and optional Network Services Agent Gateway uses **`us-central1`/`europe-west1`** only (`enable_agent_gateway = false` by default for APAC).
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 
-# Deploy primary Bangkok (asia-southeast3) + global Skills (ENABLE_SECONDARY defaults to false):
+# Deploy single Bangkok (asia-southeast3) stack + global Skills:
 make gcp-deploy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# Or deploy Bangkok primary + Singapore (asia-southeast1) secondary/DR sharing global Skills:
-make gcp-deploy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
-# (Direct script equivalent: scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --skills-location global --enable-secondary)
+# (Direct script equivalent: scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global)
 
-# Validate live Cloud Run (/health), Agent Registry v1 regional Services + global Skills, and 4-IDE marketplace feeds
-# (append ENABLE_SECONDARY=true if Singapore secondary was deployed):
-make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
+# Validate live Cloud Run (/health), Agent Registry v1 Bangkok Services + global Skills, and 4-IDE marketplace feeds:
+make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 
-# Always tear down workshop resources when finished to avoid idle cloud spend
-make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
+# Always tear down workshop resources when finished to avoid idle cloud spend:
+make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 ```
 
 ### Track 3: Live GCP — Full IaC (Zero-Docker Cloud Build + Terraform GA `hashicorp/google >= 7.39.0`)
@@ -192,13 +192,13 @@ make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
    export GCP_PROJECT_ID="<your-gcp-project-id>"
    scripts/build_images_cloudbuild.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3
    ```
-2. **Stage 2 (Deploy Workstream A core infrastructure in Bangkok `asia-southeast3` + optional Singapore `asia-southeast1` secondary + shared `global` Skills):** Copy and edit [terraform/core/terraform.tfvars.example](terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars` (`location = "asia-southeast3"`, `secondary_location = "asia-southeast1"`, `skills_location = "global"`), verify HCL formatting, then preview and apply:
+2. **Stage 2 (Deploy Workstream A core infrastructure in Bangkok `asia-southeast3` + `global` Skills):** Copy and edit [terraform/core/terraform.tfvars.example](terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars` (`location = "asia-southeast3"`, `skills_location = "global"`), verify HCL formatting, then preview and apply:
    ```bash
    make validate-hcl
    make tf-core-plan
    terraform -chdir=terraform/core apply
    ```
-3. **Optional Workstream B (Standalone Security & Governance):** Layer on top of `terraform/core` or deploy standalone against any existing Agent Registry project using [terraform/security_governance/terraform.tfvars.example](terraform/security_governance/terraform.tfvars.example) (APAC defaults: `location = "asia-southeast3"`, `auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false`, `lock_audit_bucket = false` in sandboxes):
+3. **Optional Workstream B (Standalone Security & Governance):** Layer on top of `terraform/core` or deploy standalone against any existing Agent Registry project using [terraform/security_governance/terraform.tfvars.example](terraform/security_governance/terraform.tfvars.example) (APAC defaults: `location = "asia-southeast3"`, `auth_provider_location = "asia-southeast1"` fallback for Agent Identity, `enable_agent_gateway = false`, `lock_audit_bucket = false` in sandboxes):
    ```bash
    export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
    make tf-sec-plan
@@ -213,7 +213,7 @@ make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
 | :--- | :--- |
 | [WORKSHOP_SPEC.json](WORKSHOP_SPEC.json) | Canonical ports (`8090`, `8091`, `8092`, `8080`), resource names, URNs, metadata keys, and Terraform outputs |
 | [Makefile](Makefile) | Developer & facilitator shortcuts (`preflight`, `smoke-local`, `run-local-stack`, `starter-check`, `test`, `test-e2e`, `validate-hcl`, `run-*`, `demo-*`, `gcp-deploy`, `gcp-validate`, `gcp-destroy`, `tf-*-plan`) |
-| `scripts/`, `cloudbuild/`, `.gcloudignore` | Zero-Docker Cloud Build configs (`cloudbuild/*.yaml`) + lean build-context ignore files (`.gcloudignore`/`.dockerignore`), environment pre-flight (`scripts/preflight_check.sh`), starter verifier (`scripts/check_starter.py`), and Bangkok/Singapore GCP lifecycle scripts (`build_images_cloudbuild.sh`, `deploy_gcp.sh`, `validate_live_gcp.sh`, `destroy_gcp.sh`) |
+| `scripts/`, `cloudbuild/`, `.gcloudignore` | Zero-Docker Cloud Build configs (`cloudbuild/*.yaml`) + lean build-context ignore files (`.gcloudignore`/`.dockerignore`), environment pre-flight (`scripts/preflight_check.sh`), starter verifier (`scripts/check_starter.py`), and single-region Bangkok (`asia-southeast3`) GCP lifecycle scripts (`build_images_cloudbuild.sh`, `deploy_gcp.sh`, `validate_live_gcp.sh`, `destroy_gcp.sh`) |
 | [.agents/skills/](.agents/skills/) | Auto-discovered Google Antigravity workspace skills (`/agent-marketplace-workshop-guide`, `/polyglot-agent-plugin-authoring`, `/agent-registry-v1-ingest-and-lifecycle`, `/marketplace-middleware-and-ide-delivery`, `/agent-registry-security-and-prod-hardening`) for workshop, dev, and production workflows |
 | [starter-marketplace/](starter-marketplace/.gitlab-ci.yml) | Reference GitLab plugin repository (`gcp-finops-toolkit`) and 3-stage `.gitlab-ci.yml` sync pipeline |
 | [local-skills/](local-skills/README.md) | Option 1 pre-prepared standalone `agentskills.io` skills (`cloud-run-debugger`, `terraform-iam-auditor`, `incident-postmortem-writer`) for zero-friction local ingestion |

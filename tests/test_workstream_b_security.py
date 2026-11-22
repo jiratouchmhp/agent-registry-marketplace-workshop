@@ -246,9 +246,13 @@ def test_versions_and_variables_contract() -> None:
         "location must default to Bangkok primary (asia-southeast3)"
     )
     assert re.search(r'default\s*=\s*"asia-southeast1"', var_blocks["auth_provider_location"]), (
-        "auth_provider_location must default to Singapore (asia-southeast1) for Agent Identity GA"
+        "auth_provider_location must default to Singapore (asia-southeast1) service-specific fallback for Agent Identity GA"
     )
+    assert "fallback" in var_blocks["auth_provider_location"].lower()
+    assert "asia-southeast3" in var_blocks["auth_provider_location"]
     assert "validation" in var_blocks["auth_provider_location"]
+    assert "enable_secondary_region" not in var_blocks
+    assert "secondary_location" not in var_blocks
     assert re.search(r"default\s*=\s*false\b", var_blocks["enable_agent_gateway"]), (
         "enable_agent_gateway must default to false for APAC compatibility"
     )
@@ -270,8 +274,14 @@ def test_kms_cmek_and_asymmetric_signing_invariants() -> None:
     kms_hcl = (TF_SEC_DIR / "kms.tf").read_text(encoding="utf-8")
     assert "europe" in kms_hcl, "kms.tf must explicitly document `eu` skills -> KMS location `europe`"
 
-    key_rings = _extract_hcl_blocks(kms_hcl, "resource", "google_kms_key_ring")
-    assert any("location = var.cmek_location" in body for _labels, body in key_rings)
+    key_rings = {
+        labels[1]: body
+        for labels, body in _extract_hcl_blocks(kms_hcl, "resource", "google_kms_key_ring")
+    }
+    assert re.search(r"location\s*=\s*var\.cmek_location\b", key_rings["agent_registry_cmek"])
+    assert re.search(r"location\s*=\s*var\.location\b", key_rings["skill_signing"]), (
+        "Asymmetric signing key ring must reside in primary var.location (Bangkok asia-southeast3)"
+    )
 
     crypto_keys = {
         labels[1]: body
@@ -338,6 +348,8 @@ def test_auth_provider_and_agent_registry_binding_schema() -> None:
         "google_agent_identity_auth_provider.finops_oauth must use var.auth_provider_location"
     )
     assert "asia-southeast1" in auth_hcl
+    assert "asia-southeast3" in auth_hcl
+    assert "fallback" in auth_hcl.lower()
 
     bindings = _extract_hcl_blocks(auth_hcl, "resource", "google_agent_registry_binding")
     assert len(bindings) == 1
@@ -435,6 +447,9 @@ def test_audit_logging_data_access_and_locked_worm_bucket() -> None:
     )
     assert len(buckets) == 1
     b_body = buckets[0][1]
+    assert re.search(r"location\s*=\s*var\.location\b", b_body), (
+        "Audit log bucket must reside in primary var.location (Bangkok asia-southeast3)"
+    )
     assert re.search(r"locked\s*=\s*var\.lock_audit_bucket\b", b_body), (
         "Audit bucket must bind locked = var.lock_audit_bucket"
     )
@@ -482,10 +497,15 @@ def test_security_governance_tfvars_example_apac_defaults() -> None:
     uncommented = _strip_hcl_comments(tfvars_text)
     assert re.search(r'(?m)^\s*location\s*=\s*"asia-southeast3"', uncommented)
     assert re.search(r'(?m)^\s*auth_provider_location\s*=\s*"asia-southeast1"', uncommented)
+    assert re.search(r'(?m)^\s*cmek_location\s*=\s*"us"', uncommented)
     assert re.search(r"(?m)^\s*enable_agent_gateway\s*=\s*false\b", uncommented)
+    assert re.search(r'(?m)^\s*agent_gateway_location\s*=\s*"us-central1"', uncommented)
     assert re.search(r"(?m)^\s*lock_audit_bucket\s*=\s*false\b", uncommented)
     assert "locations:asia-southeast3:agentregistry:services:finops-mcp-server" in uncommented
     assert "locations:asia-southeast3:agentregistry:services:finops-advisor-agent" in uncommented
+    assert "fallback" in tfvars_text.lower()
+    assert "enable_secondary_region" not in tfvars_text
+    assert "secondary_location" not in tfvars_text
 
 
 # =============================================================================

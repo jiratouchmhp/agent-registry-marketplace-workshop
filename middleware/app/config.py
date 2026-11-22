@@ -19,7 +19,6 @@ class MiddlewareSettings:
     agent_registry_base_url: str = "http://127.0.0.1:8090/v1"
     gcp_project_id: str = "acme-agent-governance"
     gcp_location: str = "asia-southeast3"
-    gcp_secondary_location: str = "asia-southeast1"
     agent_registry_location: str = ""
     agent_registry_skills_location: str = ""
     include_public_skills: bool = False
@@ -79,7 +78,6 @@ class MiddlewareSettings:
             ),
             gcp_project_id=project_id,
             gcp_location=os.getenv("GCP_LOCATION", "asia-southeast3"),
-            gcp_secondary_location=os.getenv("GCP_SECONDARY_LOCATION", "asia-southeast1"),
             agent_registry_location=os.getenv("AGENT_REGISTRY_LOCATION", ""),
             agent_registry_skills_location=os.getenv("AGENT_REGISTRY_SKILLS_LOCATION", ""),
             include_public_skills=_parse_bool(os.getenv("INCLUDE_PUBLIC_SKILLS"), False),

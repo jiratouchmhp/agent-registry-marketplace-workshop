@@ -21,7 +21,7 @@ By the end of this lab, you will:
 
 ## Key Agent Registry `v1` Invariants (Read Before Running)
 
-1. **Verified live APAC regional split (`Services` vs. standalone `Skills`):** On live Google Cloud Agent Registry `v1`, **`Services`** (`McpServer`, `Agent`, `Endpoint`) run regionally in **Bangkok (`asia-southeast3`)** primary and **Singapore (`asia-southeast1`)** secondary/DR, while standalone **`Skills`** (`Skill`, `SkillRevision`, `Findings`) are hosted **only** in **`global`** (default for APAC — `AGENT_REGISTRY_SKILLS_LOCATION=global` / `--skills-location global`) or **`us` / `eu`** (required for CMEK). Both Bangkok and Singapore Middleware instances share the single `global` Skills catalog and automatically filter to `private-*` skills (`INCLUDE_PUBLIC_SKILLS=false`) so Google's built-in first-party skills do not pollute enterprise catalogs. *(Local `mock_registry` accepts regional `asia-southeast3` for backward-compatible offline drills.)*
+1. **Verified Bangkok-first regional placement (`Services` vs. standalone `Skills`):** On live Google Cloud Agent Registry `v1`, all regional **`Services`** (`McpServer`, `Agent`, `Endpoint`) run in a single **Bangkok (`asia-southeast3`)** primary deployment, while standalone **`Skills`** (`Skill`, `SkillRevision`, `Findings`) are hosted **only** in **`global`** (default for APAC — `AGENT_REGISTRY_SKILLS_LOCATION=global` / `--skills-location global`) or **`us` / `eu`** (required for CMEK; single-region `/skills` endpoints time out), and auto-registered Google/GCP remote MCP servers live in **`global`**. *(Singapore `asia-southeast1` is reserved exclusively as the service-specific fallback for Workstream B Agent Identity `AuthProvider`, which is not yet available in Bangkok.)* Middleware (`INCLUDE_PUBLIC_SKILLS=false`) automatically filters strictly to `private-*` skills so Google's built-in first-party skills do not pollute enterprise catalogs. *(Local `mock_registry` accepts regional `asia-southeast3` for backward-compatible offline drills.)*
 2. **No generic `labels` map** exists on `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, or `Skill` in `v1`. Plugin lineage is stored inside `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only): `plugin_name`, `plugin_display_name`, `plugin_version`, `source_repo`, `git_commit`, `mcp_service_id`, `agent_service_id`, `kms_signature`, `kms_key_version`.
 3. **Automatic `private-` Skill ID prefix**: Calling `POST /v1/projects/{p}/locations/{skills_loc}/skills?skillId=cost-anomaly-triage` creates `projects/{p}/locations/{skills_loc}/skills/private-cost-anomaly-triage`. Every subsequent `GET`, `PATCH`, `DELETE`, and `/revisions` call **must** use `private-cost-anomaly-triage`!
 4. **A2A v1.0 `A2A_AGENT_CARD` strict validation rules**:
@@ -306,9 +306,8 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
    Standalone Skills are bootstrapped cleanly into `var.skills_location` (`"global"` default, or `"us"`/`"eu"` for CMEK) via [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf) (`terraform_data`), which **always passes `--only-skills --skip-mcp-probe --wait-for-scan`** so Terraform-managed `google_agent_registry_service` resources are never overwritten and async scans settle cleanly. Choose your mode in `terraform/core/terraform.tfvars` (see [terraform/core/variables.tf](../../terraform/core/variables.tf) and [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example)):
 
    ```hcl
-   # Verified live APAC regional split: regional Services (asia-southeast3) + shared global Skills
+   # Verified Bangkok-first regional placement: Bangkok Services (asia-southeast3) + global Skills
    location                       = "asia-southeast3"
-   secondary_location             = "asia-southeast1"
    skills_location                = "global" # "global" (APAC default), "us", or "eu" (CMEK)
 
    # Option 1 (Default): Local starter plugin + pre-prepared standalone local-skills/
@@ -334,7 +333,7 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
    ```bash
    # Standalone Skills live in global (or us/eu for CMEK):
    gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet
-   # Projected MCP Servers & A2A Agents live in Bangkok primary (asia-southeast3) / Singapore secondary (asia-southeast1):
+   # Projected MCP Servers & A2A Agents live in Bangkok primary (asia-southeast3):
    gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
    gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
    ```
@@ -375,7 +374,7 @@ Fill in the `# WORKSHOP-TODO(lab-02)` blocks and re-run until all built-in self-
 | `400 INVALID_ARGUMENT: proto unmarshal failed: unknown field "stateTransitionHistory"` | Included legacy A2A v0.x `capabilities.stateTransitionHistory` in `agent-card.json` or Terraform `agent_spec.content` | Remove `stateTransitionHistory`; keep only A2A v1.0 `capabilities` (`streaming`, `pushNotifications`). |
 | `400 INVALID_ARGUMENT: duplicate interface url found in agent card` | Declared two `supportedInterfaces` bindings (e.g. `JSONRPC` and `HTTP+JSON`) with the same `/a2a` URL | Split each protocol binding onto a distinct path (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`). |
 | `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results` | Re-deployed an existing skill under `ENABLED_BLOCKING` and patched `defaultRevision` before the new `SkillRevision`'s async scan (~10s) finished | Always pass `--wait-for-scan` to `tools.plugin_sync` so `wait_for_revision_scan_completion()` polls `scanState` to completion before promoting `defaultRevision`. |
-| Live `skills` create/list rejected in `asia-southeast3` / `asia-southeast1` | Standalone `Skill` resources are hosted only in `global`, `us`, or `eu` on live Agent Registry `v1` | Pass `--skills-location global` (or set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"`) while keeping Services in Bangkok (`asia-southeast3`) / Singapore (`asia-southeast1`). |
+| Live `skills` create/list times out or fails in `asia-southeast3` | Standalone `Skill` resources are hosted only in `global`, `us`, or `eu` on live Agent Registry `v1` (single-region `/skills` endpoints time out) | Pass `--skills-location global` (or set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"`) while keeping Services in Bangkok (`asia-southeast3`). |
 
 ---
 

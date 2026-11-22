@@ -376,23 +376,53 @@ def test_docs_use_consistent_track_1_2_3_naming() -> None:
 
 
 def test_live_apac_regional_split_and_findings_documented_consistently() -> None:
-    """Core docs and key labs consistently document the live Bangkok/Singapore/global split and live gotchas."""
+    """Core docs and key labs consistently document the Bangkok-first + Singapore fallback + global Skills architecture and live gotchas."""
+    readme = README_PATH.read_text(encoding="utf-8")
     quickstart = (DOCS_DIR / "attendee-quickstart.md").read_text(encoding="utf-8")
     arch = (DOCS_DIR / "architecture.md").read_text(encoding="utf-8")
+    lab00 = (LABS_DIR / "00-environment-setup.md").read_text(encoding="utf-8")
     lab02 = (LABS_DIR / "02-register-agent-registry.md").read_text(encoding="utf-8")
     lab03 = (LABS_DIR / "03-build-deploy-middleware.md").read_text(encoding="utf-8")
+    lab05 = (LABS_DIR / "05-platform-agents-gitlab-sot.md").read_text(encoding="utf-8")
     lab06 = (LABS_DIR / "06-governance-scanning-lifecycle.md").read_text(encoding="utf-8")
     lab08 = (LABS_DIR / "08-access-control-and-audit.md").read_text(encoding="utf-8")
 
-    # Verified live regional split: Bangkok + Singapore regional Services + global Skills
+    # Bangkok primary (asia-southeast3) + Singapore fallback for Agent Identity (asia-southeast1) + global Skills
     for name, doc in (
+        ("README.md", readme),
+        ("attendee-quickstart.md", quickstart),
+        ("architecture.md", arch),
+        ("00-environment-setup.md", lab00),
+        ("02-register-agent-registry.md", lab02),
+        ("03-build-deploy-middleware.md", lab03),
+        ("05-platform-agents-gitlab-sot.md", lab05),
+        ("08-access-control-and-audit.md", lab08),
+    ):
+        for token in ("asia-southeast3", "asia-southeast1", "global"):
+            assert token in doc, f"{name} missing Bangkok-first regional architecture token: {token}"
+
+    for name, doc in (
+        ("README.md", readme),
         ("attendee-quickstart.md", quickstart),
         ("architecture.md", arch),
         ("02-register-agent-registry.md", lab02),
         ("03-build-deploy-middleware.md", lab03),
     ):
-        for token in ("asia-southeast3", "asia-southeast1", "global", "private-"):
-            assert token in doc, f"{name} missing live regional split token: {token}"
+        assert "private-" in doc, f"{name} missing private- skill filter documentation"
+
+    # Explicit Singapore service-specific fallback documentation for Agent Identity AuthProvider
+    for name, doc in (
+        ("README.md", readme),
+        ("attendee-quickstart.md", quickstart),
+        ("architecture.md", arch),
+        ("00-environment-setup.md", lab00),
+        ("03-build-deploy-middleware.md", lab03),
+        ("05-platform-agents-gitlab-sot.md", lab05),
+        ("08-access-control-and-audit.md", lab08),
+    ):
+        assert 'auth_provider_location = "asia-southeast1"' in doc, (
+            f"{name} must document auth_provider_location = \"asia-southeast1\" fallback for Agent Identity"
+        )
 
     # Live-discovered A2A v1.0 & ENABLED_BLOCKING scan-race gotchas in Lab 02
     for token in ("stateTransitionHistory", "/a2a/http", "--wait-for-scan", "--skills-location"):
@@ -402,9 +432,64 @@ def test_live_apac_regional_split_and_findings_documented_consistently() -> None
     for token in ("/health", "/download/v1/", "CREDENTIALS_MISSING", "Semaphore(8)"):
         assert token in lab03, f"Lab 03 missing live finding documentation: {token}"
 
+    # Live IAM v3 --condition=None teardown gotcha in Labs 05 & 08
+    assert "--condition=None" in lab05, "Lab 05 missing IAM v3 --condition=None teardown documentation"
+    assert "--condition=None" in lab08, "Lab 08 missing IAM v3 --condition=None teardown documentation"
+
     # Workstream B standalone Skills in global + APAC AuthProvider/Gateway notes
-    assert "AGENT_REGISTRY_SKILLS_LOCATION=\"global\"" in lab06
+    assert 'AGENT_REGISTRY_SKILLS_LOCATION="global"' in lab06
     assert "wait_for_revision_scan_completion" in lab06
-    assert "AGENT_REGISTRY_SKILLS_LOCATION=\"global\"" in lab08
-    assert "auth_provider_location = \"asia-southeast1\"" in lab08
+    assert 'AGENT_REGISTRY_SKILLS_LOCATION="global"' in lab08
+    assert 'auth_provider_location = "asia-southeast1"' in lab08
     assert "enable_agent_gateway = false" in lab08
+
+
+def test_single_region_bangkok_architecture_regression_guards() -> None:
+    """Regression guard: terraform/core has zero duplicate *_secondary resources and docs contain zero 2-region failover flags."""
+    tf_core_dir = REPO_ROOT / "terraform" / "core"
+    assert tf_core_dir.is_dir(), f"Missing terraform/core directory: {tf_core_dir}"
+
+    forbidden_tf_patterns = (
+        re.compile(r"\b[a-z0-9_]+_secondary\b"),
+        re.compile(r"\benable_secondary_region\b"),
+        re.compile(r"\bsecondary_location\b"),
+        re.compile(r"\bsecondary_middleware_url\b"),
+        re.compile(r"\bsecondary_middleware_mcp_url\b"),
+        re.compile(r"\bsecondary_artifact_registry_repository_url\b"),
+    )
+    tf_violations: list[str] = []
+    for tf_file in sorted(tf_core_dir.glob("*.tf")) + sorted(tf_core_dir.glob("*.tfvars*")):
+        text = tf_file.read_text(encoding="utf-8")
+        for pat in forbidden_tf_patterns:
+            match = pat.search(text)
+            if match:
+                tf_violations.append(
+                    f"{tf_file.relative_to(REPO_ROOT)} contains forbidden secondary resource/var {match.group(0)!r}"
+                )
+    assert not tf_violations, (
+        "Duplicate secondary-region definitions detected in terraform/core/:\n"
+        + "\n".join(tf_violations)
+    )
+
+    forbidden_doc_tokens = (
+        "--enable-secondary",
+        "ENABLE_SECONDARY",
+        "enable_secondary_region",
+        "secondary_location",
+        "secondary_middleware_url",
+        "--fallback-middleware-url",
+        "HUB_FALLBACK_MIDDLEWARE_URL",
+        "GCP_SECONDARY_LOCATION",
+    )
+    doc_violations: list[str] = []
+    for md_file in _all_doc_markdown_files():
+        text = md_file.read_text(encoding="utf-8")
+        for token in forbidden_doc_tokens:
+            if token in text:
+                doc_violations.append(
+                    f"{md_file.relative_to(REPO_ROOT)} references removed 2-region token {token!r}"
+                )
+    assert not doc_violations, (
+        "Removed 2-region / failover flags referenced in documentation:\n"
+        + "\n".join(doc_violations)
+    )

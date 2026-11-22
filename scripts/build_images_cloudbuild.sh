@@ -2,8 +2,8 @@
 # Zero-Docker container image builder using Google Cloud Build & Artifact Registry.
 #
 # Submits checked-in cloudbuild/*.yaml manifests from the repository root so
-# attendees never need a local Docker daemon. Supports primary region
-# (default: asia-southeast3) and optional secondary region (e.g. asia-southeast1).
+# attendees never need a local Docker daemon. Builds once in --region
+# (default: asia-southeast3, Bangkok).
 
 set -euo pipefail
 
@@ -12,7 +12,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 PROJECT_ID="${GCP_PROJECT_ID:-}"
 REGION="${GCP_LOCATION:-asia-southeast3}"
-SECONDARY_REGION=""
 REPO="${ARTIFACT_REGISTRY_REPO:-agent-marketplace}"
 TAG="${IMAGE_TAG:-1.0.0}"
 ONLY_MIDDLEWARE="false"
@@ -27,8 +26,7 @@ with zero local Docker required.
 
 Options:
   --project ID               Google Cloud project ID (required, or $GCP_PROJECT_ID)
-  --region REGION            Primary GCP region (default: asia-southeast3)
-  --secondary-region REGION  Optional secondary GCP region (e.g. asia-southeast1)
+  --region REGION            GCP region for Cloud Build & Artifact Registry (default: asia-southeast3)
   --repo REPO                Artifact Registry repository ID (default: agent-marketplace)
   --tag TAG                  Container image tag (default: 1.0.0)
   --only-middleware          Build only polyglot-middleware (used by --deploy-mode source)
@@ -45,10 +43,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     --region)
       REGION="$2"
-      shift 2
-      ;;
-    --secondary-region)
-      SECONDARY_REGION="$2"
       shift 2
       ;;
     --repo)
@@ -211,22 +205,13 @@ echo "========================================================================"
 echo "Zero-Docker Cloud Build Image Builder"
 echo "========================================================================"
 echo "Project          : ${PROJECT_ID}"
-echo "Primary Region   : ${REGION}"
-if [[ -n "${SECONDARY_REGION}" ]]; then
-  echo "Secondary Region : ${SECONDARY_REGION}"
-fi
+echo "Region           : ${REGION}"
 echo "Repository / Tag : ${REPO} / ${TAG}"
 echo "Only Middleware  : ${ONLY_MIDDLEWARE}"
 echo "Dry Run          : ${DRY_RUN}"
 echo ""
 
 build_region_images "${REGION}"
-
-if [[ -n "${SECONDARY_REGION}" && "${SECONDARY_REGION}" != "${REGION}" ]]; then
-  echo ""
-  echo "--- Building Secondary Region Images (${SECONDARY_REGION}) ---"
-  build_region_images "${SECONDARY_REGION}"
-fi
 
 echo ""
 echo "Cloud Build image build step complete."

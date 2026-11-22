@@ -7,7 +7,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 ## Gate 1: Infrastructure, Terraform State & Cloud Run (`terraform/core/`)
 
 - [ ] **No unauthenticated Cloud Run demo access**: `allow_unauthenticated_workshop_demo = false` in `terraform/core/terraform.tfvars`.
-  - *Check:* `gcloud run services get-iam-policy polyglot-middleware --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION:-asia-southeast3}" --quiet` returns **zero** `allUsers` or `allAuthenticatedUsers` bindings (repeat for `sample-mcp-server` and `sample-a2a-agent`, plus `asia-southeast1` if `enable_secondary_region = true`).
+  - *Check:* `gcloud run services get-iam-policy polyglot-middleware --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION:-asia-southeast3}" --quiet` returns **zero** `allUsers` or `allAuthenticatedUsers` bindings (repeat for `sample-mcp-server` and `sample-a2a-agent`).
 - [ ] **Deletion protection enabled**: `deletion_protection = true` in `terraform/core/terraform.tfvars` for all Cloud Run v2 services.
 - [ ] **Immutable pinned container digests**: `middleware_image`, `sample_mcp_image`, and `sample_a2a_image` pin `@sha256:...` digests in Artifact Registry (never `:latest`).
 - [ ] **Restricted ingress & availability**: Change `ingress = "INGRESS_TRAFFIC_ALL"` in `terraform/core/cloud_run.tf` to `INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER` (fronted by an HTTPS Load Balancer + IAP / Cloud Armor) or enforce Cloud Run IAM (`roles/run.invoker`) with OIDC ID tokens; raise `min_instance_count >= 1` for latency-sensitive middleware.
@@ -62,7 +62,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 - [ ] **CMEK configured before first skill (if required by compliance)**:
   - Key ring in `us` (for `us` skills) or **`europe`** (for `eu` skills); P4SA (`service-<NUM>@gcp-sa-agentregistry.iam.gserviceaccount.com`) holds `roles/cloudkms.cryptoKeyEncrypterDecrypter`.
   - `SkillEncryptionSpec` attached cleanly while location held zero skills (`enable_cmek_spec = true`).
-- [ ] **Fail-closed signature verification active**: `require_kms_signature = true` (`REQUIRE_KMS_SIGNATURE=true`) on `polyglot-middleware`, configured with `KMS_SIGNING_KEY_VERSION` or a mounted trusted `KMS_PUBLIC_KEY_PEM_PATH` (regional `EC_SIGN_P256_SHA256` key in `asia-southeast3` / `asia-southeast1`).
+- [ ] **Fail-closed signature verification active**: `require_kms_signature = true` (`REQUIRE_KMS_SIGNATURE=true`) on `polyglot-middleware`, configured with `KMS_SIGNING_KEY_VERSION` or a mounted trusted `KMS_PUBLIC_KEY_PEM_PATH` (regional `EC_SIGN_P256_SHA256` key in Bangkok `asia-southeast3`).
   - *Check:* `curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" "${MIDDLEWARE_URL}/health"` returns `"requireKmsSignature": true` and `"skillsLocation": "global"` (or `"us"`/`"eu"`). *(Always probe `/health` or `/v1/health` externally on Cloud Run since Google Frontend reserves `/healthz`.)*
 - [ ] **Negative tamper test passed**: Uploading an unsigned skill or modifying 1 byte of a signed skill results in rejection inside `GET /v1/catalog` (`rejectedSkills[]`) and fails `sign_and_verify.py verify` with non-zero exit code.
 
@@ -70,7 +70,7 @@ Execute every gate below before promoting the Enterprise Agent Marketplace (`ter
 
 ## Gate 5: Runtime Gateway, Auth Manager Bindings & IAP v2 UAP
 
-- [ ] **AuthProvider hardened**: `google_agent_identity_auth_provider` (`auth_provider_location = "asia-southeast1"` in APAC) sets `enable_pkce = true`, minimal `allowed_scopes`, explicit `blocked_scopes` (blocking directory admin scopes), and reads `client_secret` from Secret Manager / `TF_VAR_auth_provider_client_secret` (never committed `.tfvars`).
+- [ ] **AuthProvider hardened**: `google_agent_identity_auth_provider` (`auth_provider_location = "asia-southeast1"` — service-specific Singapore fallback because Agent Identity is GA in Singapore and not yet available in Bangkok) sets `enable_pkce = true`, minimal `allowed_scopes`, explicit `blocked_scopes` (blocking directory admin scopes), and reads `client_secret` from Secret Manager / `TF_VAR_auth_provider_client_secret` (never committed `.tfvars`).
 - [ ] **Binding IAM filtering verified**: `google_agent_registry_binding` includes required `auth_provider_binding`; verified that `bindings:fetchAvailable` returns the binding only for callers with `roles/agentidentity.user`.
 - [ ] **Agent Gateway attached (where regionally available)**: `google_network_services_agent_gateway` (`enable_agent_gateway = true`, `agent_gateway_location = "us-central1"` or `"europe-west1"`) runs `CLIENT_TO_AGENT` with `registries` pointing to `//agentregistry.googleapis.com/projects/${GCP_PROJECT_ID}/locations/${GCP_LOCATION}`, and `roles/iap.egressor` is bound to short projected resource IDs (`mcp_server_resource_id`, `a2a_agent_resource_id`).
 - [ ] **IAP v2 UAP baked in `DRY_RUN`, then enforced**:

@@ -2187,23 +2187,27 @@ def test_middleware_oauth_decoupling_metadata_server_and_kms_public_key_fetch(
 def test_middleware_bangkok_defaults_healthz_and_running_scan_rejection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Verify Bangkok/Singapore MiddlewareSettings, /healthz metadata, and RUNNING scan rejection text."""
-    for env_key in ("GCP_LOCATION", "GCP_SECONDARY_LOCATION", "AGENT_REGISTRY_LOCATION"):
+    """Verify Bangkok MiddlewareSettings, /healthz & /health metadata, and RUNNING scan rejection text."""
+    for env_key in (
+        "GCP_LOCATION",
+        "AGENT_REGISTRY_LOCATION",
+        "AGENT_REGISTRY_SKILLS_LOCATION",
+    ):
         monkeypatch.delenv(env_key, raising=False)
 
     default_cfg = MiddlewareSettings.from_env()
     assert default_cfg.gcp_location == "asia-southeast3"
-    assert default_cfg.gcp_secondary_location == "asia-southeast1"
+    assert not hasattr(default_cfg, "gcp_secondary_location")
     assert default_cfg.agent_registry_location == ""
     assert default_cfg.effective_registry_location == "asia-southeast3"
 
-    monkeypatch.setenv("GCP_LOCATION", "asia-southeast1")
-    monkeypatch.setenv("GCP_SECONDARY_LOCATION", "asia-southeast3")
+    monkeypatch.setenv("GCP_LOCATION", "asia-southeast3")
     monkeypatch.setenv("AGENT_REGISTRY_LOCATION", "asia-southeast3")
+    monkeypatch.setenv("AGENT_REGISTRY_SKILLS_LOCATION", "global")
     override_cfg = MiddlewareSettings.from_env()
-    assert override_cfg.gcp_location == "asia-southeast1"
-    assert override_cfg.gcp_secondary_location == "asia-southeast3"
+    assert override_cfg.gcp_location == "asia-southeast3"
     assert override_cfg.effective_registry_location == "asia-southeast3"
+    assert override_cfg.effective_skills_location == "global"
 
     # Mock Agent Registry returning a STATE_DRAFT skill whose security scan is still RUNNING
     seen_paths: list[str] = []
@@ -2242,8 +2246,7 @@ def test_middleware_bangkok_defaults_healthz_and_running_scan_rejection(
         settings=MiddlewareSettings(
             agent_registry_base_url="http://mock-ar.local/v1",
             gcp_project_id="acme-agent-governance",
-            gcp_location="asia-southeast1",
-            gcp_secondary_location="asia-southeast3",
+            gcp_location="asia-southeast3",
             agent_registry_location="asia-southeast3",
             require_kms_signature=False,
         ),
@@ -2254,13 +2257,15 @@ def test_middleware_bangkok_defaults_healthz_and_running_scan_rejection(
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
         ) as client:
-            hz = await client.get("/healthz")
-            assert hz.status_code == 200
-            body = hz.json()
-            assert body["location"] == "asia-southeast1"
-            assert body["region"] == "asia-southeast1"
-            assert body["secondaryRegion"] == "asia-southeast3"
-            assert body["agentRegistryLocation"] == "asia-southeast3"
+            for health_path in ("/healthz", "/health", "/v1/health"):
+                hz = await client.get(health_path)
+                assert hz.status_code == 200
+                body = hz.json()
+                assert body["location"] == "asia-southeast3"
+                assert body["region"] == "asia-southeast3"
+                assert "secondaryRegion" not in body
+                assert body["agentRegistryLocation"] == "asia-southeast3"
+                assert body["skillsLocation"] == "asia-southeast3"
 
             cat = (await client.get("/v1/catalog")).json()
             assert len(cat["rejectedSkills"]) == 1
@@ -2398,7 +2403,7 @@ def test_mcp_gateway_cloud_run_a2a_oidc_identity_token_auth() -> None:
 def test_middleware_global_skills_pagination_private_filter_and_regional_services(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Live googleapis.com skills auto-route to global, paginate across nextPageToken, filter built-in first-party skills, and link regional Bangkok/Singapore services."""
+    """Live googleapis.com skills auto-route to global, paginate across nextPageToken, filter built-in first-party skills, and link regional Bangkok (asia-southeast3) services."""
     for env_key in (
         "AGENT_REGISTRY_BASE_URL",
         "GCP_LOCATION",
@@ -2426,7 +2431,7 @@ def test_middleware_global_skills_pagination_private_filter_and_regional_service
     assert override_cfg.effective_skills_location == "eu"
     assert override_cfg.include_public_skills is True
 
-    # 4. Paginated global skills + built-in first-party filtering + Bangkok & Singapore regional Services linking
+    # 4. Paginated global skills + built-in first-party filtering + Bangkok regional Services linking
     skill_zip = _build_skill_zip(
         skill_name="cost-anomaly-triage",
         description="Triage unexpected GCP billing spikes.",
@@ -2441,8 +2446,9 @@ def test_middleware_global_skills_pagination_private_filter_and_regional_service
     skill_sha = hashlib.sha256(skill_zip).hexdigest()
     global_skill_name = f"projects/{PROJECT}/locations/global/skills/private-cost-anomaly-triage"
     global_rev_name = f"{global_skill_name}/revisions/rev-1"
+    region = "asia-southeast3"
 
-    def _multi_region_handler(request: httpx.Request) -> httpx.Response:
+    def _bangkok_global_handler(request: httpx.Request) -> httpx.Response:
         if request.url.host == "storage.googleapis.com":
             return httpx.Response(200, content=skill_zip)
         path = request.url.path
@@ -2506,80 +2512,78 @@ def test_middleware_global_skills_pagination_private_filter_and_regional_service
                     "scanResult": {"scanState": "SUCCEEDED", "findings": []},
                 },
             )
-        for region in ("asia-southeast3", "asia-southeast1"):
-            if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/mcpServers":
-                return httpx.Response(
-                    200,
-                    json={
-                        "mcpServers": [
-                            {
-                                "name": f"projects/{PROJECT}/locations/{region}/mcpServers/urn:mcp:p:locations:{region}:services:finops-mcp-server",
-                                "interfaces": [{"url": f"https://sample-mcp-server.{region}.run.app/mcp"}],
-                            }
-                        ]
-                    },
-                )
-            if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/agents":
-                return httpx.Response(
-                    200,
-                    json={
-                        "agents": [
-                            {
-                                "name": f"projects/{PROJECT}/locations/{region}/agents/urn:agent:p:locations:{region}:services:finops-advisor-agent",
-                                "protocols": [
-                                    {
-                                        "type": "A2A_AGENT",
-                                        "interfaces": [{"url": f"https://sample-a2a-agent.{region}.run.app/a2a"}],
-                                    }
-                                ],
-                            }
-                        ]
-                    },
-                )
+        if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/mcpServers":
+            return httpx.Response(
+                200,
+                json={
+                    "mcpServers": [
+                        {
+                            "name": f"projects/{PROJECT}/locations/{region}/mcpServers/urn:mcp:p:locations:{region}:services:finops-mcp-server",
+                            "interfaces": [{"url": f"https://sample-mcp-server.{region}.run.app/mcp"}],
+                        }
+                    ]
+                },
+            )
+        if request.method == "GET" and path == f"/v1/projects/{PROJECT}/locations/{region}/agents":
+            return httpx.Response(
+                200,
+                json={
+                    "agents": [
+                        {
+                            "name": f"projects/{PROJECT}/locations/{region}/agents/urn:agent:p:locations:{region}:services:finops-advisor-agent",
+                            "protocols": [
+                                {
+                                    "type": "A2A_AGENT",
+                                    "interfaces": [{"url": f"https://sample-a2a-agent.{region}.run.app/a2a"}],
+                                }
+                            ],
+                        }
+                    ]
+                },
+            )
         return httpx.Response(404, json={"error": f"unhandled {request.method} {path}"})
 
-    async def _run_both_regions() -> None:
+    async def _run_bangkok_and_global_skills() -> None:
         # Verify search_skills also filters first-party skills when only_private_skills=True
         async with AgentRegistryClient(
             base_url="https://agentregistry.googleapis.com/v1",
             project_id=PROJECT,
-            location="asia-southeast3",
+            location=region,
             auth_token="test-tok",
-            transport=httpx.MockTransport(_multi_region_handler),
+            transport=httpx.MockTransport(_bangkok_global_handler),
         ) as reg_client:
             assert reg_client.skills_location == "global"
             searched = await reg_client.search_skills(search_string="cost")
             assert [s["name"] for s in searched] == [global_skill_name]
 
-        for region, secondary in (
-            ("asia-southeast3", "asia-southeast1"),
-            ("asia-southeast1", "asia-southeast3"),
-        ):
-            mw_app = create_middleware_app(
-                settings=MiddlewareSettings(
-                    agent_registry_base_url="https://agentregistry.googleapis.com/v1",
-                    gcp_project_id=PROJECT,
-                    gcp_location=region,
-                    gcp_secondary_location=secondary,
-                    agent_registry_auth_token="test-tok",
-                    require_kms_signature=False,
-                ),
-                registry_transport=httpx.MockTransport(_multi_region_handler),
-            )
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
-            ) as client:
-                hz = (await client.get("/healthz")).json()
+        mw_app = create_middleware_app(
+            settings=MiddlewareSettings(
+                agent_registry_base_url="https://agentregistry.googleapis.com/v1",
+                gcp_project_id=PROJECT,
+                gcp_location=region,
+                agent_registry_auth_token="test-tok",
+                require_kms_signature=False,
+            ),
+            registry_transport=httpx.MockTransport(_bangkok_global_handler),
+        )
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=mw_app), base_url="http://127.0.0.1:8080"
+        ) as client:
+            for health_path in ("/healthz", "/health", "/v1/health"):
+                hz = (await client.get(health_path)).json()
+                assert hz["location"] == region
                 assert hz["region"] == region
+                assert "secondaryRegion" not in hz
+                assert hz["agentRegistryLocation"] == region
                 assert hz["skillsLocation"] == "global"
 
-                cat = (await client.get("/v1/catalog")).json()
-                assert cat["marketplace"]["skillsLocation"] == "global"
-                assert [s["name"] for s in cat["skills"]] == [global_skill_name]
-                assert len(cat["plugins"]) == 1
-                plugin = cat["plugins"][0]
-                assert plugin["name"] == "gcp-finops-toolkit"
-                assert any(f"/locations/{region}/mcpServers/" in m for m in plugin["mcpServers"])
-                assert any(f"/locations/{region}/agents/" in a for a in plugin["agents"])
+            cat = (await client.get("/v1/catalog")).json()
+            assert cat["marketplace"]["skillsLocation"] == "global"
+            assert [s["name"] for s in cat["skills"]] == [global_skill_name]
+            assert len(cat["plugins"]) == 1
+            plugin = cat["plugins"][0]
+            assert plugin["name"] == "gcp-finops-toolkit"
+            assert any(f"/locations/{region}/mcpServers/" in m for m in plugin["mcpServers"])
+            assert any(f"/locations/{region}/agents/" in a for a in plugin["agents"])
 
-    asyncio.run(_run_both_regions())
+    asyncio.run(_run_bangkok_and_global_skills())

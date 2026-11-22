@@ -13,13 +13,8 @@ output "project_number" {
 }
 
 output "location" {
-  description = "Primary Google Cloud region for Agent Registry services and Cloud Run workloads (default: asia-southeast3, Bangkok)."
+  description = "Primary Google Cloud region for Agent Registry services, Cloud Run workloads, Artifact Registry, and skill staging storage (default: asia-southeast3, Bangkok)."
   value       = var.location
-}
-
-output "secondary_location" {
-  description = "Secondary Google Cloud region for optional active-standby Cloud Run and Artifact Registry deployment (default: asia-southeast1, Singapore)."
-  value       = var.secondary_location
 }
 
 output "agent_registry_location" {
@@ -45,16 +40,6 @@ output "middleware_url" {
 output "middleware_mcp_url" {
   description = "Streamable HTTP MCP endpoint URL exposed by polyglot-middleware."
   value       = "${google_cloud_run_v2_service.polyglot_middleware.uri}/mcp"
-}
-
-output "secondary_middleware_url" {
-  description = "Base HTTPS URL of the optional secondary-region polyglot-middleware Cloud Run service (empty when enable_secondary_region is false)."
-  value       = try(google_cloud_run_v2_service.polyglot_middleware_secondary[0].uri, "")
-}
-
-output "secondary_middleware_mcp_url" {
-  description = "Streamable HTTP MCP endpoint URL exposed by the optional secondary-region polyglot-middleware Cloud Run service (empty when enable_secondary_region is false)."
-  value       = try("${google_cloud_run_v2_service.polyglot_middleware_secondary[0].uri}/mcp", "")
 }
 
 output "middleware_sa_email" {
@@ -85,11 +70,6 @@ output "sample_a2a_agent_url" {
 output "artifact_registry_repository_url" {
   description = "Docker image push/pull prefix for the workshop Artifact Registry repository."
   value       = "${google_artifact_registry_repository.workshop_images.location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.workshop_images.repository_id}"
-}
-
-output "secondary_artifact_registry_repository_url" {
-  description = "Docker image push/pull prefix for the optional secondary-region Artifact Registry repository (empty when enable_secondary_region is false)."
-  value       = try("${google_artifact_registry_repository.workshop_images_secondary[0].location}-docker.pkg.dev/${var.project_id}/${google_artifact_registry_repository.workshop_images_secondary[0].repository_id}", "")
 }
 
 output "skill_staging_bucket_name" {

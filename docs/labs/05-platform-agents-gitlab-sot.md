@@ -60,7 +60,7 @@ Examine the JSON output:
 
 ### Step 3: Run Live ADK Mode (Mode B: Live GCP Mode)
 
-On a workstation or Vertex AI Agent Engine runtime with `google-adk >= 1.29.0`, remember the **verified live regional split**: `AgentRegistry` discovers regional `McpServer` and `Agent` Services in **Bangkok (`asia-southeast3`)** (or **Singapore `asia-southeast1`**), while `GCPSkillRegistry` / `PlatformAgentConsumer` reads standalone **`Skills`** from **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK) and automatically filters to enterprise `private-*` skills:
+On a workstation or Vertex AI Agent Engine runtime with `google-adk >= 1.29.0`, remember the **verified Bangkok-first regional placement**: `AgentRegistry` discovers Bangkok `McpServer` and `Agent` Services in **Bangkok (`asia-southeast3`)** (while auto-registered Google/GCP remote MCP servers live in `global`), and `GCPSkillRegistry` / `PlatformAgentConsumer` reads standalone **`Skills`** from **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK) and automatically filters to enterprise `private-*` skills:
 
 ```bash
 # Install ADK with A2A, Agent Identity, and MCP extras (see platform_agent/requirements.txt)
@@ -164,37 +164,33 @@ curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
 
 ## Part 3: Workstream A Live GCP Validation & Cleanup Checkpoint
 
-If you deployed Workstream A to Google Cloud in Lab 03 (**Bangkok `asia-southeast3`** primary and optional **Singapore `asia-southeast1`** secondary), run the automated end-to-end live verification and — if you are stopping after Workstream A or want to avoid idle cloud charges — tear down all workshop Cloud Run, Agent Registry, and Artifact Registry resources cleanly:
+If you deployed Workstream A to Google Cloud in Lab 03 (**Bangkok `asia-southeast3`** primary + **`global`** Skills), run the automated end-to-end live verification and — if you are stopping after Workstream A or want to avoid idle cloud charges — tear down all workshop Cloud Run, Agent Registry, and Artifact Registry resources cleanly:
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 
-# 1. Validate live Cloud Run services, Agent Registry v1 skills/services, and 4-IDE feeds
-#    (ENABLE_SECONDARY defaults to false for Bangkok-only; pass ENABLE_SECONDARY=true if Singapore was deployed)
+# 1. Validate live Bangkok Cloud Run services (/health), Agent Registry v1 Bangkok Services + global Skills, and 4-IDE feeds:
 make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# Multi-region Bangkok + Singapore validation (includes live hub_sync failover drill):
-# make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
 # Direct script equivalent:
-# scripts/validate_live_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# scripts/validate_live_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 
 # 2. Tear down Live GCP Workstream A resources when finished (skip if continuing straight to live Workstream B!)
 # Track 2 (gcloud + Cloud Build):
 make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# Multi-region Bangkok + Singapore teardown:
-# make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
-# Direct script equivalent (add --delete-source-deploy-repo if you tested --deploy-mode source in a dedicated sandbox):
-# scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# Direct script equivalent (add --delete-source-deploy-repo ONLY if you tested --deploy-mode source in a dedicated sandbox):
+# scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 
 # Track 3 (Terraform): set force_destroy_staging_bucket = true in sandbox .tfvars if objects exist
 # terraform -chdir=terraform/core destroy
 ```
 
-> **Note on Deleting Skills with Revisions & Build Side Effects:**
+> **Note on Deleting Skills with Revisions, IAM v3 Teardown & Build Side Effects:**
 > - `gcloud agent-registry skills delete` does **not** expose a `--force` flag. `scripts/destroy_gcp.sh` automatically calls REST `DELETE https://agentregistry.googleapis.com/v1/projects/{p}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/{id}?force=true` with `Authorization` and `x-goog-user-project` headers so skills with revisions in `global` (or `us`/`eu`) are removed cleanly.
-> - If you tested `scripts/deploy_gcp.sh --deploy-mode source`, Cloud Run auto-creates an Artifact Registry repository named `cloud-run-source-deploy` in each deployed region. Pass `--delete-source-deploy-repo` to `scripts/destroy_gcp.sh` **only** in a dedicated single-purpose sandbox (never in a shared project!).
+> - On projects with IAM policy version 3 (containing conditional bindings), `gcloud projects remove-iam-policy-binding` requires explicit `--condition=None` (and `scripts/destroy_gcp.sh` also sweeps `deleted:serviceAccount:<email>?uid=...` tombstones cleanly).
+> - If you tested `scripts/deploy_gcp.sh --deploy-mode source`, Cloud Run auto-creates an Artifact Registry repository named `cloud-run-source-deploy` in `asia-southeast3`. Pass `--delete-source-deploy-repo` to `scripts/destroy_gcp.sh` **only** in a dedicated single-purpose sandbox (never in a shared project!).
 > - Regional Cloud Build user-owned staging buckets (`--default-buckets-behavior=regional-user-owned-bucket`) are retained by default to avoid disrupting other builds in the project; inspect with `gcloud storage buckets list --project="${GCP_PROJECT_ID}" --limit=50 --quiet`.
 
-> **APAC Regional Split Reminder (Transitioning to Workstream B):** As detailed in the [Attendee Quickstart](../attendee-quickstart.md), **Bangkok (`asia-southeast3`)** primary and **Singapore (`asia-southeast1`)** secondary host Cloud Run, Cloud Build, Artifact Registry, Agent Registry **`Services`** (`McpServer`, `Agent`, `Endpoint`) & `Bindings`, and Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing (Lab 07), while standalone **`Skills`** live in **`global`** (or `us`/`eu` for native CMEK `SkillEncryptionSpec`). For Lab 08 in APAC, place `AuthProvider` in **Singapore (`asia-southeast1`)** (`auth_provider_location = "asia-southeast1"`) and keep `enable_agent_gateway = false` unless deploying Agent Gateway + IAP v2 UAP in `us-central1`/`europe-west1`.
+> **Bangkok-First Regional Placement Reminder (Transitioning to Workstream B):** As detailed in the [Attendee Quickstart](../attendee-quickstart.md), **Bangkok (`asia-southeast3`)** is the primary region for Cloud Run, Cloud Build, Artifact Registry, Agent Registry **`Services`** (`McpServer`, `Agent`, `Endpoint`) & `Bindings`, GCS staging, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing (Lab 07), and Cloud Logging audit bucket (Lab 08). **Singapore (`asia-southeast1`)** is used **only** as the service-specific fallback for Workstream B **Agent Identity `AuthProvider`** (`auth_provider_location = "asia-southeast1"`, since Agent Identity is GA in Singapore and not yet available in Bangkok). Standalone **`Skills`** live in **`global`** (API supports `global`, `us`, `eu` only; `us`/`eu` required for native CMEK `SkillEncryptionSpec`), auto-registered Google/GCP remote MCP servers live in **`global`**, and optional Agent Gateway + IAP v2 UAP (`enable_agent_gateway = false` by default for APAC) is `us-central1`/`europe-west1` only.
 
 ---
 
@@ -215,7 +211,8 @@ make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 | `RuntimeError: Live ADK mode requires google-adk>=1.29.0` | Running `--mode adk` without installing optional `platform_agent/requirements.txt` | Install `pip install -r platform_agent/requirements.txt` or use `--mode rest` / `--print-config`. |
 | `400 INVALID_ARGUMENT` on `agents:search` | Passing `searchType` to `agents:search` or `mcpServers:search` | Only `skills:search` accepts `searchType` (`KEYWORD`\|`SEMANTIC`); `agents:search` and `mcpServers:search` accept `{"searchString": "..."}` only. |
 | `401 CREDENTIALS_MISSING` downloading `?alt=media` in Live GCP Mode | Stripped `Authorization` on live Agent Registry's same-origin `302` → `/download/v1/...?alt=media` redirect | `platform_agent/rest_consumer.py` preserves `Authorization` strictly on same-origin `/download/...` redirects without signed-URL tokens while stripping `Authorization` and `x-goog-*` on cross-origin and signed-URL redirects. |
-| Live `skills:search` or `list_skills` returns 404/empty in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu`), not single regions | Pass `--skills-location global` (or export `AGENT_REGISTRY_SKILLS_LOCATION=global`); `platform_agent` auto-defaults to `global` on `googleapis.com` and filters strictly to `private-*` enterprise skills. |
+| Live `skills:search` or `list_skills` returns 404/empty or times out in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu`), not single regions | Pass `--skills-location global` (or export `AGENT_REGISTRY_SKILLS_LOCATION=global`); `platform_agent` auto-defaults to `global` on `googleapis.com` and filters strictly to `private-*` enterprise skills. |
+| `gcloud projects remove-iam-policy-binding` fails or prompts during teardown on IAM v3 projects | Project IAM policy version 3 has unrelated conditional bindings and requires an explicit condition matcher | Pass `--condition=None` on both `add-iam-policy-binding` and `remove-iam-policy-binding` (already handled automatically by `scripts/deploy_gcp.sh` and `scripts/destroy_gcp.sh`). |
 
 ---
 

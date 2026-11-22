@@ -18,17 +18,19 @@ Start here -> Run `make preflight` from the repository root
 ├── Have a GCP project + `gcloud`, but NO Docker & NO Terraform?
 │   └── Track 2: Live GCP — Zero-Docker, Zero-Terraform (`gcloud` + Cloud Build)
 │       1. `make preflight`
-│       2. `scripts/deploy_gcp.sh --project "$GCP_PROJECT_ID" --primary-region asia-southeast3 [--enable-secondary]`
-│          (or `make gcp-deploy GCP_PROJECT_ID=<ID> [ENABLE_SECONDARY=true]`)
-│       3. `scripts/validate_live_gcp.sh` (or `make gcp-validate GCP_PROJECT_ID=<ID> [ENABLE_SECONDARY=true]`)
-│       4. `scripts/destroy_gcp.sh`       (or `make gcp-destroy GCP_PROJECT_ID=<ID> [ENABLE_SECONDARY=true]` — always clean up!)
+│       2. `scripts/deploy_gcp.sh --project "$GCP_PROJECT_ID" --region asia-southeast3 --skills-location global`
+│          (or `make gcp-deploy GCP_PROJECT_ID=<ID>`)
+│       3. `scripts/validate_live_gcp.sh --project "$GCP_PROJECT_ID" --region asia-southeast3 --skills-location global`
+│          (or `make gcp-validate GCP_PROJECT_ID=<ID>`)
+│       4. `scripts/destroy_gcp.sh --project "$GCP_PROJECT_ID" --region asia-southeast3 --skills-location global`
+│          (or `make gcp-destroy GCP_PROJECT_ID=<ID>` — always clean up!)
 │
 └── Have a GCP project + `gcloud` + Terraform >= 1.6.0 (Zero local Docker)?
     └── Track 3: Live GCP — Full IaC (Stage 1 Cloud Build -> Stage 2 Terraform)
         1. `make preflight`
         2. Stage 1 (Build images remotely first — avoids chicken-and-egg Terraform failures!):
            `scripts/build_images_cloudbuild.sh --project "$GCP_PROJECT_ID" --region asia-southeast3`
-        3. Stage 2 (Provision Workstream A core stack — Bangkok primary + optional Singapore secondary):
+        3. Stage 2 (Provision single Workstream A core stack in Bangkok `asia-southeast3` + `global` Skills):
            `make tf-core-plan && terraform -chdir=terraform/core apply`
         4. Optional Workstream B (Standalone Security & Governance — zero `terraform/core` state required):
            `make tf-sec-plan && terraform -chdir=terraform/security_governance apply`
@@ -39,31 +41,33 @@ Start here -> Run `make preflight` from the repository root
 | Track | Required Tools | GCP Account? | Local Docker? | Terraform? | Primary Commands |
 | :--- | :--- | :---: | :---: | :---: | :--- |
 | **Track 1: Offline Local Mode** | Python 3.12+ (`.venv`), `curl`, `make` | No | No | No | `make preflight`, `make smoke-local`, `make run-local-stack`, `make starter-check` |
-| **Track 2: Live GCP (`gcloud` + Cloud Build)** | Track 1 + `gcloud` CLI | Yes | **No** (Cloud Build) | **No** | `scripts/deploy_gcp.sh --project <ID> --primary-region asia-southeast3 [--enable-secondary]`, `scripts/validate_live_gcp.sh`, `scripts/destroy_gcp.sh` |
+| **Track 2: Live GCP (`gcloud` + Cloud Build)** | Track 1 + `gcloud` CLI | Yes | **No** (Cloud Build) | **No** | `scripts/deploy_gcp.sh --project <ID> --region asia-southeast3 --skills-location global`, `scripts/validate_live_gcp.sh`, `scripts/destroy_gcp.sh` |
 | **Track 3: Live GCP (Full IaC)** | Track 2 + Terraform `>= 1.6.0` (`hashicorp/google >= 7.39.0`) | Yes | **No** (Cloud Build) | Yes | Stage 1: `scripts/build_images_cloudbuild.sh` → Stage 2: `terraform -chdir=terraform/core apply` |
 
 > **Important Ordering Rule for Track 3 (Terraform):** Always run **Stage 1 (`scripts/build_images_cloudbuild.sh`) BEFORE Stage 2 (`terraform apply`)**. Deploying `terraform/core` on a fresh project before container images exist in Artifact Registry causes Cloud Run v2 creation to fail. [Lab 00](labs/00-environment-setup.md) handles authentication & pre-flight only; container builds and Cloud Run deployment happen in [Lab 03](labs/03-build-deploy-middleware.md).
 
 ---
 
-## 2. Verified APAC Regional Availability Matrix (Bangkok + Singapore + `global` Skills)
+## 2. Verified APAC Regional Placement Matrix (Bangkok Primary + Service-Specific Fallbacks)
 
-Live deployments follow a **verified regional split**:
-- **Bangkok (`asia-southeast3`, Primary) & Singapore (`asia-southeast1`, Secondary/DR):** Cloud Run v2, Cloud Build, Artifact Registry, Cloud Storage, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), Cloud Logging Audit Bucket, and **Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`) & `Bindings`**.
-- **`global` (Default for APAC — or `us` / `eu` for CMEK):** **Agent Registry Standalone `Skills` (`Skill`, `SkillRevision`, `Findings`)**, ingested once and shared seamlessly by both Bangkok primary and Singapore secondary Middleware (filtering automatically to private `private-*` skills so built-in Google first-party skills do not pollute enterprise catalogs).
+Live deployments run a **single, clean deployment anchored in Bangkok (`asia-southeast3`)** — with **no duplicate multi-region stacks** — falling back to Singapore or Global/Multi-Region **only** where a specific Google Cloud service or API requires it:
+- **Bangkok (`asia-southeast3`) — Primary Region:** Cloud Run v2 (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), Agent Registry `Services` (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`) & `Bindings`, Cloud Storage skill staging bucket, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), and Cloud Logging audit bucket.
+- **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`)** uses `auth_provider_location = "asia-southeast1"` because Agent Identity is GA in Singapore and not yet available in Bangkok.
+- **Global / Multi-Region (API-Required):** Agent Registry Standalone **`Skills`** (`global` default, or `us`/`eu` for CMEK — single-region `/skills` endpoints time out; automatically filtered to `private-*` skills), auto-registered Google/GCP remote MCP servers (`global`), optional native Skill CMEK (`us`/`eu` multi-regions only), and optional Network Services Agent Gateway (`us-central1`/`europe-west1` only; `enable_agent_gateway = false` by default for APAC).
 
-| Capability / Component | Workstream | Verified Live Location(s) | Notes & Terraform / CLI Toggles |
-| :--- | :---: | :--- | :--- |
-| **Agent Registry `Services` & Discovery** (`McpServer`, `Agent`, `Endpoint`, `Bindings`) | A & B | **Bangkok (`asia-southeast3`)** Primary<br>**Singapore (`asia-southeast1`)** Secondary / DR | Default `GCP_LOCATION=asia-southeast3`, `GCP_SECONDARY_LOCATION=asia-southeast1`. Note: A2A v1.0 cards omit legacy `stateTransitionHistory` and split `JSONRPC` (`/a2a`) vs. `HTTP+JSON` (`/a2a/http`) onto unique URLs. |
-| **Agent Registry Standalone `Skills`** (`Skill`, `SkillRevision`, `Findings`) | A & B | **`global`** *(default for APAC)*<br>or **`us` / `eu`** *(required for CMEK)* | Single-region locations (`asia-southeast3`/`asia-southeast1`) do not host standalone `Skills`. Set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"` (`--skills-location global`). Middleware (`INCLUDE_PUBLIC_SKILLS=false`) filters strictly to `private-*` skills; pass `--wait-for-scan` so async `ENABLED_BLOCKING` scans finish before promoting `defaultRevision`. |
-| **Cloud Run v2** (`polyglot-middleware`, `sample-mcp-server`, `sample-a2a-agent`) | A | **Bangkok (`asia-southeast3`)** Primary<br>**Singapore (`asia-southeast1`)** Secondary / DR | Deploy secondary region via `--enable-secondary` (Track 2) or `enable_secondary_region = true` (Track 3); test failover with `tools.hub_sync --fallback-middleware-url`. Probe **`/health`** (or `/v1/health`) externally because Google Frontend reserves `/healthz`. |
-| **Artifact Registry & Cloud Build** (`cloudbuild/*.yaml`) | A | **Bangkok (`asia-southeast3`)** & **Singapore (`asia-southeast1`)** | Regional builds use `--region=asia-southeast3` (and `asia-southeast1` when secondary is enabled) with `--default-buckets-behavior=regional-user-owned-bucket`. |
-| **Cloud Storage** (Skill Staging Bucket) | A | **Bangkok (`asia-southeast3`)** & **Singapore (`asia-southeast1`)** | P4SA granted `roles/storage.objectViewer` for `gcsSource` skill imports. |
-| **Cloud KMS Asymmetric Signing** (`EC_SIGN_P256_SHA256`) | B (Lab 07) | **Bangkok (`asia-southeast3`)** & **Singapore (`asia-southeast1`)** | Regional key ring in `asia-southeast3` (or `asia-southeast1`) for CI artifact signing & Middleware fail-closed tamper rejection. |
-| **Native Skill CMEK** (`SkillEncryptionSpec`, Preview) | B (Lab 07) | **`us` / `eu` multi-regions only** | Encryption at rest only (KMS in `us` for `us` skills, `europe` for `eu` skills; strict zero-skills precondition). For APAC (`global` Skills), use Google-managed encryption at rest + regional Cloud KMS `EC_SIGN_P256_SHA256` signing in `asia-southeast3`/`asia-southeast1`. |
-| **Agent Identity `AuthProvider`** (`google_agent_identity_auth_provider`) | B (Lab 08) | **Singapore (`asia-southeast1`)** *(APAC GA)* | Bangkok (`asia-southeast3`) does not host Agent Identity yet. Set `auth_provider_location = "asia-southeast1"` in `terraform/security_governance/terraform.tfvars`. |
-| **Network Services Agent Gateway + IAP v2 UAP** | B (Lab 08) | **`us-central1` / `europe-west1` only** | Keep `enable_agent_gateway = false` for APAC-only workshops; deploy with `agent_gateway_location = "us-central1"` or `"europe-west1"` when testing live Agent Gateway + IAP v2 UAP. |
-| **Cloud Logging Audit Bucket** (`agent-governance-audit`) | B (Lab 08) | **Bangkok (`asia-southeast3`)** & **Singapore (`asia-southeast1`)** | Keep `lock_audit_bucket = false` in workshop sandboxes (clean teardown); set `lock_audit_bucket = true` in production for irreversible WORM retention. |
+| Capability / Component | Workstream | Placement Tier | Verified Live Location | Notes & Terraform / CLI Toggles |
+| :--- | :---: | :--- | :--- | :--- |
+| **Cloud Run v2** (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`) | A | Primary | **Bangkok (`asia-southeast3`)** | Default `GCP_LOCATION=asia-southeast3` / `--region asia-southeast3`. Probe **`/health`** (or `/v1/health`) externally because Google Frontend reserves `/healthz`. |
+| **Cloud Build & Artifact Registry** (`cloudbuild/*.yaml`) | A | Primary | **Bangkok (`asia-southeast3`)** | Regional builds use `--region=asia-southeast3` with `--default-buckets-behavior=regional-user-owned-bucket` and `asia-southeast3-docker.pkg.dev`. |
+| **Agent Registry `Services` & `Bindings`** (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`) | A & B | Primary | **Bangkok (`asia-southeast3`)** | Default `location = "asia-southeast3"`. Note: A2A v1.0 cards omit legacy `stateTransitionHistory` and split `JSONRPC` (`/a2a`) vs. `HTTP+JSON` (`/a2a/http`) onto unique URLs. |
+| **Cloud Storage** (Skill Staging Bucket) | A | Primary | **Bangkok (`asia-southeast3`)** | P4SA granted `roles/storage.objectViewer` for `gcsSource` skill imports. |
+| **Cloud KMS Asymmetric Signing** (`EC_SIGN_P256_SHA256`) | B (Lab 07) | Primary | **Bangkok (`asia-southeast3`)** | Regional key ring in `asia-southeast3` for CI artifact signing & Middleware fail-closed tamper rejection. |
+| **Cloud Logging Audit Bucket** (`agent-governance-audit`) | B (Lab 08) | Primary | **Bangkok (`asia-southeast3`)** | Keep `lock_audit_bucket = false` in workshop sandboxes (clean teardown); set `lock_audit_bucket = true` in production for irreversible WORM retention. |
+| **Agent Identity Auth Manager (`AuthProvider`)** (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`) | B (Lab 08) | **Service-Specific Fallback** | **Singapore (`asia-southeast1`)** | Agent Identity is GA in Singapore and not yet available in Bangkok. Set `auth_provider_location = "asia-southeast1"` in `terraform/security_governance/terraform.tfvars`. |
+| **Agent Registry Standalone `Skills`** (`Skill`, `SkillRevision`, `Findings`) | A & B | **API-Mandated Global / Multi-Region** | **`global`** *(default)* or **`us` / `eu`** *(CMEK)* | API supports `global`, `us`, `eu` only (single-region `/skills` endpoints time out). Set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"` (`--skills-location global`). Middleware (`INCLUDE_PUBLIC_SKILLS=false`) filters strictly to `private-*` skills; pass `--wait-for-scan` so async `ENABLED_BLOCKING` scans finish before promoting `defaultRevision`. |
+| **Auto-Registered Google/GCP Remote MCP Servers** | A | **API-Mandated Global** | **`global`** | Google-managed remote MCP servers auto-register in `locations/global`. |
+| **Native Skill CMEK** (`SkillEncryptionSpec`, Preview) | B (Lab 07) | **API-Mandated Multi-Region** | **`us` / `eu` multi-regions only** | Encryption at rest only (KMS in `us` for `us` skills, `europe` for `eu` skills; strict zero-skills precondition). For APAC (`global` Skills), use Google-managed encryption at rest + regional Cloud KMS `EC_SIGN_P256_SHA256` signing in `asia-southeast3`. |
+| **Network Services Agent Gateway + IAP v2 UAP** | B (Lab 08) | **API-Mandated Regional Preview/GA** | **`us-central1` / `europe-west1` only** | Keep `enable_agent_gateway = false` by default for APAC workshops; deploy with `agent_gateway_location = "us-central1"` or `"europe-west1"` when testing live Agent Gateway + IAP v2 UAP. |
 
 ---
 
@@ -96,10 +100,10 @@ Live deployments follow a **verified regional split**:
 | `make demo-sync-repo` | Option 2: Shallow-clone & ingest a centralized GitLab/GitHub repo (`SKILLS_REPO_URL`, `SKILLS_REPO_SUBDIR`) |
 | `make demo-sync` | Legacy single-plugin sync for `gcp-finops-toolkit` only |
 | `make demo-hub-sync` | Hydrate `/tmp/acme-agent-hub-demo-home` for Claude Code, Copilot/VS Code, Codex, and Antigravity |
-| `make gcp-build` | Build & push all 3 container images remotely via Cloud Build (`scripts/build_images_cloudbuild.sh`, zero local Docker; add `ENABLE_SECONDARY=true` for Singapore) |
-| `make gcp-deploy` | Track 2 zero-Docker, zero-Terraform live GCP deploy to Bangkok `asia-southeast3` (add `ENABLE_SECONDARY=true` for Singapore secondary/DR) |
-| `make gcp-validate` | Validate live GCP Cloud Run endpoints, Agent Registry `v1` resources, and 4-IDE feeds (`scripts/validate_live_gcp.sh`; add `ENABLE_SECONDARY=true` for failover test) |
-| `make gcp-destroy` | Cleanly delete workshop Cloud Run services, Agent Registry skills/services, and staging resources (`scripts/destroy_gcp.sh`; add `ENABLE_SECONDARY=true` if secondary was deployed) |
+| `make gcp-build` | Build & push all 3 container images remotely via Cloud Build to Bangkok `asia-southeast3` (`scripts/build_images_cloudbuild.sh`, zero local Docker) |
+| `make gcp-deploy` | Track 2 zero-Docker, zero-Terraform live GCP deploy to Bangkok `asia-southeast3` + `global` Skills (`scripts/deploy_gcp.sh`) |
+| `make gcp-validate` | Validate live GCP Cloud Run endpoints (`/health`), Bangkok Agent Registry `v1` Services + `global` Skills, and 4-IDE feeds (`scripts/validate_live_gcp.sh`) |
+| `make gcp-destroy` | Cleanly delete workshop Cloud Run services, Agent Registry skills/services, and staging resources in Bangkok `asia-southeast3` + `global` (`scripts/destroy_gcp.sh`) |
 | `make tf-core-plan` / `make tf-sec-plan` | Preview Workstream A (`terraform/core/`) or standalone Workstream B (`terraform/security_governance/`) plans |
 
 ---

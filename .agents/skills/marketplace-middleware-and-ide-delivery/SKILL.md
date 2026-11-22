@@ -27,13 +27,13 @@ What are you trying to do?
 ├── Modify or debug Polyglot Middleware endpoints, ?alt=media downloads, Polyglot ZIPs, or /mcp
 │   └── Inspect middleware/app/{main,config,registry_client,polyglot_builder,mcp_gateway,security_verifier}.py
 │       -> See references/middleware-runtime-and-mcp-gateway.md
-├── Build & deploy polyglot-middleware (and sample MCP/A2A workloads) to Cloud Run (Zero Local Docker!)
-│   ├── No-Terraform track -> `scripts/deploy_gcp.sh --project <ID> --primary-region asia-southeast3 [--enable-secondary]` (`make gcp-deploy`)
+├── Build & deploy polyglot-middleware (and sample MCP/A2A workloads) to Cloud Run in Bangkok (asia-southeast3 — Zero Local Docker!)
+│   ├── No-Terraform track -> `scripts/deploy_gcp.sh --project <ID> --region asia-southeast3 --skills-location global` (`make gcp-deploy`)
 │   └── Full IaC track -> Stage 1 `scripts/build_images_cloudbuild.sh` (`cloudbuild/*.yaml`) -> Stage 2 `terraform/core/cloud_run.tf`
 │       -> See references/middleware-runtime-and-mcp-gateway.md
 ├── Roll out governed plugins or /mcp gateway to developer workstations (4 IDEs)
-│   ├── Full local Polyglot hydration + Bangkok -> Singapore failover
-│   │   └── Run `python -m tools.hub_sync sync --middleware-url <bkk> --fallback-middleware-url <sg> --tools all` + `status`
+│   ├── Full local Polyglot hydration from Bangkok Cloud Run Middleware
+│   │   └── Run `python -m tools.hub_sync sync --middleware-url <bkk-middleware-url> --tools all` + `status`
 │   └── Zero-disk MCP-only onboarding (dynamic load_verified_skill without local ZIPs)
 │       └── Run `python -m tools.hub_sync sync --bootstrap-mcp-only`
 │       -> See references/hub-sync-and-adk-consumption.md
@@ -61,7 +61,7 @@ What are you trying to do?
 | **5** | Preserve ownership-tracked `.sync-manifest.json` atomic merges in `tools.hub_sync` and prune **only** on clean full syncs. | Overwrite IDE dotfiles wholesale or prune entries after partial fetches / `--bootstrap-mcp-only`. | `tools/hub_sync/hydration.py` validates every ZIP in memory before touching disk, writes via `NamedTemporaryFile` → `fsync` → `os.replace`, preserves user-authored MCP servers and `disabled`/`disabledTools` toggles, and skips pruning on errors or bootstrap mode. |
 | **6** | Install `google-adk[a2a,agent-identity,mcp]>=1.29.0`, call `CredentialManager.register_auth_provider(GcpAuthProvider())`, set `GCP_PROJECT_ID`/`AGENT_REGISTRY_BASE_URL` explicitly, and omit `searchType` on `agents:search`/`mcpServers:search`. | Install bare `google-adk`, skip `GcpAuthProvider`, assume `GOOGLE_CLOUD_*` overrides `GCP_*`, or pass `searchType` to non-skill searches. | Missing extras raise `ImportError`; skipping `GcpAuthProvider()` breaks `Binding` auto-resolution; `adk_orchestrator.py` prioritizes `GCP_PROJECT_ID`/`GCP_LOCATION`/`AGENT_REGISTRY_BASE_URL` over `GOOGLE_CLOUD_*`/`AGENT_REGISTRY_ENDPOINT`; and only `skills:search` accepts `searchType`. |
 | **7** | Build images remotely using the checked-in `cloudbuild/*.yaml` configs (`scripts/build_images_cloudbuild.sh` or `scripts/deploy_gcp.sh`) with `--region=asia-southeast3` and `--default-buckets-behavior=regional-user-owned-bucket`. | Run `gcloud builds submit --tag ... middleware/`, write throwaway `/tmp/cloudbuild-*.yaml` heredocs, pass a nonexistent `--file` flag, or require local Docker. | `middleware/Dockerfile` copies both `schemas/` and `middleware/` from repo root; checked-in `cloudbuild/{middleware,sample-mcp-server,sample-a2a-agent}.yaml` enforce `CLOUD_LOGGING_ONLY` + `_IMAGE_URI` with zero local Docker. |
-| **8** | Keep the verified live APAC split (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `INCLUDE_PUBLIC_SKILLS=false` filtering strictly to `private-*`, regional `Services` in `asia-southeast3`/`asia-southeast1`), probe **`/health`** (or `/v1/health`) externally on Cloud Run, and target `finops-advisor-agent` explicitly on live `agents[]`. | Point live standalone `Skills` at single-region `asia-southeast3`, probe `/healthz` externally on `https://*.run.app`, or assume `agents[0]` is your custom A2A agent. | Google Frontend (GFE) intercepts external `/healthz` with HTML `404`; live Agent Registry lists Google Workspace Agent ahead of `finops-advisor-agent` and nests `card.content.supportedInterfaces` (`mcp_gateway.py` handles both); `CatalogService.build_snapshot()` bounds concurrency with `Semaphore(8)`. |
+| **8** | Keep the verified Bangkok-first placement (`GCP_LOCATION=asia-southeast3` for Cloud Run + Agent Registry `Services`, `AGENT_REGISTRY_SKILLS_LOCATION=global`, `INCLUDE_PUBLIC_SKILLS=false` filtering strictly to `private-*`), probe **`/health`** (or `/v1/health`) externally on Cloud Run, and target `finops-advisor-agent` explicitly on live `agents[]`. | Deploy duplicate multi-region Cloud Run stacks, point live standalone `Skills` at single-region `asia-southeast3`, probe `/healthz` externally on `https://*.run.app`, or assume `agents[0]` is your custom A2A agent. | Google Frontend (GFE) intercepts external `/healthz` with HTML `404`; single-region `/skills` endpoints time out; live Agent Registry lists Google Workspace Agent ahead of `finops-advisor-agent` and nests `card.content.supportedInterfaces` (`mcp_gateway.py` handles both); `CatalogService.build_snapshot()` bounds concurrency with `Semaphore(8)`. |
 
 ---
 
@@ -85,14 +85,14 @@ curl -fsSL -D - http://127.0.0.1:8080/v1/plugins/gcp-finops-toolkit.zip -o /tmp/
   | grep -i "x-bundle-sha256"
 ```
 
-**Live GCP Production Mode — Zero Local Docker (Bangkok `asia-southeast3` Primary + Optional Singapore `asia-southeast1` Secondary):**
+**Live GCP Production Mode — Zero Local Docker (Bangkok `asia-southeast3` Primary + `global` Skills):**
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 export GCP_LOCATION="asia-southeast3"
 
-# Track 2 (Zero-Terraform): deploy Bangkok primary + optional Singapore secondary in one command
-# scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# Track 2 (Zero-Terraform): deploy single Bangkok stack + global Skills in one command
+# scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 # make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 # make gcp-destroy  GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 
@@ -146,15 +146,13 @@ make demo-hub-sync
   --middleware-url http://127.0.0.1:8080 --home /tmp/acme-agent-hub-bootstrap-home --tools all --bootstrap-mcp-only --no-exec
 ```
 
-**Live GCP Production Mode** (authenticated Cloud Run Middleware into real developer `$HOME` with Bangkok → Singapore failover):
+**Live GCP Production Mode** (authenticated Bangkok Cloud Run Middleware into real developer `$HOME`):
 
 ```bash
 export HUB_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw middleware_url)"
-export HUB_FALLBACK_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw secondary_middleware_url)"
 export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token --quiet)"
 .venv/bin/python -m tools.hub_sync sync \
   --middleware-url "${HUB_MIDDLEWARE_URL}" \
-  ${HUB_FALLBACK_MIDDLEWARE_URL:+--fallback-middleware-url "${HUB_FALLBACK_MIDDLEWARE_URL}"} \
   --tools all
 .venv/bin/python -m tools.hub_sync status --json
 ```

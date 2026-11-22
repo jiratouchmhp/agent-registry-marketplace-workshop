@@ -6,16 +6,15 @@ Authoritative reference for `middleware/app/` (`main.py`, `config.py`, `registry
 
 ## 1. Environment Variables (`middleware/app/config.py`)
 
-`MiddlewareSettings.from_env()` reads 22 environment variables. Note two critical behaviors: (1) `MiddlewareSettings` defaults `REQUIRE_KMS_SIGNATURE` to **`true`** (fail-closed), whereas `Makefile`'s `make run-middleware` sets `REQUIRE_KMS_SIGNATURE ?= false` for local Workstream A labs; (2) when targeting live `googleapis.com` with a single-region `GCP_LOCATION` (`asia-southeast3` / `asia-southeast1`), `effective_skills_location` automatically defaults to **`global`** while `INCLUDE_PUBLIC_SKILLS=false` filters strictly to enterprise `private-*` skills.
+`MiddlewareSettings.from_env()` reads 21 environment variables. Note two critical behaviors: (1) `MiddlewareSettings` defaults `REQUIRE_KMS_SIGNATURE` to **`true`** (fail-closed), whereas `Makefile`'s `make run-middleware` sets `REQUIRE_KMS_SIGNATURE ?= false` for local Workstream A labs; (2) when targeting live `googleapis.com` with single-region `GCP_LOCATION` (`asia-southeast3`), `effective_skills_location` automatically defaults to **`global`** while `INCLUDE_PUBLIC_SKILLS=false` filters strictly to enterprise `private-*` skills.
 
 | Environment Variable | Code Default (`config.py`) | Local Workshop (`make run-middleware`) | Live GCP Production (Cloud Run) | Purpose |
 |---|---|---|---|---|
 | `AGENT_REGISTRY_BASE_URL` | `http://127.0.0.1:8090/v1` | `http://127.0.0.1:8090/v1` | `https://agentregistry.googleapis.com/v1` | Upstream Agent Registry `v1` REST base URL |
 | `GCP_PROJECT_ID` | `acme-agent-governance` | `acme-agent-governance` | `${var.project_id}` | Catalog GCP project hosting standalone skills & services |
-| `GCP_LOCATION` | `asia-southeast3` | `asia-southeast3` | `${var.location}` (Bangkok primary `asia-southeast3`, Singapore DR `asia-southeast1`) | Cloud Run region & default regional Agent Registry `Services` location |
-| `GCP_SECONDARY_LOCATION` | `asia-southeast1` | `asia-southeast1` | `${var.secondary_location}` (`asia-southeast1` / peer region) | Secondary/failover region metadata reported on `/health` & `/v1/catalog` |
+| `GCP_LOCATION` | `asia-southeast3` | `asia-southeast3` | `${var.location}` (Bangkok primary `asia-southeast3`) | Cloud Run region & default regional Agent Registry `Services` location |
 | `AGENT_REGISTRY_LOCATION` | `""` *(falls back to `GCP_LOCATION`)* | `""` | `""` (or explicit override) | Optional override to decouple Agent Registry `Services` location from Cloud Run compute region |
-| `AGENT_REGISTRY_SKILLS_LOCATION` | `""` *(auto-defaults to `global` on `googleapis.com`)* | `""` (`asia-southeast3` on local mock) | `global` (`var.skills_location`, or `us`/`eu` for CMEK) | Shared multi-region location for standalone `Skills` read by both Bangkok & Singapore Middleware |
+| `AGENT_REGISTRY_SKILLS_LOCATION` | `""` *(auto-defaults to `global` on `googleapis.com`)* | `""` (`asia-southeast3` on local mock) | `global` (`var.skills_location`, or `us`/`eu` for CMEK) | API-mandated global/multi-region location for standalone `Skills` |
 | `INCLUDE_PUBLIC_SKILLS` | `false` | `false` | `false` (strictly `private-*` enterprise skills) | Set `false` so Google's built-in first-party skills in `global` do not pollute enterprise catalogs |
 | `MIDDLEWARE_PUBLIC_URL` | `http://127.0.0.1:8080` | `http://127.0.0.1:8080` | `https://polyglot-middleware-<NUM>.<LOC>.run.app` (or custom domain) | Public base URL embedded in marketplace JSONs, `bundleUrl`, and `agent-hub-gw` `/mcp` entry |
 | `REQUIRE_KMS_SIGNATURE` | `true` | `false` (enable in Lab 07) | `true` (`var.require_kms_signature = true`) | Fail-closed Cloud KMS `EC_SIGN_P256_SHA256` verification gate |
@@ -164,18 +163,18 @@ gcloud builds submit --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" \
   --config=cloudbuild/sample-a2a-agent.yaml \
   --substitutions="_IMAGE_URI=${AR_PREFIX}/sample-a2a-agent:1.0.0" . --quiet
 
-# Track 2 (Zero-Terraform): deploy Bangkok primary + optional Singapore secondary end-to-end:
-# scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# Track 2 (Zero-Terraform): deploy single Bangkok stack + global Skills end-to-end:
+# scripts/deploy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 ```
 
 **Key `terraform/core/cloud_run.tf` & `variables.tf` settings for `polyglot-middleware`:**
 - **Service account:** `agent-marketplace-middleware@${var.project_id}.iam.gserviceaccount.com` with **strictly `roles/agentregistry.viewer`** (plus `roles/cloudkms.publicKeyViewer` added by Workstream B when KMS signing is enabled).
 - **Container & scaling:** port `8080`, `min_instance_count = 0`, `max_instance_count = 5`, `cpu = "1"`, `memory = "512Mi"`, HTTP startup probe on `GET /healthz`.
-- **Multi-region failover:** set `enable_secondary_region = true` (`secondary_location = "asia-southeast1"`) to deploy active-standby Cloud Run + Artifact Registry in Singapore (exported as `secondary_middleware_url` for `tools.hub_sync --fallback-middleware-url`).
+- **Single-region Bangkok placement:** `location = "asia-southeast3"` for Cloud Run, Artifact Registry, GCS staging, and Agent Registry `Services`, reading standalone `Skills` from `skills_location = "global"` (no duplicate multi-region stacks).
 - **Production variables (`terraform/core/variables.tf`):**
   - `middleware_image`: defaults to `${ar_image_prefix}/polyglot-middleware:latest` in `cloud_run.tf`; when deploying a tagged build (e.g. `:1.0.0`) or immutable `@sha256:...` digest in production, set `TF_VAR_middleware_image` or `middleware_image` in `terraform/core/terraform.tfvars` before `terraform apply`.
   - `middleware_public_url`: custom domain / HTTPS LB URL (defaults to `https://polyglot-middleware-${project_number}.${location}.run.app`).
   - `allow_unauthenticated_workshop_demo = false` (default secure — requires `roles/run.invoker` + `Authorization: Bearer $(gcloud auth print-identity-token --quiet)`).
   - `deletion_protection = true` in production (`false` default for ephemeral workshops).
   - `require_kms_signature = true` + `kms_public_key_pem_path` (wired directly in `terraform/core/cloud_run.tf`). Note: `KMS_SIGNING_KEY_VERSION` is a runtime container env var with no Terraform variable in `terraform/core/variables.tf` yet — to fetch the public key directly from Cloud KMS `/publicKey`, either add an `env` block for `KMS_SIGNING_KEY_VERSION` in `terraform/core/cloud_run.tf` or run `gcloud run services update polyglot-middleware --project="${GCP_PROJECT_ID}" --region="${GCP_LOCATION}" --update-env-vars="KMS_SIGNING_KEY_VERSION=projects/<p>/locations/<l>/keyRings/<r>/cryptoKeys/<k>/cryptoKeyVersions/<v>" --quiet`.
-- **Terraform outputs (`terraform/core/outputs.tf`):** `middleware_url`, `middleware_mcp_url`, `secondary_middleware_url`, `secondary_middleware_mcp_url`, `middleware_sa_email`, `sample_mcp_server_url`, `sample_a2a_agent_url`, `artifact_registry_repository_url`.
+- **Terraform outputs (`terraform/core/outputs.tf`):** `middleware_url`, `middleware_mcp_url`, `middleware_sa_email`, `sample_mcp_server_url`, `sample_a2a_agent_url`, `artifact_registry_repository_url`.

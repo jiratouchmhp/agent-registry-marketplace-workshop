@@ -15,7 +15,7 @@ By the end of this lab, you will:
    - **OpenAI Codex**
    - **Google Antigravity** (including `agy plugin install`, `agy plugin list --json`, and `agy --agent`)
 2. Test **ownership-tracked safe merging**: prove that personal user MCP servers and `disabled` / `disabledTools` toggles survive re-syncs untouched, and that removed enterprise plugins are pruned *only* on clean full syncs.
-3. Configure **Bangkok (`asia-southeast3`) → Singapore (`asia-southeast1`) workstation failover** using `--fallback-middleware-url` (`HUB_FALLBACK_MIDDLEWARE_URL`) and run zero-disk **Bootstrap MCP-Only Mode** (`--bootstrap-mcp-only`) so developers can discover and load verified skills dynamically through the Middleware `/mcp` gateway without extracting plugin files locally.
+3. Run zero-disk **Bootstrap MCP-Only Mode** (`--bootstrap-mcp-only`) so developers can discover and load verified skills dynamically through the Middleware `/mcp` gateway without extracting plugin files locally.
 4. Practice atomic writes and safe config merging in [starter/lab04_hub_sync_adapter_exercise.py](../../starter/lab04_hub_sync_adapter_exercise.py).
 
 ---
@@ -66,11 +66,11 @@ Use an isolated demo home directory (`/tmp/acme-agent-hub-demo-home`) first so y
    .venv/bin/python -m tools.hub_sync status --home "${DEMO_HOME}" --json
    ```
 
-### Mode B: Live GCP Mode (Cloud Run Middleware — Bangkok Primary + Singapore Failover Sharing `global` Skills)
+### Mode B: Live GCP Mode (Bangkok `asia-southeast3` Cloud Run Middleware Reading `global` Skills)
 
-Point `--middleware-url` at your **Bangkok (`asia-southeast3`)** primary Cloud Run Middleware, optionally pass **`--fallback-middleware-url`** (or export `HUB_FALLBACK_MIDDLEWARE_URL`) pointing at your **Singapore (`asia-southeast1`)** secondary deployment for automatic failover, and supply an identity token via `HUB_AUTH_TOKEN` (required when `allow_unauthenticated_workshop_demo = false`). Because both Bangkok and Singapore Middlewares read the same **`global`** Agent Registry `Skills` catalog (`private-*` auto-filtered) while linking their own regional `McpServer` and `Agent` Services, failover seamlessly preserves every enterprise skill while routing MCP/A2A traffic locally to Singapore!
+Point `--middleware-url` at your **Bangkok (`asia-southeast3`)** Cloud Run Middleware and supply an identity token via `HUB_AUTH_TOKEN` (required when `allow_unauthenticated_workshop_demo = false`). Your Bangkok Middleware reads standalone `Skills` from **`global`** (`private-*` auto-filtered) while linking your Bangkok (`asia-southeast3`) `McpServer` and `Agent` Services seamlessly.
 
-#### Load Middleware URLs (Track 2 — Zero-Terraform `scripts/deploy_gcp.sh`)
+#### Load Middleware URL (Track 2 — Zero-Terraform `scripts/deploy_gcp.sh`)
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
@@ -84,57 +84,33 @@ if p.is_file():
     doc = json.loads(p.read_text(encoding="utf-8"))
     regions = doc.get("regions", {})
     pri = regions.get("asia-southeast3", {}).get("cloud_run", {}).get("polyglot_middleware", {}).get("url", "")
-    sec = regions.get("asia-southeast1", {}).get("cloud_run", {}).get("polyglot_middleware", {}).get("url", "")
     print(f"export HUB_MIDDLEWARE_URL={shlex.quote(pri)}")
-    print(f"export HUB_FALLBACK_MIDDLEWARE_URL={shlex.quote(sec)}")
 EOF
 )"
 
 # Option 2: Or query Cloud Run directly via gcloud (works even if /tmp manifest was cleared)
 export HUB_MIDDLEWARE_URL="${HUB_MIDDLEWARE_URL:-$(gcloud run services describe polyglot-middleware \
   --project="${GCP_PROJECT_ID}" --region="asia-southeast3" --format="value(status.url)" --quiet)}"
-export HUB_FALLBACK_MIDDLEWARE_URL="${HUB_FALLBACK_MIDDLEWARE_URL:-$(gcloud run services describe polyglot-middleware \
-  --project="${GCP_PROJECT_ID}" --region="asia-southeast1" --format="value(status.url)" --quiet 2>/dev/null || true)}"
 ```
 
-#### Load Middleware URLs (Track 3 — Full Terraform IaC)
+#### Load Middleware URL (Track 3 — Full Terraform IaC)
 
 ```bash
 export HUB_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw middleware_url)"
-export HUB_FALLBACK_MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw secondary_middleware_url)"
 ```
 
-#### Hydrate All 4 IDEs with Bangkok → Singapore Failover
+#### Hydrate All 4 IDEs from Bangkok Cloud Run Middleware
 
 ```bash
 export HUB_AUTH_TOKEN="$(gcloud auth print-identity-token --quiet)"
 
 # Hydrate all 4 IDEs in your real developer HOME (omit --no-exec to run `agy plugin install`)
-# If Bangkok is unreachable, tools.hub_sync automatically fails over to Singapore!
 .venv/bin/python -m tools.hub_sync sync \
   --middleware-url "${HUB_MIDDLEWARE_URL}" \
-  ${HUB_FALLBACK_MIDDLEWARE_URL:+--fallback-middleware-url "${HUB_FALLBACK_MIDDLEWARE_URL}"} \
   --tools all
 
 .venv/bin/python -m tools.hub_sync status
 ```
-
-#### Test Multi-Region Failover Locally (Zero GCP Required)
-
-Simulate a Bangkok regional outage locally by pointing `--middleware-url` at an unused port while passing your healthy local middleware as `--fallback-middleware-url`:
-
-```bash
-.venv/bin/python -m tools.hub_sync sync \
-  --middleware-url http://127.0.0.1:18080 \
-  --fallback-middleware-url http://127.0.0.1:8080 \
-  --home /tmp/acme-agent-hub-failover-home \
-  --tools all \
-  --no-exec
-
-.venv/bin/python -m tools.hub_sync status --home /tmp/acme-agent-hub-failover-home
-```
-
-Observe that `tools.hub_sync` logs the failover cleanly, hydrates from `http://127.0.0.1:8080`, and records the active healthy endpoint in `.sync-manifest.json`.
 
 ---
 

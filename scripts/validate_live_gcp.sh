@@ -1,15 +1,13 @@
 #!/usr/bin/env bash
 # Live Google Cloud End-to-End Attendee Validation Script.
 #
-# Validates a live primary Bangkok (asia-southeast3) deployment plus optional
-# secondary Singapore (asia-southeast1) failover deployment:
-#   1. Primary /health, /v1/catalog, 4x /v1/marketplace/*.json, plugin ZIPs +
+# Validates a live Bangkok (asia-southeast3) primary deployment + global Skills:
+#   1. Middleware /health, /v1/catalog, 4x /v1/marketplace/*.json, plugin ZIPs +
 #      X-Bundle-Sha256, and POST /mcp (initialize, tools/list, load_verified_skill,
-#      call_remote_a2a_agent)
-#   2. Direct Agent Registry v1 ?alt=media HTTP 302 redirect header-handling check
+#      OIDC-authenticated call_remote_a2a_agent)
+#   2. Direct Agent Registry v1 ?alt=media HTTP 302 redirect header-handling & SHA-256 check
 #   3. tools.hub_sync sync against live Cloud Run URL (with HUB_AUTH_TOKEN)
 #   4. platform_agent.adk_orchestrator --mode rest against live Agent Registry v1
-#   5. Optional secondary region /health, /v1/catalog, and hub_sync failover test
 
 set -euo pipefail
 
@@ -18,14 +16,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 
 PROJECT_ID="${GCP_PROJECT_ID:-}"
-PRIMARY_REGION="${GCP_LOCATION:-asia-southeast3}"
-SECONDARY_REGION="${GCP_SECONDARY_LOCATION:-asia-southeast1}"
+REGION="${GCP_LOCATION:-asia-southeast3}"
+REGION_EXPLICIT="false"
 SKILLS_LOCATION="${AGENT_REGISTRY_SKILLS_LOCATION:-global}"
 SKILLS_LOCATION_EXPLICIT="false"
-ENABLE_SECONDARY="false"
 STATE_FILE=""
 MIDDLEWARE_URL=""
-SECONDARY_MIDDLEWARE_URL=""
 NAME_PREFIX=""
 DRY_RUN="false"
 
@@ -37,17 +33,14 @@ Validate a live Enterprise Agent Marketplace GCP deployment end-to-end using
 authenticated gcloud identity and OAuth access tokens.
 
 Options:
-  --project ID                      Google Cloud project ID (or $GCP_PROJECT_ID)
-  --primary-region REGION           Primary GCP region (default: asia-southeast3)
-  --secondary-region REGION         Secondary GCP region (default: asia-southeast1)
-  --skills-location LOC             Agent Registry Skills location: global|us|eu (default: global)
-  --enable-secondary                Validate secondary region + hub_sync failover
-  --state-file PATH                 Deployment manifest JSON from deploy_gcp.sh
-  --middleware-url URL              Override primary Middleware HTTPS URL
-  --secondary-middleware-url URL    Override secondary Middleware HTTPS URL
-  --name-prefix PREFIX              Optional service name prefix (when not using state file)
-  --dry-run                         Print planned checks without calling live endpoints
-  -h, --help                        Show this help message and exit
+  --project ID              Google Cloud project ID (or $GCP_PROJECT_ID)
+  --region REGION           Primary GCP region (default: asia-southeast3, Bangkok; alias: --primary-region)
+  --skills-location LOC     Agent Registry Skills location: global|us|eu (default: global)
+  --state-file PATH         Deployment manifest JSON from deploy_gcp.sh
+  --middleware-url URL      Override Middleware HTTPS URL
+  --name-prefix PREFIX      Optional service name prefix (when not using state file)
+  --dry-run                 Print planned checks without calling live endpoints
+  -h, --help                Show this help message and exit
 EOF
 }
 
@@ -57,12 +50,9 @@ while [[ $# -gt 0 ]]; do
       PROJECT_ID="$2"
       shift 2
       ;;
-    --primary-region)
-      PRIMARY_REGION="$2"
-      shift 2
-      ;;
-    --secondary-region)
-      SECONDARY_REGION="$2"
+    --region|--primary-region)
+      REGION="$2"
+      REGION_EXPLICIT="true"
       shift 2
       ;;
     --skills-location)
@@ -70,21 +60,12 @@ while [[ $# -gt 0 ]]; do
       SKILLS_LOCATION_EXPLICIT="true"
       shift 2
       ;;
-    --enable-secondary)
-      ENABLE_SECONDARY="true"
-      shift
-      ;;
     --state-file)
       STATE_FILE="$2"
       shift 2
       ;;
     --middleware-url)
       MIDDLEWARE_URL="$2"
-      shift 2
-      ;;
-    --secondary-middleware-url)
-      SECONDARY_MIDDLEWARE_URL="$2"
-      ENABLE_SECONDARY="true"
       shift 2
       ;;
     --name-prefix)
@@ -147,29 +128,29 @@ if [[ -z "${STATE_FILE}" ]]; then
   fi
 fi
 
-A2A_PRIMARY_URL=""
+A2A_URL=""
 if [[ -n "${STATE_FILE}" && -f "${STATE_FILE}" ]]; then
-  eval "$("${PYTHON_BIN}" - "${STATE_FILE}" "${PRIMARY_REGION}" "${SECONDARY_REGION}" <<'PYEOF'
+  eval "$("${PYTHON_BIN}" - "${STATE_FILE}" "${REGION}" "${REGION_EXPLICIT}" <<'PYEOF'
 import json, shlex, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
-pri, sec = sys.argv[2], sys.argv[3]
+req_region = sys.argv[2]
+region_explicit = sys.argv[3] == "true"
+state_region = doc.get("region") or doc.get("primary_region") or ""
+eff_region = req_region if region_explicit else (state_region or req_region)
 regions = doc.get("regions", {})
-pri_mw = regions.get(pri, {}).get("cloud_run", {}).get("polyglot_middleware", {}).get("url", "")
-pri_a2a = regions.get(pri, {}).get("cloud_run", {}).get("sample_a2a_agent", {}).get("url", "")
-sec_mw = regions.get(sec, {}).get("cloud_run", {}).get("polyglot_middleware", {}).get("url", "")
-sec_en = "true" if doc.get("enable_secondary") else "false"
+reg_doc = regions.get(eff_region, {})
+mw_url = reg_doc.get("cloud_run", {}).get("polyglot_middleware", {}).get("url", "")
+a2a_url = reg_doc.get("cloud_run", {}).get("sample_a2a_agent", {}).get("url", "")
 skills_loc = doc.get("skills_location", "")
-print(f"STATE_MW_URL={shlex.quote(pri_mw)}")
-print(f"STATE_A2A_URL={shlex.quote(pri_a2a)}")
-print(f"STATE_SEC_MW_URL={shlex.quote(sec_mw)}")
-print(f"STATE_ENABLE_SEC={shlex.quote(sec_en)}")
+print(f"STATE_REGION={shlex.quote(state_region)}")
+print(f"STATE_MW_URL={shlex.quote(mw_url)}")
+print(f"STATE_A2A_URL={shlex.quote(a2a_url)}")
 print(f"STATE_SKILLS_LOC={shlex.quote(skills_loc)}")
 PYEOF
 )"
+  [[ "${REGION_EXPLICIT}" == "false" && -n "${STATE_REGION:-}" ]] && REGION="${STATE_REGION}"
   [[ -z "${MIDDLEWARE_URL}" && -n "${STATE_MW_URL:-}" ]] && MIDDLEWARE_URL="${STATE_MW_URL}"
-  [[ -n "${STATE_A2A_URL:-}" ]] && A2A_PRIMARY_URL="${STATE_A2A_URL}"
-  [[ -z "${SECONDARY_MIDDLEWARE_URL}" && -n "${STATE_SEC_MW_URL:-}" ]] && SECONDARY_MIDDLEWARE_URL="${STATE_SEC_MW_URL}"
-  [[ "${ENABLE_SECONDARY}" == "false" && "${STATE_ENABLE_SEC:-false}" == "true" ]] && ENABLE_SECONDARY="true"
+  [[ -n "${STATE_A2A_URL:-}" ]] && A2A_URL="${STATE_A2A_URL}"
   [[ "${SKILLS_LOCATION_EXPLICIT}" == "false" && -n "${STATE_SKILLS_LOC:-}" ]] && SKILLS_LOCATION="${STATE_SKILLS_LOC}"
 fi
 
@@ -182,33 +163,26 @@ if [[ "${DRY_RUN}" == "true" ]]; then
   echo "========================================================================"
   echo "[DRY-RUN] Live GCP End-to-End Validation Plan"
   echo "========================================================================"
-  echo "Project          : ${PROJECT_ID}"
-  echo "Primary Region   : ${PRIMARY_REGION}"
-  echo "Secondary Region : ${SECONDARY_REGION} (enabled=${ENABLE_SECONDARY})"
-  echo "Skills Location  : ${SKILLS_LOCATION}"
+  echo "Project         : ${PROJECT_ID}"
+  echo "Region          : ${REGION}"
+  echo "Skills Location : ${SKILLS_LOCATION}"
   echo "Checks:"
-  echo "  1. Primary ${PRIMARY_REGION} /health, /v1/catalog (shared ${SKILLS_LOCATION} skills + ${PRIMARY_REGION} MCP/A2A), 4x /v1/marketplace/*.json, plugin ZIP SHA-256, POST /mcp"
-  echo "  2. Direct Agent Registry v1 ?alt=media 302 redirect header-handling & SHA-256 check (locations/${SKILLS_LOCATION}/skills)"
-  echo "  3. tools.hub_sync sync against live primary Middleware with HUB_AUTH_TOKEN into isolated temp HOME"
-  echo "  4. platform_agent.adk_orchestrator --mode rest against https://agentregistry.googleapis.com/v1 (${PRIMARY_REGION}, skills=${SKILLS_LOCATION})"
-  if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-    echo "  5. Secondary ${SECONDARY_REGION} /health, /v1/catalog (shared ${SKILLS_LOCATION} skills + ${SECONDARY_REGION} MCP/A2A), and tools.hub_sync --fallback-middleware-url failover"
-  fi
+  echo "  [1/4] ${REGION} Middleware /health, /v1/catalog (${SKILLS_LOCATION} skills + ${REGION} MCP/A2A), 4x /v1/marketplace/*.json, plugin ZIP SHA-256, POST /mcp (load_verified_skill + OIDC call_remote_a2a_agent)"
+  echo "  [2/4] Direct Agent Registry v1 ?alt=media 302 redirect header-handling & SHA-256 check (locations/${SKILLS_LOCATION}/skills)"
+  echo "  [3/4] tools.hub_sync sync against live Middleware with HUB_AUTH_TOKEN into isolated temp HOME"
+  echo "  [4/4] platform_agent.adk_orchestrator --mode rest against https://agentregistry.googleapis.com/v1 (${REGION}, skills=${SKILLS_LOCATION})"
   exit 0
 fi
 
 if [[ -z "${MIDDLEWARE_URL}" ]]; then
-  MIDDLEWARE_URL="$("${GCLOUD}" run services describe "${MW_SVC_NAME}" --project="${PROJECT_ID}" --region="${PRIMARY_REGION}" --format="value(status.url)" --quiet)"
+  MIDDLEWARE_URL="$("${GCLOUD}" run services describe "${MW_SVC_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" --quiet)"
 fi
-if [[ -z "${A2A_PRIMARY_URL}" ]]; then
-  A2A_PRIMARY_URL="$("${GCLOUD}" run services describe "${A2A_SVC_NAME}" --project="${PROJECT_ID}" --region="${PRIMARY_REGION}" --format="value(status.url)" --quiet 2>/dev/null || true)"
-fi
-if [[ "${ENABLE_SECONDARY}" == "true" && -z "${SECONDARY_MIDDLEWARE_URL}" ]]; then
-  SECONDARY_MIDDLEWARE_URL="$("${GCLOUD}" run services describe "${MW_SVC_NAME}" --project="${PROJECT_ID}" --region="${SECONDARY_REGION}" --format="value(status.url)" --quiet)"
+if [[ -z "${A2A_URL}" ]]; then
+  A2A_URL="$("${GCLOUD}" run services describe "${A2A_SVC_NAME}" --project="${PROJECT_ID}" --region="${REGION}" --format="value(status.url)" --quiet 2>/dev/null || true)"
 fi
 
 if [[ -z "${MIDDLEWARE_URL}" ]]; then
-  echo "ERROR: Could not resolve primary Middleware URL. Pass --middleware-url or --state-file." >&2
+  echo "ERROR: Could not resolve Middleware URL. Pass --middleware-url or --state-file." >&2
   exit 1
 fi
 
@@ -223,20 +197,17 @@ cd "${REPO_ROOT}"
 echo "========================================================================"
 echo "Enterprise Agent Marketplace — Live GCP End-to-End Validation"
 echo "========================================================================"
-echo "Project             : ${PROJECT_ID}"
-echo "Primary Middleware  : ${MIDDLEWARE_URL} (${PRIMARY_REGION})"
-echo "Skills Location     : ${SKILLS_LOCATION}"
-if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-  echo "Secondary Middleware: ${SECONDARY_MIDDLEWARE_URL} (${SECONDARY_REGION})"
-fi
+echo "Project         : ${PROJECT_ID}"
+echo "Middleware      : ${MIDDLEWARE_URL} (${REGION})"
+echo "Skills Location : ${SKILLS_LOCATION}"
 echo ""
 
 # ----------------------------------------------------------------------------
-# Check 1: Primary Middleware endpoints (/health, /v1/catalog, 4x manifests, ZIPs, /mcp)
+# Check 1: Middleware endpoints (/health, /v1/catalog, 4x manifests, ZIPs, /mcp)
 # ----------------------------------------------------------------------------
-echo "[1/5] Validating Primary Middleware (${PRIMARY_REGION})..."
+echo "[1/4] Validating Middleware (${REGION})..."
 
-"${PYTHON_BIN}" - "${MIDDLEWARE_URL}" "${PRIMARY_REGION}" "${SKILLS_LOCATION}" "${ID_TOKEN}" "${A2A_PRIMARY_URL}" <<'PYEOF'
+"${PYTHON_BIN}" - "${MIDDLEWARE_URL}" "${REGION}" "${SKILLS_LOCATION}" "${ID_TOKEN}" "${A2A_URL}" <<'PYEOF'
 import hashlib, io, sys, zipfile
 import httpx
 
@@ -393,7 +364,7 @@ PYEOF
 # Check 2: Direct Agent Registry v1 ?alt=media HTTP 302 header-stripping check
 # ----------------------------------------------------------------------------
 echo ""
-echo "[2/5] Verifying direct Agent Registry v1 ?alt=media 302 redirect header stripping (locations/${SKILLS_LOCATION}/skills)..."
+echo "[2/4] Verifying direct Agent Registry v1 ?alt=media 302 redirect header stripping (locations/${SKILLS_LOCATION}/skills)..."
 
 "${PYTHON_BIN}" - "${PROJECT_ID}" "${SKILLS_LOCATION}" "${ACCESS_TOKEN}" <<'PYEOF'
 import hashlib, hmac, sys
@@ -499,12 +470,12 @@ with httpx.Client(timeout=30.0, follow_redirects=False) as client:
 PYEOF
 
 # ----------------------------------------------------------------------------
-# Check 3: tools.hub_sync sync against live primary Middleware
+# Check 3: tools.hub_sync sync against live Middleware
 # ----------------------------------------------------------------------------
 echo ""
-echo "[3/5] Running tools.hub_sync sync against live primary Middleware..."
+echo "[3/4] Running tools.hub_sync sync against live Middleware..."
 
-LIVE_HOME="${TMP_DIR}/hub-primary"
+LIVE_HOME="${TMP_DIR}/hub-live"
 mkdir -p "${LIVE_HOME}"
 
 HUB_AUTH_TOKEN="${ID_TOKEN}" "${PYTHON_BIN}" -m tools.hub_sync sync \
@@ -512,10 +483,10 @@ HUB_AUTH_TOKEN="${ID_TOKEN}" "${PYTHON_BIN}" -m tools.hub_sync sync \
   --home "${LIVE_HOME}" \
   --tools all \
   --no-exec \
-  >"${TMP_DIR}/hub_primary.out"
+  >"${TMP_DIR}/hub_live.out"
 
-"${PYTHON_BIN}" -m tools.hub_sync status --home "${LIVE_HOME}" --json >"${TMP_DIR}/hub_primary_status.json"
-"${PYTHON_BIN}" - "${TMP_DIR}/hub_primary_status.json" <<'PYEOF'
+"${PYTHON_BIN}" -m tools.hub_sync status --home "${LIVE_HOME}" --json >"${TMP_DIR}/hub_live_status.json"
+"${PYTHON_BIN}" - "${TMP_DIR}/hub_live_status.json" <<'PYEOF'
 import json, sys
 doc = json.load(open(sys.argv[1], encoding="utf-8"))
 assert doc["synced"] is True
@@ -527,12 +498,12 @@ PYEOF
 # Check 4: platform_agent.adk_orchestrator --mode rest against live Agent Registry v1
 # ----------------------------------------------------------------------------
 echo ""
-echo "[4/5] Running platform_agent.adk_orchestrator --mode rest against live Agent Registry v1..."
+echo "[4/4] Running platform_agent.adk_orchestrator --mode rest against live Agent Registry v1..."
 
 AGENT_REGISTRY_ACCESS_TOKEN="${ACCESS_TOKEN}" "${PYTHON_BIN}" -m platform_agent.adk_orchestrator \
   --mode rest \
   --project-id "${PROJECT_ID}" \
-  --location "${PRIMARY_REGION}" \
+  --location "${REGION}" \
   --skills-location "${SKILLS_LOCATION}" \
   --base-url "https://agentregistry.googleapis.com/v1" \
   >"${TMP_DIR}/platform_live.json"
@@ -553,88 +524,6 @@ print(
     f"{len(doc.get('agents', []))} A2A agent(s)"
 )
 PYEOF
-
-# ----------------------------------------------------------------------------
-# Check 5: Optional Secondary Region Validation + Regional Failover Test
-# ----------------------------------------------------------------------------
-echo ""
-if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-  echo "[5/5] Validating Secondary Region (${SECONDARY_REGION}) & Regional Failover..."
-
-  "${PYTHON_BIN}" - "${SECONDARY_MIDDLEWARE_URL}" "${SECONDARY_REGION}" "${SKILLS_LOCATION}" "${ID_TOKEN}" <<'PYEOF'
-import sys, httpx
-
-sec_url = sys.argv[1].rstrip("/")
-expected_region = sys.argv[2]
-expected_skills_loc = sys.argv[3]
-id_token = sys.argv[4]
-headers = {"Authorization": f"Bearer {id_token}"}
-
-with httpx.Client(timeout=60.0, headers=headers) as client:
-    r = client.get(f"{sec_url}/health")
-    assert r.status_code == 200, f"Secondary /health failed ({r.status_code}): {r.text}"
-    health = r.json()
-    assert (health.get("region") or health.get("location")) == expected_region, (
-        f"Expected secondary region={expected_region!r}, got {health}"
-    )
-    assert health.get("skillsLocation") == expected_skills_loc, (
-        f"Expected secondary skillsLocation={expected_skills_loc!r}, got {health}"
-    )
-    c = client.get(f"{sec_url}/v1/catalog")
-    assert c.status_code == 200, f"Secondary /v1/catalog failed ({c.status_code}): {c.text}"
-    cat = c.json()
-    assert cat.get("marketplace", {}).get("skillsLocation") == expected_skills_loc, (
-        f"Expected secondary marketplace.skillsLocation={expected_skills_loc!r}, got {cat.get('marketplace')}"
-    )
-    skills = cat.get("skills", [])
-    mcp_servers = cat.get("mcpServers", [])
-    agents = cat.get("agents", [])
-    assert len(skills) > 0, f"Expected >0 skills in secondary region, got {cat}"
-    assert all(f"/locations/{expected_skills_loc}/skills/private-" in str(s.get("name", "")) for s in skills), (
-        f"Expected shared private skills in {expected_skills_loc}, got {[s.get('name') for s in skills]}"
-    )
-    assert len(mcp_servers) > 0 and all(f"/locations/{expected_region}/" in str(m.get("name", "")) for m in mcp_servers), (
-        f"Expected secondary MCP servers in {expected_region}: {[m.get('name') for m in mcp_servers]}"
-    )
-    assert len(agents) > 0 and all(f"/locations/{expected_region}/" in str(a.get("name", "")) for a in agents), (
-        f"Expected secondary A2A agents in {expected_region}: {[a.get('name') for a in agents]}"
-    )
-    finops_plugin = next((p for p in cat.get("plugins", []) if p.get("name") == "gcp-finops-toolkit"), None)
-    if finops_plugin is not None:
-        assert any(f"/locations/{expected_region}/" in str(m) for m in finops_plugin.get("mcpServers", [])), (
-            f"Expected secondary gcp-finops-toolkit to link {expected_region} MCP server: {finops_plugin}"
-        )
-        assert any(f"/locations/{expected_region}/" in str(a) for a in finops_plugin.get("agents", [])), (
-            f"Expected secondary gcp-finops-toolkit to link {expected_region} A2A agent: {finops_plugin}"
-        )
-    print(
-        f"  [PASS] Secondary {expected_region} /health & /v1/catalog "
-        f"({len(skills)} shared {expected_skills_loc} skills + {len(mcp_servers)} MCP + {len(agents)} A2A in {expected_region})"
-    )
-PYEOF
-
-  FAILOVER_HOME="${TMP_DIR}/hub-failover"
-  mkdir -p "${FAILOVER_HOME}"
-  HUB_AUTH_TOKEN="${ID_TOKEN}" "${PYTHON_BIN}" -m tools.hub_sync sync \
-    --middleware-url "https://invalid.local" \
-    --fallback-middleware-url "${SECONDARY_MIDDLEWARE_URL}" \
-    --home "${FAILOVER_HOME}" \
-    --tools all \
-    --no-exec \
-    >"${TMP_DIR}/hub_failover.out"
-
-  "${PYTHON_BIN}" - "${FAILOVER_HOME}" "${SECONDARY_MIDDLEWARE_URL}" <<'PYEOF'
-import json, sys
-from pathlib import Path
-manifest = json.loads((Path(sys.argv[1]) / ".acme-agent-hub" / ".sync-manifest.json").read_text(encoding="utf-8"))
-expected_url = sys.argv[2].rstrip("/")
-assert manifest.get("middleware_url", "").rstrip("/") == expected_url, f"Failover manifest mismatch: {manifest}"
-assert len(manifest.get("owned_plugins", {})) > 0
-print(f"  [PASS] tools.hub_sync failed over seamlessly from https://invalid.local -> {expected_url}")
-PYEOF
-else
-  echo "[5/5] Secondary region failover check skipped (pass --enable-secondary to include ${SECONDARY_REGION})."
-fi
 
 echo ""
 echo "========================================================================"

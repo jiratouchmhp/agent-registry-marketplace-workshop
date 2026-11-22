@@ -10,7 +10,7 @@
 # Dual-source ingestion via `tools.plugin_sync ingest` (calling the GA Agent
 # Registry `v1` REST API `POST /v1/projects/{p}/locations/{skills_location}/skills?skillId={id}`,
 # where `skills_location` is `global`, `us`, or `eu`, while regional Services run
-# in `asia-southeast3` / `asia-southeast1`):
+# in Bangkok `asia-southeast3`):
 #   - Option 1 (`skills_source_mode = "local"`, default):
 #     Publishes standalone skills from `starter_plugin_dir`
 #     (`starter-marketplace/plugins/gcp-finops-toolkit`) and, when

@@ -1,3 +1,9 @@
+# Regional Architecture:
+# Aim for Bangkok (asia-southeast3) for all supported services (KMS asymmetric
+# signing key, Agent Registry Bindings, IAP egressor IAM bindings, Cloud Logging
+# audit bucket); use Singapore (asia-southeast1) only for services not yet
+# available in Bangkok (Agent Identity AuthProvider).
+
 variable "project_id" {
   description = "Google Cloud project ID hosting Agent Registry and Workstream B security & governance resources."
   type        = string
@@ -9,7 +15,7 @@ variable "project_id" {
 }
 
 variable "location" {
-  description = "Primary Google Cloud region for Agent Registry Bindings, IAP egressor IAM bindings, KMS asymmetric signing key, and regional audit log bucket (default: asia-southeast3, Bangkok)."
+  description = "Primary Google Cloud region for all supported Workstream B services: KMS asymmetric signing key, Agent Registry Bindings, IAP egressor IAM bindings, and regional Cloud Logging audit bucket (default: asia-southeast3, Bangkok)."
   type        = string
   default     = "asia-southeast3"
 
@@ -20,7 +26,7 @@ variable "location" {
 }
 
 variable "auth_provider_location" {
-  description = "Google Cloud region for the Agent Identity AuthProvider (agentidentity.googleapis.com). Defaults to asia-southeast1 (Singapore), which is the verified APAC GA region for Agent Identity (Bangkok asia-southeast3 is not yet supported)."
+  description = "Google Cloud region for the Agent Identity AuthProvider (agentidentity.googleapis.com). Defaults to asia-southeast1 (Singapore) as a service-specific fallback ONLY because Agent Identity is GA in Singapore and not yet available in Bangkok (asia-southeast3)."
   type        = string
   default     = "asia-southeast1"
 
@@ -31,7 +37,7 @@ variable "auth_provider_location" {
 }
 
 variable "enable_agent_gateway" {
-  description = "When true, provisions the Google-managed Network Services Agent Gateway. Defaults to false for APAC deployments because Network Services Agent Gateway on Cloud Run is currently GA only in us-central1 and europe-west1."
+  description = "When true, provisions the optional Google-managed Network Services Agent Gateway. Defaults to false for APAC because Network Services Agent Gateway on Cloud Run is currently GA only in us-central1 and europe-west1."
   type        = bool
   default     = false
 }

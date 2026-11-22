@@ -9,18 +9,15 @@ TERRAFORM ?= terraform
 HCLFMT ?= hclfmt
 STRICT_HCL ?= false
 
-# Workshop defaults aligned with WORKSHOP_SPEC.json (Bangkok primary + Singapore secondary)
+# Workshop defaults aligned with WORKSHOP_SPEC.json (Bangkok asia-southeast3 primary + global Skills)
 AGENT_REGISTRY_BASE_URL ?= http://127.0.0.1:8090/v1
 GCP_PROJECT_ID ?= acme-agent-governance
 GCP_LOCATION ?= asia-southeast3
-GCP_SECONDARY_LOCATION ?= asia-southeast1
 AGENT_REGISTRY_SKILLS_LOCATION ?= global
-ENABLE_SECONDARY ?= false
 ARTIFACT_REGISTRY_REPO ?= agent-marketplace
 IMAGE_TAG ?= 1.0.0
 MIDDLEWARE_PUBLIC_URL ?= http://127.0.0.1:8080
 HUB_MIDDLEWARE_URL ?= http://127.0.0.1:8080
-HUB_FALLBACK_MIDDLEWARE_URL ?=
 REQUIRE_KMS_SIGNATURE ?= false
 KMS_PUBLIC_KEY_PEM_PATH ?=
 SIGNING_KEY_PEM_PATH ?=
@@ -68,16 +65,15 @@ help:
 	@echo "  make demo-sync-repo   Option 2: Shallow-clone & ingest SKILLS_REPO_URL into Agent Registry"
 	@echo "  make demo-hub-sync    Hydrate local demo HOME ($(HUB_DEMO_HOME)) for all 4 IDEs"
 	@echo ""
-	@echo "Zero-Docker / Zero-Terraform Live GCP ($(GCP_LOCATION) + optional $(GCP_SECONDARY_LOCATION)):"
-	@echo "  (Pass ENABLE_SECONDARY=true to deploy/validate/destroy Bangkok + Singapore together)"
-	@echo "  make gcp-build        Build & push workshop images via Cloud Build (zero local Docker)"
-	@echo "  make gcp-deploy       Deploy Cloud Run + Agent Registry v1 + Skills (zero Terraform)"
+	@echo "Zero-Docker / Zero-Terraform Live GCP ($(GCP_LOCATION) primary + $(AGENT_REGISTRY_SKILLS_LOCATION) Skills):"
+	@echo "  make gcp-build        Build & push workshop images via Cloud Build in $(GCP_LOCATION) (zero local Docker)"
+	@echo "  make gcp-deploy       Deploy Cloud Run + Agent Registry Services in $(GCP_LOCATION) + Skills in $(AGENT_REGISTRY_SKILLS_LOCATION)"
 	@echo "  make gcp-validate     Validate live GCP deployment end-to-end as an attendee"
 	@echo "  make gcp-destroy      Tear down all workshop GCP resources + zero-leftover audit"
 	@echo ""
 	@echo "Optional Terraform IaC Track:"
-	@echo "  make tf-core-plan     Run terraform init & plan for terraform/core (Workstream A)"
-	@echo "  make tf-sec-plan      Run terraform init & plan for terraform/security_governance (Workstream B)"
+	@echo "  make tf-core-plan     Run terraform init & plan for terraform/core (Workstream A — $(GCP_LOCATION))"
+	@echo "  make tf-sec-plan      Run terraform init & plan for terraform/security_governance (Workstream B — $(GCP_LOCATION), asia-southeast1 Agent Identity fallback)"
 
 preflight:
 	./scripts/preflight_check.sh
@@ -111,7 +107,6 @@ validate-hcl:
 run-local-stack:
 	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 	GCP_LOCATION="$(GCP_LOCATION)" \
-	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
 	REQUIRE_KMS_SIGNATURE="$(REQUIRE_KMS_SIGNATURE)" \
 	KMS_PUBLIC_KEY_PEM_PATH="$(KMS_PUBLIC_KEY_PEM_PATH)" \
 	./scripts/run_local_stack.sh
@@ -119,7 +114,6 @@ run-local-stack:
 smoke-local:
 	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 	GCP_LOCATION="$(GCP_LOCATION)" \
-	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
 	./scripts/local_smoke_test.sh
 
 run-mock:
@@ -140,7 +134,6 @@ run-middleware:
 	AGENT_REGISTRY_BASE_URL="$(AGENT_REGISTRY_BASE_URL)" \
 	GCP_PROJECT_ID="$(GCP_PROJECT_ID)" \
 	GCP_LOCATION="$(GCP_LOCATION)" \
-	GCP_SECONDARY_LOCATION="$(GCP_SECONDARY_LOCATION)" \
 	MIDDLEWARE_PUBLIC_URL="$(MIDDLEWARE_PUBLIC_URL)" \
 	REQUIRE_KMS_SIGNATURE="$(REQUIRE_KMS_SIGNATURE)" \
 	KMS_PUBLIC_KEY_PEM_PATH="$(KMS_PUBLIC_KEY_PEM_PATH)" \
@@ -208,67 +201,48 @@ demo-sync-repo:
 
 demo-hub-sync:
 	@set -eu; \
-	set -- \
+	$(PYTHON) -m tools.hub_sync sync \
 		--middleware-url "$(HUB_MIDDLEWARE_URL)" \
 		--home "$(HUB_DEMO_HOME)" \
 		--tools all \
 		--no-exec; \
-	if [ -n "$(HUB_FALLBACK_MIDDLEWARE_URL)" ]; then \
-		set -- "$$@" --fallback-middleware-url "$(HUB_FALLBACK_MIDDLEWARE_URL)"; \
-	fi; \
-	$(PYTHON) -m tools.hub_sync sync "$$@"; \
 	$(PYTHON) -m tools.hub_sync status --home "$(HUB_DEMO_HOME)"
 
 gcp-build:
 	@set -eu; \
-	set -- \
+	./scripts/build_images_cloudbuild.sh \
 		--project "$(GCP_PROJECT_ID)" \
 		--region "$(GCP_LOCATION)" \
 		--repo "$(ARTIFACT_REGISTRY_REPO)" \
-		--tag "$(IMAGE_TAG)"; \
-	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
-		set -- "$$@" --secondary-region "$(GCP_SECONDARY_LOCATION)"; \
-	fi; \
-	./scripts/build_images_cloudbuild.sh "$$@" $(GCP_BUILD_ARGS)
+		--tag "$(IMAGE_TAG)" \
+		$(GCP_BUILD_ARGS)
 
 gcp-deploy:
 	@set -eu; \
-	set -- \
+	./scripts/deploy_gcp.sh \
 		--project "$(GCP_PROJECT_ID)" \
-		--primary-region "$(GCP_LOCATION)" \
-		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
+		--region "$(GCP_LOCATION)" \
 		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)" \
 		--repo "$(ARTIFACT_REGISTRY_REPO)" \
-		--tag "$(IMAGE_TAG)"; \
-	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
-		set -- "$$@" --enable-secondary; \
-	fi; \
-	./scripts/deploy_gcp.sh "$$@" $(GCP_DEPLOY_ARGS)
+		--tag "$(IMAGE_TAG)" \
+		$(GCP_DEPLOY_ARGS)
 
 gcp-validate:
 	@set -eu; \
-	set -- \
+	./scripts/validate_live_gcp.sh \
 		--project "$(GCP_PROJECT_ID)" \
-		--primary-region "$(GCP_LOCATION)" \
-		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
-		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)"; \
-	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
-		set -- "$$@" --enable-secondary; \
-	fi; \
-	./scripts/validate_live_gcp.sh "$$@" $(GCP_VALIDATE_ARGS)
+		--region "$(GCP_LOCATION)" \
+		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)" \
+		$(GCP_VALIDATE_ARGS)
 
 gcp-destroy:
 	@set -eu; \
-	set -- \
+	./scripts/destroy_gcp.sh \
 		--project "$(GCP_PROJECT_ID)" \
-		--primary-region "$(GCP_LOCATION)" \
-		--secondary-region "$(GCP_SECONDARY_LOCATION)" \
+		--region "$(GCP_LOCATION)" \
 		--skills-location "$(AGENT_REGISTRY_SKILLS_LOCATION)" \
-		--repo "$(ARTIFACT_REGISTRY_REPO)"; \
-	if [ "$(ENABLE_SECONDARY)" = "true" ]; then \
-		set -- "$$@" --enable-secondary; \
-	fi; \
-	./scripts/destroy_gcp.sh "$$@" $(GCP_DESTROY_ARGS)
+		--repo "$(ARTIFACT_REGISTRY_REPO)" \
+		$(GCP_DESTROY_ARGS)
 
 tf-core-plan:
 	@command -v $(TERRAFORM) >/dev/null 2>&1 || { echo "ERROR: terraform CLI not installed." >&2; exit 1; }

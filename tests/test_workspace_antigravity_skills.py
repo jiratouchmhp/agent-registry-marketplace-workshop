@@ -364,3 +364,39 @@ def test_readme_documents_all_five_workspace_skills() -> None:
         assert f".agents/skills/{skill_name}/SKILL.md" in readme, (
             f"README.md missing link to .agents/skills/{skill_name}/SKILL.md"
         )
+
+
+def test_workspace_skills_match_bangkok_first_architecture() -> None:
+    """Workspace skills omit removed 2-region failover flags and document Bangkok primary + Singapore Agent Identity fallback + global Skills."""
+    forbidden_tokens = (
+        "--enable-secondary",
+        "ENABLE_SECONDARY",
+        "enable_secondary_region",
+        "secondary_location",
+        "secondary_middleware_url",
+        "--fallback-middleware-url",
+        "HUB_FALLBACK_MIDDLEWARE_URL",
+        "GCP_SECONDARY_LOCATION",
+    )
+    violations: list[str] = []
+    for md_file in _all_skill_markdown_files():
+        text = md_file.read_text(encoding="utf-8")
+        for token in forbidden_tokens:
+            if token in text:
+                violations.append(
+                    f"{md_file.relative_to(REPO_ROOT)} contains removed 2-region token {token!r}"
+                )
+    assert not violations, "Stale 2-region references in .agents/skills/:\n" + "\n".join(violations)
+
+    workshop_guide = (SKILLS_ROOT / "agent-marketplace-workshop-guide" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    security_skill = (
+        SKILLS_ROOT / "agent-registry-security-and-prod-hardening" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    for label, text in (
+        ("agent-marketplace-workshop-guide", workshop_guide),
+        ("agent-registry-security-and-prod-hardening", security_skill),
+    ):
+        for token in ("asia-southeast3", 'auth_provider_location = "asia-southeast1"', "global"):
+            assert token in text, f"{label} missing Bangkok-first regional token: {token}"

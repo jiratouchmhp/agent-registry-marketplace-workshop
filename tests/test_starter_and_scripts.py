@@ -1,5 +1,5 @@
 """Automated tests for workshop shell scripts, Cloud Build configs, starter verifier,
-plugin_sync live scan polling & quota header, and hub_sync regional failover."""
+plugin_sync live scan polling & quota header, and single-region Bangkok GCP scripts."""
 
 from __future__ import annotations
 
@@ -135,7 +135,7 @@ def _make_valid_polyglot_plugin_zip(plugin_name: str = "gcp-finops-toolkit") -> 
                     "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
                     "name": plugin_name,
                     "version": "1.0.0",
-                    "description": "Failover verification plugin.",
+                    "description": "Bangkok primary verification plugin.",
                 }
             ),
         )
@@ -147,7 +147,7 @@ def _make_valid_polyglot_plugin_zip(plugin_name: str = "gcp-finops-toolkit") -> 
                     "name": plugin_name,
                     "displayName": "GCP FinOps Toolkit",
                     "version": "1.0.0",
-                    "description": "Failover verification plugin.",
+                    "description": "Bangkok primary verification plugin.",
                     "logo": "assets/logo.svg",
                 }
             ),
@@ -162,7 +162,7 @@ def _make_valid_polyglot_plugin_zip(plugin_name: str = "gcp-finops-toolkit") -> 
                 {
                     "mcpServers": {
                         "finops-mcp-server": {
-                            "url": "https://sample-mcp-server.asia-southeast1.run.app/mcp",
+                            "url": "https://sample-mcp-server.asia-southeast3.run.app/mcp",
                             "authProviderType": "google_credentials",
                         }
                     }
@@ -512,14 +512,13 @@ def test_plugin_sync_cli_exposes_wait_for_scan_option() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 5. `tools.hub_sync`: `--fallback-middleware-url` Multi-Region Failover
+# 5. `tools.hub_sync`: Single-Region Bangkok Middleware Hydration
 # ---------------------------------------------------------------------------
 
 
-def test_hub_sync_fallback_middleware_url_failover(tmp_path: Path) -> None:
-    """tools.hub_sync seamlessly fails over from an unreachable primary to a healthy secondary."""
-    primary_url = "https://polyglot-middleware-bkk.asia-southeast3.run.app"
-    secondary_url = "https://polyglot-middleware-sg.asia-southeast1.run.app"
+def test_hub_sync_hydrates_from_bangkok_middleware(tmp_path: Path) -> None:
+    """tools.hub_sync hydrates all 4 IDEs cleanly from the Bangkok (asia-southeast3) middleware."""
+    bangkok_url = "https://polyglot-middleware-bkk.asia-southeast3.run.app"
     zip_bytes, zip_sha = _make_valid_polyglot_plugin_zip("gcp-finops-toolkit")
 
     seen_hosts: list[str] = []
@@ -527,9 +526,6 @@ def test_hub_sync_fallback_middleware_url_failover(tmp_path: Path) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         seen_hosts.append(request.url.host)
         if request.url.host == "polyglot-middleware-bkk.asia-southeast3.run.app":
-            raise httpx.ConnectError("Simulated Bangkok primary regional outage", request=request)
-
-        if request.url.host == "polyglot-middleware-sg.asia-southeast1.run.app":
             if request.url.path == "/v1/catalog":
                 return httpx.Response(
                     200,
@@ -548,9 +544,9 @@ def test_hub_sync_fallback_middleware_url_failover(tmp_path: Path) -> None:
                                 "name": "gcp-finops-toolkit",
                                 "displayName": "GCP FinOps Toolkit",
                                 "version": "1.0.0",
-                                "description": "Failover verification plugin.",
+                                "description": "Bangkok primary verification plugin.",
                                 "sha256": zip_sha,
-                                "download_url": f"{secondary_url}/v1/plugins/gcp-finops-toolkit.zip",
+                                "download_url": f"{bangkok_url}/v1/plugins/gcp-finops-toolkit.zip",
                                 "skills": ["cost-anomaly-triage"],
                                 "mcpServers": {},
                             }
@@ -570,8 +566,7 @@ def test_hub_sync_fallback_middleware_url_failover(tmp_path: Path) -> None:
         return httpx.Response(404)
 
     result = sync_hub(
-        middleware_url=primary_url,
-        fallback_middleware_url=secondary_url,
+        middleware_url=bangkok_url,
         home_dir=tmp_path,
         tools="all",
         no_exec=True,
@@ -579,23 +574,23 @@ def test_hub_sync_fallback_middleware_url_failover(tmp_path: Path) -> None:
     )
 
     assert "polyglot-middleware-bkk.asia-southeast3.run.app" in seen_hosts
-    assert "polyglot-middleware-sg.asia-southeast1.run.app" in seen_hosts
-    assert result.middleware_url == secondary_url
+    assert result.middleware_url == bangkok_url
     assert result.catalog_complete is True
     assert [p.name for p in result.plugins] == ["gcp-finops-toolkit"]
     assert (tmp_path / ".acme-agent-hub" / "plugins" / "gcp-finops-toolkit" / "plugin.json").is_file()
     manifest_data: dict[str, Any] = json.loads(
         (tmp_path / ".acme-agent-hub" / ".sync-manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest_data["middleware_url"] == secondary_url
+    assert manifest_data["middleware_url"] == bangkok_url
 
 
-def test_hub_sync_cli_exposes_fallback_middleware_url_option() -> None:
-    """`tools.hub_sync sync` exposes --fallback-middleware-url."""
+def test_hub_sync_cli_omits_fallback_middleware_url_option() -> None:
+    """`tools.hub_sync sync` exposes --middleware-url and omits removed --fallback-middleware-url."""
     runner = CliRunner()
     res = runner.invoke(hub_sync_cli, ["sync", "--help"])
     assert res.exit_code == 0
-    assert "--fallback-middleware-url" in res.output
+    assert "--middleware-url" in res.output
+    assert "--fallback-middleware-url" not in res.output
 
 
 def test_wait_for_skill_scan_keeps_polling_after_succeeded_draft_and_stops_on_findings() -> None:
@@ -744,19 +739,16 @@ def test_plugin_sync_and_gcp_scripts_support_global_skills_location() -> None:
     assert all("/locations/global/skills/private-" in s["resource_name"] for s in sync_doc["skills"])
     assert all("/locations/asia-southeast3/services/" in s["resource_name"] for s in sync_doc["mcp_services"])
 
-    # Dry-run all 3 live GCP scripts with --enable-secondary --skills-location global
+    # Dry-run all 3 live GCP scripts in single-region Bangkok mode (--region asia-southeast3 --skills-location global)
     deploy_proc = subprocess.run(
         [
             str(SCRIPTS_DIR / "deploy_gcp.sh"),
             "--project",
             "acme-agent-governance",
-            "--primary-region",
+            "--region",
             "asia-southeast3",
-            "--secondary-region",
-            "asia-southeast1",
             "--skills-location",
             "global",
-            "--enable-secondary",
             "--skip-build",
             "--dry-run",
         ],
@@ -766,23 +758,22 @@ def test_plugin_sync_and_gcp_scripts_support_global_skills_location() -> None:
         check=False,
     )
     assert deploy_proc.returncode == 0, deploy_proc.stderr
+    assert "Region            : asia-southeast3" in deploy_proc.stdout
     assert "AGENT_REGISTRY_SKILLS_LOCATION=global" in deploy_proc.stdout
     assert "storage.googleapis.com" in deploy_proc.stdout
     assert deploy_proc.stdout.count("[Step 6/7] Ingesting standalone Skills ONCE in global") == 1
     assert "--location global" in deploy_proc.stdout
+    assert "asia-southeast1" not in deploy_proc.stdout
 
     validate_proc = subprocess.run(
         [
             str(SCRIPTS_DIR / "validate_live_gcp.sh"),
             "--project",
             "acme-agent-governance",
-            "--primary-region",
+            "--region",
             "asia-southeast3",
-            "--secondary-region",
-            "asia-southeast1",
             "--skills-location",
             "global",
-            "--enable-secondary",
             "--dry-run",
         ],
         cwd=str(REPO_ROOT),
@@ -791,21 +782,20 @@ def test_plugin_sync_and_gcp_scripts_support_global_skills_location() -> None:
         check=False,
     )
     assert validate_proc.returncode == 0, validate_proc.stderr
+    assert "Region          : asia-southeast3" in validate_proc.stdout
     assert "locations/global/skills" in validate_proc.stdout
     assert "skills=global" in validate_proc.stdout
+    assert "asia-southeast1" not in validate_proc.stdout
 
     destroy_proc = subprocess.run(
         [
             str(SCRIPTS_DIR / "destroy_gcp.sh"),
             "--project",
             "acme-agent-governance",
-            "--primary-region",
+            "--region",
             "asia-southeast3",
-            "--secondary-region",
-            "asia-southeast1",
             "--skills-location",
             "global",
-            "--enable-secondary",
             "--dry-run",
         ],
         cwd=str(REPO_ROOT),
@@ -814,6 +804,31 @@ def test_plugin_sync_and_gcp_scripts_support_global_skills_location() -> None:
         check=False,
     )
     assert destroy_proc.returncode == 0, destroy_proc.stderr
+    assert "Region               : asia-southeast3" in destroy_proc.stdout
     assert "locations/global/skills/private-cost-anomaly-triage?force=true" in destroy_proc.stdout
     assert "REST GET (expect 404) https://agentregistry.googleapis.com/v1/projects/acme-agent-governance/locations/global/skills/private-cost-anomaly-triage" in destroy_proc.stdout
+    assert "--condition=None" in destroy_proc.stdout
     assert "agent-registry skills list" not in destroy_proc.stdout
+    assert "asia-southeast1" not in destroy_proc.stdout
+
+    # Regression guard: live GCP scripts must not expose removed 2-region flags
+    for script_name in (
+        "build_images_cloudbuild.sh",
+        "deploy_gcp.sh",
+        "validate_live_gcp.sh",
+        "destroy_gcp.sh",
+    ):
+        help_proc = subprocess.run(
+            [str(SCRIPTS_DIR / script_name), "--help"],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert help_proc.returncode == 0, help_proc.stderr
+        assert "--enable-secondary" not in help_proc.stdout, (
+            f"{script_name} still advertises removed --enable-secondary flag"
+        )
+        assert "--secondary-region" not in help_proc.stdout, (
+            f"{script_name} still advertises removed --secondary-region flag"
+        )

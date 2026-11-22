@@ -1,12 +1,11 @@
 #!/usr/bin/env bash
 # Surgical, Complete Teardown + Post-Teardown Zero-Leftover Audit for Workshop GCP Resources.
 #
-# Cleans up primary (asia-southeast3) and secondary (asia-southeast1, when
-# --enable-secondary is set OR workshop resources exist there):
+# Cleans up Bangkok (asia-southeast3, default --region) + global Skills:
 #   1. Cloud Run services (polyglot-middleware, sample-a2a-agent, sample-mcp-server)
-#   2. Agent Registry Skills via REST DELETE ...?force=true (polling LRO)
-#   3. Agent Registry Services (finops-mcp-server, finops-advisor-agent, finops-billing-api)
-#   4. Artifact Registry Docker repository
+#   2. Agent Registry Services (finops-mcp-server, finops-advisor-agent, finops-billing-api)
+#   3. Artifact Registry Docker repository (agent-marketplace)
+#   4. Agent Registry Skills via REST DELETE ...?force=true (polling LRO) in --skills-location
 #   5. Optional GCS staging bucket (gs://<project>-agent-registry-skills)
 #   6. Workshop Service Accounts + roles/agentregistry.viewer project IAM binding
 #   7. Post-teardown bounded list (--limit=50 --quiet) zero-leftover audit!
@@ -18,11 +17,10 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 PYTHON_BIN="${PYTHON:-${REPO_ROOT}/.venv/bin/python}"
 
 PROJECT_ID="${GCP_PROJECT_ID:-}"
-PRIMARY_REGION="${GCP_LOCATION:-asia-southeast3}"
-SECONDARY_REGION="${GCP_SECONDARY_LOCATION:-asia-southeast1}"
+REGION="${GCP_LOCATION:-asia-southeast3}"
+REGION_EXPLICIT="false"
 SKILLS_LOCATION="${AGENT_REGISTRY_SKILLS_LOCATION:-global}"
 SKILLS_LOCATION_EXPLICIT="false"
-ENABLE_SECONDARY="false"
 REPO="${ARTIFACT_REGISTRY_REPO:-agent-marketplace}"
 REPO_EXPLICIT="false"
 NAME_PREFIX=""
@@ -40,15 +38,13 @@ Surgically tear down all Enterprise Agent Marketplace workshop GCP resources
 and run a post-teardown zero-leftover audit.
 
 Options:
-  --project ID               Google Cloud project ID (required, or $GCP_PROJECT_ID)
-  --primary-region REGION    Primary GCP region (default: asia-southeast3)
-  --secondary-region REGION  Secondary GCP region (default: asia-southeast1)
-  --skills-location LOC      Agent Registry Skills location: global|us|eu (default: global)
-  --enable-secondary         Include secondary region in teardown & audit
-  --repo REPO                Artifact Registry repository ID (default: agent-marketplace)
-  --name-prefix PREFIX       Optional resource name prefix used during deploy
-  --delete-sas               Delete workshop SAs & IAM bindings (default: true)
-  --no-delete-sas            Keep workshop service accounts
+  --project ID                 Google Cloud project ID (required, or $GCP_PROJECT_ID)
+  --region REGION              Primary GCP region (default: asia-southeast3, Bangkok; alias: --primary-region)
+  --skills-location LOC        Agent Registry Skills location: global|us|eu (default: global)
+  --repo REPO                  Artifact Registry repository ID (default: agent-marketplace)
+  --name-prefix PREFIX         Optional resource name prefix used during deploy
+  --delete-sas                 Delete workshop SAs & IAM bindings (default: true)
+  --no-delete-sas              Keep workshop service accounts
   --delete-staging-bucket      Delete gs://<project>-agent-registry-skills if present (default: true)
   --no-delete-staging-bucket   Keep GCS staging bucket
   --delete-source-deploy-repo  Also delete Cloud Run's auto-created 'cloud-run-source-deploy' AR repo
@@ -64,22 +60,15 @@ while [[ $# -gt 0 ]]; do
       PROJECT_ID="$2"
       shift 2
       ;;
-    --primary-region)
-      PRIMARY_REGION="$2"
-      shift 2
-      ;;
-    --secondary-region)
-      SECONDARY_REGION="$2"
+    --region|--primary-region)
+      REGION="$2"
+      REGION_EXPLICIT="true"
       shift 2
       ;;
     --skills-location)
       SKILLS_LOCATION="$2"
       SKILLS_LOCATION_EXPLICIT="true"
       shift 2
-      ;;
-    --enable-secondary)
-      ENABLE_SECONDARY="true"
-      shift
       ;;
     --repo)
       REPO="$2"
@@ -185,8 +174,9 @@ for reg_info in doc.get("regions", {}).values():
     for cr in reg_info.get("cloud_run", {}).values():
         if cr.get("name"):
             run_svcs.add(cr["name"])
-if doc.get("enable_secondary"):
-    print("STATE_HAD_SECONDARY=true")
+state_region = doc.get("region") or doc.get("primary_region") or ""
+if state_region:
+    print(f"STATE_REGION={shlex.quote(state_region)}")
 if doc.get("skills_location"):
     print(f"STATE_SKILLS_LOC={shlex.quote(doc['skills_location'])}")
 if doc.get("artifact_registry_repo"):
@@ -198,7 +188,7 @@ print("EXTRA_AR_SERVICES=(" + " ".join(shlex.quote(x) for x in sorted(ar_svcs)) 
 print("EXTRA_RUN_SERVICES=(" + " ".join(shlex.quote(x) for x in sorted(run_svcs)) + ")")
 PYEOF
 )"
-  [[ "${STATE_HAD_SECONDARY:-false}" == "true" ]] && ENABLE_SECONDARY="true"
+  [[ "${REGION_EXPLICIT}" == "false" && -n "${STATE_REGION:-}" ]] && REGION="${STATE_REGION}"
   [[ "${SKILLS_LOCATION_EXPLICIT}" == "false" && -n "${STATE_SKILLS_LOC:-}" ]] && SKILLS_LOCATION="${STATE_SKILLS_LOC}"
   [[ "${REPO_EXPLICIT}" == "false" && -n "${STATE_REPO:-}" ]] && REPO="${STATE_REPO}"
   [[ -z "${NAME_PREFIX}" && -n "${STATE_PREFIX:-}" ]] && NAME_PREFIX="${STATE_PREFIX}"
@@ -240,42 +230,6 @@ MW_SA_EMAIL="agent-marketplace-middleware@${PROJECT_ID}.iam.gserviceaccount.com"
 WORKLOADS_SA_EMAIL="finops-sample-workloads@${PROJECT_ID}.iam.gserviceaccount.com"
 STAGING_BUCKET="${PROJECT_ID}-agent-registry-skills"
 
-# Determine target regions (primary + secondary if enabled OR resources detected in secondary)
-TARGET_REGIONS=("${PRIMARY_REGION}")
-if [[ -n "${SECONDARY_REGION}" && "${SECONDARY_REGION}" != "${PRIMARY_REGION}" ]]; then
-  if [[ "${ENABLE_SECONDARY}" == "true" ]]; then
-    TARGET_REGIONS+=("${SECONDARY_REGION}")
-  elif [[ "${DRY_RUN}" == "false" ]]; then
-    # Auto-detect whether any workshop resource exists in secondary region
-    SEC_FOUND="false"
-    if "${GCLOUD}" artifacts repositories describe "${REPO}" --project="${PROJECT_ID}" --location="${SECONDARY_REGION}" --quiet >/dev/null 2>&1; then
-      SEC_FOUND="true"
-    fi
-    if [[ "${SEC_FOUND}" == "false" ]]; then
-      SEC_RUN="$("${GCLOUD}" run services list --project="${PROJECT_ID}" --region="${SECONDARY_REGION}" --format="value(metadata.name)" --limit=50 --quiet 2>/dev/null || true)"
-      for svc in "${RUN_SERVICES[@]}"; do
-        if grep -Fxq "${svc}" <<<"${SEC_RUN}"; then
-          SEC_FOUND="true"
-          break
-        fi
-      done
-    fi
-    if [[ "${SEC_FOUND}" == "false" ]]; then
-      SEC_AR="$("${GCLOUD}" agent-registry services list --project="${PROJECT_ID}" --location="${SECONDARY_REGION}" --format="value(name)" --limit=50 --quiet 2>/dev/null || true)"
-      for svc in "${AR_SERVICES[@]}"; do
-        if grep -Eq "(^|/)${svc}$" <<<"${SEC_AR}"; then
-          SEC_FOUND="true"
-          break
-        fi
-      done
-    fi
-    if [[ "${SEC_FOUND}" == "true" ]]; then
-      echo "[INFO] Detected workshop resources in secondary region '${SECONDARY_REGION}'; adding to teardown."
-      TARGET_REGIONS+=("${SECONDARY_REGION}")
-    fi
-  fi
-fi
-
 run_cmd() {
   if [[ "${DRY_RUN}" == "true" ]]; then
     printf '[DRY-RUN]'
@@ -290,7 +244,7 @@ echo "========================================================================"
 echo "Enterprise Agent Marketplace — Live GCP Teardown & Zero-Leftover Audit"
 echo "========================================================================"
 echo "Project              : ${PROJECT_ID}"
-echo "Regions              : ${TARGET_REGIONS[*]}"
+echo "Region               : ${REGION}"
 echo "Skills Location      : ${SKILLS_LOCATION}"
 echo "Cloud Run Services   : ${RUN_SERVICES[*]}"
 echo "Agent Registry Svcs  : ${AR_SERVICES[*]}"
@@ -307,93 +261,91 @@ if [[ "${DRY_RUN}" == "false" ]]; then
   ACCESS_TOKEN="$("${GCLOUD}" auth print-access-token --quiet)"
 fi
 
-for region in "${TARGET_REGIONS[@]}"; do
-  echo "--- Teardown in region: ${region} ---"
+echo "--- Teardown in region: ${REGION} ---"
 
-  # 1. Delete Cloud Run services
-  echo "[1/6] Deleting Cloud Run services in ${region}..."
-  for svc in "${RUN_SERVICES[@]}"; do
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      run_cmd "${GCLOUD}" run services delete "${svc}" \
-        --project="${PROJECT_ID}" \
-        --region="${region}" \
-        --quiet
-    else
-      if "${GCLOUD}" run services describe "${svc}" \
-        --project="${PROJECT_ID}" --region="${region}" --quiet >/dev/null 2>&1; then
-        "${GCLOUD}" run services delete "${svc}" \
-          --project="${PROJECT_ID}" \
-          --region="${region}" \
-          --quiet
-        echo "  [OK] Deleted Cloud Run service: ${svc} (${region})"
-      else
-        echo "  [SKIP] Cloud Run service not found: ${svc} (${region})"
-      fi
-    fi
-  done
-
-  # 2. Delete Agent Registry Services (regional)
-  echo "[2/6] Deleting Agent Registry Services in ${region}..."
-  for svc in "${AR_SERVICES[@]}"; do
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      run_cmd "${GCLOUD}" agent-registry services delete "${svc}" \
-        --project="${PROJECT_ID}" \
-        --location="${region}" \
-        --quiet
-    else
-      if "${GCLOUD}" agent-registry services describe "${svc}" \
-        --project="${PROJECT_ID}" --location="${region}" --quiet >/dev/null 2>&1; then
-        "${GCLOUD}" agent-registry services delete "${svc}" \
-          --project="${PROJECT_ID}" \
-          --location="${region}" \
-          --quiet
-        echo "  [OK] Deleted Agent Registry Service: ${svc} (${region})"
-      else
-        echo "  [SKIP] Agent Registry Service not found: ${svc} (${region})"
-      fi
-    fi
-  done
-
-  # 3. Delete Artifact Registry repository
-  echo "[3/6] Deleting Artifact Registry repository '${REPO}' in ${region}..."
+# 1. Delete Cloud Run services
+echo "[1/6] Deleting Cloud Run services in ${REGION}..."
+for svc in "${RUN_SERVICES[@]}"; do
   if [[ "${DRY_RUN}" == "true" ]]; then
-    run_cmd "${GCLOUD}" artifacts repositories delete "${REPO}" \
+    run_cmd "${GCLOUD}" run services delete "${svc}" \
       --project="${PROJECT_ID}" \
-      --location="${region}" \
+      --region="${REGION}" \
       --quiet
   else
-    if "${GCLOUD}" artifacts repositories describe "${REPO}" \
-      --project="${PROJECT_ID}" --location="${region}" --quiet >/dev/null 2>&1; then
-      "${GCLOUD}" artifacts repositories delete "${REPO}" \
+    if "${GCLOUD}" run services describe "${svc}" \
+      --project="${PROJECT_ID}" --region="${REGION}" --quiet >/dev/null 2>&1; then
+      "${GCLOUD}" run services delete "${svc}" \
         --project="${PROJECT_ID}" \
-        --location="${region}" \
+        --region="${REGION}" \
         --quiet
-      echo "  [OK] Deleted Artifact Registry repository: ${REPO} (${region})"
+      echo "  [OK] Deleted Cloud Run service: ${svc} (${REGION})"
     else
-      echo "  [SKIP] Artifact Registry repository not found: ${REPO} (${region})"
-    fi
-  fi
-
-  if [[ "${DELETE_SOURCE_DEPLOY_REPO}" == "true" ]]; then
-    if [[ "${DRY_RUN}" == "true" ]]; then
-      run_cmd "${GCLOUD}" artifacts repositories delete "cloud-run-source-deploy" \
-        --project="${PROJECT_ID}" \
-        --location="${region}" \
-        --quiet
-    else
-      if "${GCLOUD}" artifacts repositories describe "cloud-run-source-deploy" \
-        --project="${PROJECT_ID}" --location="${region}" --quiet >/dev/null 2>&1; then
-        "${GCLOUD}" artifacts repositories delete "cloud-run-source-deploy" \
-          --project="${PROJECT_ID}" \
-          --location="${region}" \
-          --quiet
-        echo "  [OK] Deleted Cloud Run source-deploy AR repository: cloud-run-source-deploy (${region})"
-      else
-        echo "  [SKIP] Cloud Run source-deploy AR repository not found: cloud-run-source-deploy (${region})"
-      fi
+      echo "  [SKIP] Cloud Run service not found: ${svc} (${REGION})"
     fi
   fi
 done
+
+# 2. Delete Agent Registry Services (regional)
+echo "[2/6] Deleting Agent Registry Services in ${REGION}..."
+for svc in "${AR_SERVICES[@]}"; do
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    run_cmd "${GCLOUD}" agent-registry services delete "${svc}" \
+      --project="${PROJECT_ID}" \
+      --location="${REGION}" \
+      --quiet
+  else
+    if "${GCLOUD}" agent-registry services describe "${svc}" \
+      --project="${PROJECT_ID}" --location="${REGION}" --quiet >/dev/null 2>&1; then
+      "${GCLOUD}" agent-registry services delete "${svc}" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --quiet
+      echo "  [OK] Deleted Agent Registry Service: ${svc} (${REGION})"
+    else
+      echo "  [SKIP] Agent Registry Service not found: ${svc} (${REGION})"
+    fi
+  fi
+done
+
+# 3. Delete Artifact Registry repository
+echo "[3/6] Deleting Artifact Registry repository '${REPO}' in ${REGION}..."
+if [[ "${DRY_RUN}" == "true" ]]; then
+  run_cmd "${GCLOUD}" artifacts repositories delete "${REPO}" \
+    --project="${PROJECT_ID}" \
+    --location="${REGION}" \
+    --quiet
+else
+  if "${GCLOUD}" artifacts repositories describe "${REPO}" \
+    --project="${PROJECT_ID}" --location="${REGION}" --quiet >/dev/null 2>&1; then
+    "${GCLOUD}" artifacts repositories delete "${REPO}" \
+      --project="${PROJECT_ID}" \
+      --location="${REGION}" \
+      --quiet
+    echo "  [OK] Deleted Artifact Registry repository: ${REPO} (${REGION})"
+  else
+    echo "  [SKIP] Artifact Registry repository not found: ${REPO} (${REGION})"
+  fi
+fi
+
+if [[ "${DELETE_SOURCE_DEPLOY_REPO}" == "true" ]]; then
+  if [[ "${DRY_RUN}" == "true" ]]; then
+    run_cmd "${GCLOUD}" artifacts repositories delete "cloud-run-source-deploy" \
+      --project="${PROJECT_ID}" \
+      --location="${REGION}" \
+      --quiet
+  else
+    if "${GCLOUD}" artifacts repositories describe "cloud-run-source-deploy" \
+      --project="${PROJECT_ID}" --location="${REGION}" --quiet >/dev/null 2>&1; then
+      "${GCLOUD}" artifacts repositories delete "cloud-run-source-deploy" \
+        --project="${PROJECT_ID}" \
+        --location="${REGION}" \
+        --quiet
+      echo "  [OK] Deleted Cloud Run source-deploy AR repository: cloud-run-source-deploy (${REGION})"
+    else
+      echo "  [SKIP] Cloud Run source-deploy AR repository not found: cloud-run-source-deploy (${REGION})"
+    fi
+  fi
+fi
 
 # 4. Delete standalone Agent Registry Skills ONCE in ${SKILLS_LOCATION} (global/us/eu) via REST DELETE ?force=true
 echo ""
@@ -545,18 +497,16 @@ echo "Post-Teardown Zero-Leftover Audit (--limit=50 --quiet)"
 echo "========================================================================"
 
 if [[ "${DRY_RUN}" == "true" ]]; then
-  for region in "${TARGET_REGIONS[@]}"; do
-    run_cmd "${GCLOUD}" run services list --project="${PROJECT_ID}" --region="${region}" --limit=50 --quiet
-    run_cmd "${GCLOUD}" artifacts repositories list --project="${PROJECT_ID}" --location="${region}" --limit=50 --quiet
-    run_cmd "${GCLOUD}" agent-registry services list --project="${PROJECT_ID}" --location="${region}" --limit=50 --quiet
-  done
+  run_cmd "${GCLOUD}" run services list --project="${PROJECT_ID}" --region="${REGION}" --limit=50 --quiet
+  run_cmd "${GCLOUD}" artifacts repositories list --project="${PROJECT_ID}" --location="${REGION}" --limit=50 --quiet
+  run_cmd "${GCLOUD}" agent-registry services list --project="${PROJECT_ID}" --location="${REGION}" --limit=50 --quiet
   for sk in "${WORKSHOP_SKILLS[@]}"; do
     echo "[DRY-RUN] REST GET (expect 404) https://agentregistry.googleapis.com/v1/projects/${PROJECT_ID}/locations/${SKILLS_LOCATION}/skills/${sk}"
   done
   echo ""
   echo "[NOTE] Shared GCP build artifacts left untouched by default:"
   echo "  - If you deployed with '--deploy-mode source', Cloud Run auto-creates an Artifact Registry"
-  echo "    repository named 'cloud-run-source-deploy' in each region. Pass --delete-source-deploy-repo"
+  echo "    repository named 'cloud-run-source-deploy' in ${REGION}. Pass --delete-source-deploy-repo"
   echo "    to remove it if no other Cloud Run source deployments share this project."
   echo "  - Cloud Build regional staging buckets (created by --default-buckets-behavior=regional-user-owned-bucket)"
   echo "    are retained to avoid disrupting other builds in ${PROJECT_ID}."
@@ -566,25 +516,23 @@ fi
 
 LEFTOVERS=()
 
-for region in "${TARGET_REGIONS[@]}"; do
-  RUN_LIST="$("${GCLOUD}" run services list --project="${PROJECT_ID}" --region="${region}" --format="value(metadata.name)" --limit=50 --quiet 2>/dev/null || true)"
-  for svc in "${RUN_SERVICES[@]}"; do
-    if grep -Fxq "${svc}" <<<"${RUN_LIST}"; then
-      LEFTOVERS+=("Cloud Run (${region}): ${svc}")
-    fi
-  done
-
-  AR_REPO_LIST="$("${GCLOUD}" artifacts repositories list --project="${PROJECT_ID}" --location="${region}" --format="value(name)" --limit=50 --quiet 2>/dev/null || true)"
-  if grep -Eq "(^|/)${REPO}$" <<<"${AR_REPO_LIST}"; then
-    LEFTOVERS+=("Artifact Registry (${region}): ${REPO}")
+RUN_LIST="$("${GCLOUD}" run services list --project="${PROJECT_ID}" --region="${REGION}" --format="value(metadata.name)" --limit=50 --quiet 2>/dev/null || true)"
+for svc in "${RUN_SERVICES[@]}"; do
+  if grep -Fxq "${svc}" <<<"${RUN_LIST}"; then
+    LEFTOVERS+=("Cloud Run (${REGION}): ${svc}")
   fi
+done
 
-  AR_SVC_LIST="$("${GCLOUD}" agent-registry services list --project="${PROJECT_ID}" --location="${region}" --format="value(name)" --limit=50 --quiet 2>/dev/null || true)"
-  for svc in "${AR_SERVICES[@]}"; do
-    if grep -Eq "(^|/)${svc}$" <<<"${AR_SVC_LIST}"; then
-      LEFTOVERS+=("Agent Registry Service (${region}): ${svc}")
-    fi
-  done
+AR_REPO_LIST="$("${GCLOUD}" artifacts repositories list --project="${PROJECT_ID}" --location="${REGION}" --format="value(name)" --limit=50 --quiet 2>/dev/null || true)"
+if grep -Eq "(^|/)${REPO}$" <<<"${AR_REPO_LIST}"; then
+  LEFTOVERS+=("Artifact Registry (${REGION}): ${REPO}")
+fi
+
+AR_SVC_LIST="$("${GCLOUD}" agent-registry services list --project="${PROJECT_ID}" --location="${REGION}" --format="value(name)" --limit=50 --quiet 2>/dev/null || true)"
+for svc in "${AR_SERVICES[@]}"; do
+  if grep -Eq "(^|/)${svc}$" <<<"${AR_SVC_LIST}"; then
+    LEFTOVERS+=("Agent Registry Service (${REGION}): ${svc}")
+  fi
 done
 
 # Verify every workshop Skill returns 404 in ${SKILLS_LOCATION} (REST GET avoids
@@ -673,9 +621,9 @@ fi
 echo ""
 echo "[NOTE] Shared GCP build artifacts (left untouched by default unless opted in):"
 echo "  - If you used '--deploy-mode source', Cloud Run auto-creates an Artifact Registry repository"
-echo "    named 'cloud-run-source-deploy' in each region. Re-run with --delete-source-deploy-repo"
+echo "    named 'cloud-run-source-deploy' in ${REGION}. Re-run with --delete-source-deploy-repo"
 echo "    to remove it if this is a dedicated workshop sandbox."
 echo "  - Regional Cloud Build user-owned staging buckets (--default-buckets-behavior=regional-user-owned-bucket)"
 echo "    are retained by default; inspect via 'gcloud storage buckets list --project=${PROJECT_ID} --limit=50 --quiet'."
 echo ""
-echo "[PASS] Zero-leftover audit confirmed all workshop resources removed in: ${TARGET_REGIONS[*]} (skills: ${SKILLS_LOCATION})"
+echo "[PASS] Zero-leftover audit confirmed all workshop resources removed in: ${REGION} (skills: ${SKILLS_LOCATION})"

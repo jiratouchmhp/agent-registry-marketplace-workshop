@@ -58,7 +58,7 @@ What are you ingesting or managing on Agent Registry (v1)?
 | **4** | Omit top-level `interfaces` when `agentSpec.type == "A2A_AGENT_CARD"`, omit legacy A2A v0.x `capabilities.stateTransitionHistory`, and assign **unique URLs** per `supportedInterfaces` entry (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`, ≤ 10 KB). | Setting both top-level `interfaces` and `A2A_AGENT_CARD`, keeping `stateTransitionHistory`, duplicating `/a2a` across bindings, or patching a Service's `oneof spec` type. | Live Agent Registry rejects non-empty top-level `interfaces`, unknown field `stateTransitionHistory`, and `duplicate interface url found in agent card` with `400 INVALID_ARGUMENT`, and `oneof spec` `type` is immutable. |
 | **5** | Pass `--only-skills` (and `--skip-mcp-probe`) whenever `terraform/core/agent_registry_services.tf` owns Cloud Run `google_agent_registry_service` resources. | Running full `tools.plugin_sync sync` / `ingest` without `--only-skills` against a Terraform-managed live project. | Local `127.0.0.1` URLs in `starter-marketplace/` will clobber live Cloud Run Service endpoints (`skills_bootstrap.tf` enforces `--only-skills` automatically). |
 | **6** | Pass private Git tokens **only** via `--git-token-env ENV_VAR_NAME` (or `skills_repo_token_env = "GITLAB_TOKEN"` in `.tfvars`). | Embedding raw tokens in `--repo-url`, CLI arguments, or `.tfvars`. | `--git-token-env` injects an origin-scoped ephemeral `GIT_CONFIG_*` `http.<origin>/.extraHeader`, keeps `.git/config` and logs clean, and strips URL credentials before stamping `source_repo`. |
-| **7** | Follow the live regional split (regional `Services` in Bangkok `asia-southeast3` / Singapore `asia-southeast1`; standalone `Skills` in **`global`**, or `us`/`eu` for CMEK via `--skills-location global`), follow `DEPRECATED` → `DECOMMISSIONED`, call REST `DELETE .../locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true` when revisions exist, and create skills in the target catalog project. | Uploading live standalone `Skills` to single-region `asia-southeast3`, jumping straight to `DECOMMISSIONED`, passing a nonexistent `--force` flag to `gcloud agent-registry skills delete`, or expecting cross-project skill rollup. | Live Agent Registry hosts standalone `Skills` only in `global`/`us`/`eu` (shared across Bangkok & Singapore); `DECOMMISSIONED` is terminal/irreversible and only permitted from `DEPRECATED`; `gcloud skills delete` has **no `--force` flag**; skills do **not** roll up across projects. |
+| **7** | Follow the Bangkok-first placement (regional `Services` in Bangkok `asia-southeast3`; standalone `Skills` in **`global`**, or `us`/`eu` for CMEK via `--skills-location global`; auto-registered Google/GCP remote MCP servers in **`global`**), follow `DEPRECATED` → `DECOMMISSIONED`, call REST `DELETE .../locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true` when revisions exist, and create skills in the target catalog project. | Uploading live standalone `Skills` to single-region `asia-southeast3`, jumping straight to `DECOMMISSIONED`, passing a nonexistent `--force` flag to `gcloud agent-registry skills delete`, or expecting cross-project skill rollup. | Live Agent Registry hosts standalone `Skills` only in `global`/`us`/`eu` (single-region `/skills` endpoints time out); `DECOMMISSIONED` is terminal/irreversible and only permitted from `DEPRECATED`; `gcloud skills delete` has **no `--force` flag**; skills do **not** roll up across projects. |
 | **8** | Pass `searchType` (`KEYWORD` \| `SEMANTIC`) + `filter: "state=ACTIVE AND defaultRevisionFindingCount=0"` **only** on `skills:search`, and pass **`--wait-for-scan`** on live `tools.plugin_sync` runs (including idempotent re-deploys!). | Passing `searchType` to `agents:search` or `mcpServers:search`, calling `endpoints:search`, or promoting `defaultRevision` on re-deploy before the new `SkillRevision` async scan finishes. | `agents:search` and `mcpServers:search` accept `{"searchString": "..."}` only; `endpoints` has no `:search` endpoint (use AIP-160 `?filter=...`); under `ENABLED_BLOCKING`, `PATCH defaultRevision` fails with `400 FAILED_PRECONDITION` (pending scan results) unless `--wait-for-scan` polls `wait_for_revision_scan_completion()` (~10s). |
 
 ## Quick-Start Patterns
@@ -111,7 +111,7 @@ make demo-sync-repo \
 
 ### 3. Terraform Core (`terraform/core/`) Dual-Source Bootstrap & Services
 
-Configure `terraform/core/terraform.tfvars` (verified live APAC split: `location = "asia-southeast3"`, `secondary_location = "asia-southeast1"`, `skills_location = "global"`, see `terraform/core/terraform.tfvars.example`), build images first via `scripts/build_images_cloudbuild.sh`, then preview with `make tf-core-plan`:
+Configure `terraform/core/terraform.tfvars` (Bangkok primary `location = "asia-southeast3"` + `skills_location = "global"`, see `terraform/core/terraform.tfvars.example`), build images first via `scripts/build_images_cloudbuild.sh`, then preview with `make tf-core-plan`:
 
 ```hcl
 # Option 1 (default): starter plugin + local-skills/  |  Option 2: skills_source_mode = "git"
@@ -124,7 +124,7 @@ local_skills_plugin_name       = "local-ops-toolkit"
 # skills_repo_token_env = "GITLAB_TOKEN" (env var NAME only!), skills_repo_plugin_name
 ```
 
-`terraform/core/agent_registry_services.tf` owns `google_agent_registry_service` (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` in `asia-southeast3` / `asia-southeast1`) and resolves projected IDs via `basename(...registry_resource)`; `terraform/core/skills_bootstrap.tf` targets `var.skills_location` (`global`) and always passes `--only-skills --skip-mcp-probe --wait-for-scan`.
+`terraform/core/agent_registry_services.tf` owns `google_agent_registry_service` (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` in Bangkok `asia-southeast3`) and resolves projected IDs via `basename(...registry_resource)`; `terraform/core/skills_bootstrap.tf` targets `var.skills_location` (`global`) and always passes `--only-skills --skip-mcp-probe --wait-for-scan`.
 
 ### 4. `gcloud` Revision Promotion, Rollback & `Finding` Triage (Live GCP)
 
@@ -176,7 +176,7 @@ curl -fsSL "${BASE}/skills" | .venv/bin/python -m json.tool      # private-* ski
 curl -fsSL "${BASE}/mcpServers" | .venv/bin/python -m json.tool  # finops-mcp-server with 3 annotated tools
 curl -fsSL "${BASE}/agents" | .venv/bin/python -m json.tool      # finops-advisor-agent with projected interfaces
 
-# 3. Live GCP Mode verification (standalone Skills in global; regional MCP/A2A in Bangkok/Singapore)
+# 3. Live GCP Mode verification (standalone Skills in global; regional MCP/A2A in Bangkok asia-southeast3)
 gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet
 gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
 gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet

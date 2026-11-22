@@ -19,11 +19,11 @@ flowchart TB
         OPT2 -.->|"Graduate to push CI"| PIPE
     end
 
-    subgraph GCPControl["Control & Governance Plane (Verified Live Regional Split)"]
-        AR_SK["Agent Registry Standalone Skills (global — or us/eu CMEK)<br/>(Local mock: :8090)<br/>• private-* Skills (auto-filtered; Google 1P excluded)<br/>• Immutable SkillRevisions + ENABLED_BLOCKING Findings"]
-        AR_SV["Agent Registry Regional Services & Bindings<br/>Bangkok (asia-southeast3) Primary / Singapore (asia-southeast1) DR<br/>• Services -> McpServer / A2A v1.0 Agent / Endpoint<br/>• Bindings + AuthProvider (asia-southeast1)"]
+    subgraph GCPControl["Control & Governance Plane (Bangkok Primary + Service-Specific Fallbacks)"]
+        AR_SK["Agent Registry Standalone Skills (global — or us/eu CMEK)<br/>(Local mock: :8090)<br/>• private-* Skills (auto-filtered; Google 1P excluded)<br/>• Auto-registered Google/GCP remote MCP (global)<br/>• Immutable SkillRevisions + ENABLED_BLOCKING Findings"]
+        AR_SV["Agent Registry Regional Services & Bindings<br/>Bangkok (asia-southeast3) Primary<br/>• Services -> McpServer / A2A v1.0 Agent / Endpoint<br/>• Bindings (asia-southeast3) + AuthProvider Fallback (asia-southeast1)"]
         KMS_CMEK["Cloud KMS Symmetric Key (us/europe)<br/>SkillEncryptionSpec (CMEK for us/eu Skills only)"]
-        KMS_SIGN["Cloud KMS Asymmetric Key (EC_SIGN_P256_SHA256)<br/>Bangkok (asia-southeast3) / Singapore (asia-southeast1)<br/>CI: signerVerifier | Middleware: publicKeyViewer"]
+        KMS_SIGN["Cloud KMS Asymmetric Key (EC_SIGN_P256_SHA256)<br/>Bangkok (asia-southeast3)<br/>CI: signerVerifier | Middleware: publicKeyViewer"]
         ORGPOL["Org Policy Custom Constraint<br/>Deny scanningConfig.policy == DISABLED"]
         AUDIT["Cloud Logging Audit Bucket (asia-southeast3; lock_audit_bucket=true in prod)<br/>Admin Activity + ADMIN_READ + Gateway Requests"]
         AR_SK --- KMS_CMEK
@@ -32,17 +32,17 @@ flowchart TB
         AR_SV --> AUDIT
     end
 
-    subgraph RuntimeServe["Serving & Distribution Plane (Zero-Docker Cloud Build -> Cloud Run)"]
-        MW["Polyglot Middleware (Cloud Run :8080)<br/>Bangkok (asia-southeast3) + Singapore (asia-southeast1)<br/>Shares global Skills (private-*) + regional Services<br/>• GET /health & /v1/health (GFE reserves /healthz)<br/>• GET /v1/catalog (Semaphore(8) verification)<br/>• GET /v1/marketplace/{claude,copilot,codex,antigravity}.json<br/>• GET /v1/plugins/{name}.zip | POST /mcp"]
-        MCP_S["FinOps Sample MCP Server (:8091)<br/>get_billing_summary (readOnly)<br/>analyze_bq_query (readOnly)<br/>delete_idle_dataset (destructive)"]
-        A2A_S["FinOps Sample A2A v1.0 Agent (:8092)<br/>/.well-known/agent-card.json<br/>JSONRPC: /a2a | HTTP+JSON: /a2a/http"]
+    subgraph RuntimeServe["Serving & Distribution Plane (Zero-Docker Cloud Build -> Cloud Run in asia-southeast3)"]
+        MW["Polyglot Middleware (Cloud Run :8080 — asia-southeast3)<br/>Reads global Skills (private-*) + Bangkok Services (asia-southeast3)<br/>• GET /health & /v1/health (GFE reserves /healthz)<br/>• GET /v1/catalog (Semaphore(8) verification)<br/>• GET /v1/marketplace/{claude,copilot,codex,antigravity}.json<br/>• GET /v1/plugins/{name}.zip | POST /mcp"]
+        MCP_S["FinOps Sample MCP Server (:8091 — asia-southeast3)<br/>get_billing_summary (readOnly)<br/>analyze_bq_query (readOnly)<br/>delete_idle_dataset (destructive)"]
+        A2A_S["FinOps Sample A2A v1.0 Agent (:8092 — asia-southeast3)<br/>/.well-known/agent-card.json<br/>JSONRPC: /a2a | HTTP+JSON: /a2a/http"]
         GW["Network Services Agent Gateway (enable_agent_gateway=false in APAC;<br/>GA in us-central1 / europe-west1) + IAP v2 UAP (CEL)"]
     end
 
     subgraph Consumers["Consumption Plane"]
-        HUB["tools.hub_sync (1-Command CLI)<br/>Ownership-Tracked Hydration + --fallback-middleware-url"]
+        HUB["tools.hub_sync (1-Command CLI)<br/>Ownership-Tracked Hydration across 4 IDEs"]
         IDES["Developer IDEs / CLIs<br/>Claude Code | Copilot/VS Code | Codex | Antigravity"]
-        ADK["Platform Agents (Google ADK)<br/>AgentRegistry (regional) + GCPSkillRegistry (global) + SkillToolset"]
+        ADK["Platform Agents (Google ADK)<br/>AgentRegistry (asia-southeast3) + GCPSkillRegistry (global) + SkillToolset"]
     end
 
     INGEST -->|"Sign canonical digest"| KMS_SIGN
@@ -80,14 +80,14 @@ Built-in security guardrails for Option 2 Git ingestion:
 - **Terraform ownership boundary**: [terraform/core/skills_bootstrap.tf](../terraform/core/skills_bootstrap.tf) supports `skills_source_mode = "local" | "git"`, targets `var.skills_location` (default `"global"`), and always passes `--only-skills --skip-mcp-probe --wait-for-scan` so `google_agent_registry_service` resources in [terraform/core/agent_registry_services.tf](../terraform/core/agent_registry_services.tf) are never overwritten.
 - **Async live scan completion, re-deploy race protection & quota headers**: When targeting live `https://agentregistry.googleapis.com/v1`, `tools.plugin_sync` automatically attaches `x-goog-user-project` and `--wait-for-scan` polls both initial `STATE_DRAFT` → `STATE_ACTIVE` transitions **and** new `SkillRevision` `scanState` completion (`wait_for_revision_scan_completion()`) before `PATCH`ing `defaultRevision` on idempotent re-deploys under `ENABLED_BLOCKING` (preventing `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results`).
 
-### APAC Multi-Region Split & Failover (Bangkok Primary + Singapore Secondary + `global` Skills)
+### Bangkok-First Single Deployment & Service-Specific Fallbacks
 
-Live GCP deployments use a **verified regional split** across both Track 2 (`scripts/deploy_gcp.sh --primary-region asia-southeast3 --skills-location global --enable-secondary`) and Track 3 (`terraform/core` with checked-in zero-Docker `cloudbuild/*.yaml` configs built first via `scripts/build_images_cloudbuild.sh`):
-- **Regional (Bangkok `asia-southeast3` Primary + Singapore `asia-southeast1` Secondary/DR):** Cloud Run v2 workloads (`polyglot-middleware`, `sample-mcp-server`, `sample-a2a-agent`), Cloud Build, Artifact Registry, Cloud Storage, and **Agent Registry `Services` (`McpServer`, `Agent`, `Endpoint`)**.
-- **Shared Multi-Region (`global` default for APAC, or `us`/`eu` for CMEK):** **Agent Registry Standalone `Skills`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `var.skills_location = "global"`). Skills are ingested **once** in `global` and read seamlessly by both Bangkok primary and Singapore secondary Middleware instances. Because live `locations/global/skills` also exposes built-in Google first-party skills, Middleware (`INCLUDE_PUBLIC_SKILLS=false` default) and `platform_agent` (`only_private_skills=True` default) automatically filter to **`private-*`** skills, and `CatalogService.build_snapshot()` bounds concurrent verification with `asyncio.Semaphore(8)` for responsive catalog builds even with 20+ private skills.
-- **Workstation failover:** On developer laptops, `tools.hub_sync sync --middleware-url <bangkok-url> --fallback-middleware-url <singapore-url>` fails over seamlessly if Bangkok is unreachable.
+Live GCP deployments run a **single, clean deployment anchored in Bangkok (`asia-southeast3`)** across both Track 2 (`scripts/deploy_gcp.sh --region asia-southeast3 --skills-location global`) and Track 3 (`terraform/core` with checked-in zero-Docker `cloudbuild/*.yaml` configs built first via `scripts/build_images_cloudbuild.sh`), avoiding unnecessary duplicate multi-region stacks:
+- **Bangkok (`asia-southeast3`) — Primary Region (all supported services):** Cloud Run v2 workloads (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), **Agent Registry `Services` (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`) & `Bindings`**, Cloud Storage skill staging bucket, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), and Cloud Logging audit bucket.
+- **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`)** uses `auth_provider_location = "asia-southeast1"` because Agent Identity is GA in Singapore and not yet available in Bangkok.
+- **API-Mandated Global / Multi-Region:** **Agent Registry Standalone `Skills`** live in **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `var.skills_location = "global"`, or `us`/`eu` for CMEK — single-region `/skills` endpoints time out), auto-registered Google/GCP remote MCP servers live in **`global`**, optional native Skill CMEK (`SkillEncryptionSpec`) uses **`us`/`eu`** multi-regions only, and optional Network Services Agent Gateway uses **`us-central1`/`europe-west1`** only (`enable_agent_gateway = false` by default for APAC). Because live `locations/global/skills` also exposes built-in Google first-party skills, Middleware (`INCLUDE_PUBLIC_SKILLS=false` default) and `platform_agent` (`only_private_skills=True` default) automatically filter to **`private-*`** skills, and `CatalogService.build_snapshot()` bounds concurrent verification with `asyncio.Semaphore(8)` for responsive catalog builds even with 20+ private skills.
 
-See [Attendee Quickstart & APAC Regional Matrix](attendee-quickstart.md) for the complete Workstream A + Workstream B availability table (`auth_provider_location = "asia-southeast1"`, `enable_agent_gateway = false` in APAC because Agent Gateway is currently `us-central1`/`europe-west1`, regional KMS asymmetric signing `EC_SIGN_P256_SHA256` in `asia-southeast3`/`asia-southeast1` vs. multi-region CMEK in `us`/`eu`, and `lock_audit_bucket = false` in sandboxes vs. `true` in production).
+See [Attendee Quickstart & APAC Regional Matrix](attendee-quickstart.md) for the complete Workstream A + Workstream B placement table (`location = "asia-southeast3"`, `auth_provider_location = "asia-southeast1"` fallback, `skills_location = "global"`, `enable_agent_gateway = false` in APAC, regional KMS asymmetric signing `EC_SIGN_P256_SHA256` in `asia-southeast3` vs. multi-region CMEK in `us`/`eu`, and `lock_audit_bucket = false` in sandboxes vs. `true` in production).
 
 ### Component Ports & Defaults (`WORKSHOP_SPEC.json`)
 

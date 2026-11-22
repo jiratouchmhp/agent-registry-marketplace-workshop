@@ -24,8 +24,7 @@ Authoritative reference for `tools/hub_sync/` (`cli.py`, `hydration.py`, `adapte
 
 | Option | Env / Default | Purpose |
 |---|---|---|
-| `--middleware-url` | `$HUB_MIDDLEWARE_URL` or `http://127.0.0.1:8080` | Base URL of the primary Polyglot Marketplace Middleware (e.g. Bangkok `asia-southeast3`) |
-| `--fallback-middleware-url` | `$HUB_FALLBACK_MIDDLEWARE_URL` or `None` | Optional secondary Middleware URL (e.g. Singapore `asia-southeast1`) used automatically if primary is unreachable |
+| `--middleware-url` | `$HUB_MIDDLEWARE_URL` or `http://127.0.0.1:8080` | Base URL of the Bangkok (`asia-southeast3`) Polyglot Marketplace Middleware |
 | `--home` | `~` | Target developer home directory (use `/tmp/acme-agent-hub-demo-home` for safe workshop testing) |
 | `--hub-dir` | `<home>/.acme-agent-hub` | Override local hub storage directory |
 | `--tools` | `all` | `all` or comma-separated subset of `claude,copilot,codex,antigravity` |
@@ -152,7 +151,7 @@ from google.adk.tools.skill_toolset import SkillToolset
 CredentialManager.register_auth_provider(GcpAuthProvider())
 
 project_id = os.environ["GCP_PROJECT_ID"]   # Catalog project (skills are strictly project-scoped!)
-location = os.environ.get("GCP_LOCATION", "asia-southeast3")  # Regional Services (Bangkok / Singapore)
+location = os.environ.get("GCP_LOCATION", "asia-southeast3")  # Primary regional Services (Bangkok)
 skills_location = os.environ.get("AGENT_REGISTRY_SKILLS_LOCATION", "global")  # Standalone Skills (global / us / eu)
 
 # 2. Discover & materialize governed regional MCP Toolsets and Remote A2A sub-agents

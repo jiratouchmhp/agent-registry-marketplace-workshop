@@ -22,14 +22,12 @@ import hashlib
 import hmac
 import io
 import json
-import logging
 import os
 import re
 import shutil
 import stat
 import tempfile
 import zipfile
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -40,7 +38,6 @@ import httpx
 from schemas.validators import parse_frontmatter
 
 DEFAULT_HUB_DIR_NAME = ".acme-agent-hub"
-logger = logging.getLogger(__name__)
 SYNC_MANIFEST_FILENAME = ".sync-manifest.json"
 MANIFEST_SCHEMA_VERSION = "1.0.0"
 
@@ -1004,86 +1001,6 @@ class HubClient:
         else:
             verified_sha = compute_sha256(content)
         return content, verified_sha
-
-
-def fetch_catalog_with_failover(
-    primary_url: str,
-    *,
-    fallback_url: str | None = None,
-    marketplace_name_override: str | None = None,
-    token: str | None = None,
-    quota_project: str | None = None,
-    extra_headers: dict[str, str] | None = None,
-    bootstrap_mcp_only: bool = False,
-    http_client: httpx.Client | None = None,
-    http_transport: httpx.BaseTransport | None = None,
-    on_failover: Callable[[str, str, Exception], None] | None = None,
-) -> tuple[CatalogPayload, list[tuple[CatalogPlugin, bytes, str]], str, bool]:
-    """Fetch catalog and validated plugin ZIPs with automatic primary-to-fallback failover.
-
-    Retries against ``fallback_url`` when fetching from ``primary_url`` raises
-    :class:`CatalogFetchError` or :class:`httpx.HTTPError`. Security/integrity
-    violations (:class:`IntegrityError`, :class:`ZipSecurityError`) are never
-    swallowed.
-
-    Returns ``(catalog, downloaded, active_middleware_url, failover_used)``.
-    """
-    primary = primary_url.strip().rstrip("/")
-    fallback = (
-        fallback_url.strip().rstrip("/")
-        if isinstance(fallback_url, str) and fallback_url.strip()
-        else None
-    )
-
-    def _fetch_from(
-        target_url: str,
-    ) -> tuple[CatalogPayload, list[tuple[CatalogPlugin, bytes, str]]]:
-        with HubClient(
-            target_url,
-            token=token,
-            quota_project=quota_project,
-            extra_headers=extra_headers,
-            client=http_client,
-            transport=http_transport,
-        ) as client:
-            fetched_catalog = client.fetch_catalog(
-                marketplace_name_override=marketplace_name_override
-            )
-            fetched_downloads: list[tuple[CatalogPlugin, bytes, str]] = []
-            if not bootstrap_mcp_only:
-                for plugin in fetched_catalog.plugins:
-                    validate_safe_identifier(
-                        plugin.name, label="plugin.name", error_cls=CatalogFetchError
-                    )
-                    zip_bytes, verified_sha = client.download_plugin_zip(plugin)
-                    # Validate ZIP traversal / symlink / agent-name safety in memory before disk writes
-                    validate_zip_bytes(zip_bytes)
-                    fetched_downloads.append((plugin, zip_bytes, verified_sha))
-            return fetched_catalog, fetched_downloads
-
-    try:
-        catalog, downloaded = _fetch_from(primary)
-        return catalog, downloaded, primary, False
-    except (CatalogFetchError, httpx.HTTPError) as exc:
-        if not fallback or fallback == primary:
-            raise
-        if on_failover is not None:
-            logger.debug(
-                "Primary middleware '%s' failed (%s); failing over to fallback middleware '%s'.",
-                primary,
-                exc,
-                fallback,
-            )
-            on_failover(primary, fallback, exc)
-        else:
-            logger.warning(
-                "Primary middleware '%s' failed (%s); failing over to fallback middleware '%s'.",
-                primary,
-                exc,
-                fallback,
-            )
-        catalog, downloaded = _fetch_from(fallback)
-        return catalog, downloaded, fallback, True
 
 
 def _extract_mcp_servers_from_bundle(plugin_dir: Path) -> dict[str, dict[str, Any]]:

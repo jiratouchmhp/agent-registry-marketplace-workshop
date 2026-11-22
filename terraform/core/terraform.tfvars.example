@@ -25,27 +25,17 @@
 
 project_id = "acme-agent-governance"
 
-# Primary region: Bangkok (asia-southeast3).
-# Secondary region: Singapore (asia-southeast1) for optional active-standby failover.
-location           = "asia-southeast3"
-secondary_location = "asia-southeast1"
-
-# Active-standby multi-region failover toggle (off by default for single-region labs).
-# Uncomment and set true (after pushing images to asia-southeast1 AR) to deploy
-# secondary Cloud Run services + Artifact Registry repository in Singapore:
-# enable_secondary_region    = true
-# secondary_middleware_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/polyglot-middleware:1.0.0"
-# secondary_sample_mcp_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-mcp-server:1.0.0"
-# secondary_sample_a2a_image = "asia-southeast1-docker.pkg.dev/acme-agent-governance/agent-marketplace/sample-a2a-agent:1.0.0"
-enable_secondary_region = false
+# Primary region: Bangkok (asia-southeast3) for all supported Workstream A services
+# (Cloud Run, Cloud Build, Artifact Registry, Agent Registry Services, and GCS staging bucket).
+location = "asia-southeast3"
 
 # Optional: decouple regional Agent Registry Services location from Cloud Run compute region.
 # Leave empty ("") to default to `location` (asia-southeast3).
 agent_registry_location = ""
 
-# Standalone Agent Registry v1 Skill resources are supported only in multi-region
-# locations ("global", "us", or "eu"), while Services & Cloud Run run regionally
-# in Bangkok (asia-southeast3) and Singapore (asia-southeast1).
+# Standalone Agent Registry v1 Skill resources are API-mandated to multi-region
+# locations ("global", "us", or "eu"; single-region /skills endpoints time out),
+# while Services & Cloud Run workloads run regionally in Bangkok (asia-southeast3).
 skills_location = "global"
 
 # Container images (leave empty to default to `:latest` in this module's AR repo)

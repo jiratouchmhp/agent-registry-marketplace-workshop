@@ -55,10 +55,10 @@ gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage 
 
 In [terraform/security_governance/auth_bindings.tf](../../terraform/security_governance/auth_bindings.tf), `google_agent_identity_auth_provider` + `google_agent_registry_binding` bind the FinOps A2A Agent (`source.identifier`) to the FinOps MCP Server (`target.identifier`) with scoped OAuth (`cloud-billing.readonly`, `bigquery.readonly`) and explicitly blocked directory admin scopes.
 
-> **Workstream B APAC Regional Split & Toggles (`terraform/security_governance/terraform.tfvars`):**
-> - **`location = "asia-southeast3"`** (Bangkok primary for regional Agent Registry `Services`/`Bindings`, IAP egressor IAM, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing, and regional Cloud Logging bucket; optional secondary/DR compute & `Services` in Singapore `asia-southeast1`).
-> - **Standalone `Skills` location (`global`, or `us`/`eu` for CMEK):** Skills and per-`Skill` IAM live in **`global`** for APAC (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `skills_location = "global"` in `terraform/core/`), shared across Bangkok and Singapore.
-> - **`auth_provider_location = "asia-southeast1"`** (Singapore — verified APAC GA region for `agentidentity.googleapis.com`; Bangkok `asia-southeast3` does not host Agent Identity yet).
+> **Workstream B Bangkok-First Regional Placement & Service-Specific Fallbacks (`terraform/security_governance/terraform.tfvars`):**
+> - **`location = "asia-southeast3"` (Bangkok — Primary Region):** Regional Agent Registry `Services`/`Bindings`, IAP egressor IAM, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing, and regional Cloud Logging audit bucket.
+> - **`auth_provider_location = "asia-southeast1"` (Singapore — Service-Specific Fallback ONLY):** Workstream B **Agent Identity Auth Manager (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`)** uses Singapore because Agent Identity is GA in `asia-southeast1` and not yet available in Bangkok (`asia-southeast3`).
+> - **Standalone `Skills` location (`global`, or `us`/`eu` for CMEK):** Skills and per-`Skill` IAM live in **`global`** (API supports `global`, `us`, `eu` only; `AGENT_REGISTRY_SKILLS_LOCATION=global`, `skills_location = "global"` in `terraform/core/`), and auto-registered Google/GCP remote MCP servers live in **`global`**.
 > - **`enable_agent_gateway = false`** (Network Services Agent Gateway on Cloud Run is currently GA only in `us-central1` and `europe-west1`; set `enable_agent_gateway = true` and `agent_gateway_location = "us-central1"` only when evaluating live Agent Gateway in US/EU).
 > - **`lock_audit_bucket = false`** in ephemeral workshop sandboxes so `terraform destroy` works cleanly (**set `lock_audit_bucket = true` in production** for irreversible WORM log retention!).
 
@@ -218,18 +218,17 @@ terraform -chdir=terraform/security_governance destroy
 # 2. Destroy Workstream A resources (choose the Track you used in Lab 03):
 # Track 2 (Zero-Terraform gcloud + Cloud Build):
 make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# Or with Singapore secondary cleanup:
-# scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --primary-region asia-southeast3 --enable-secondary
+# Direct script equivalent:
+# scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 
 # Track 3 (Terraform Core — set force_destroy_staging_bucket = true in sandbox .tfvars if objects exist):
 # terraform -chdir=terraform/core destroy
 
-# 3. Verify zero workshop Cloud Run services remain in Bangkok and Singapore
+# 3. Verify zero workshop Cloud Run services remain in Bangkok (asia-southeast3)
 gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast3" --limit=50 --quiet
-gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast1" --limit=50 --quiet
 ```
 
-> **Tip for Deleting Leftover Skills with Revisions:** Because `gcloud agent-registry skills delete` does **not** accept `--force`, delete any remaining test skill with revisions via REST `DELETE "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true"` with `Authorization: Bearer $(gcloud auth print-access-token --quiet)` and `x-goog-user-project: ${GCP_PROJECT_ID}` headers (handled automatically by `scripts/destroy_gcp.sh`).
+> **Tip for Deleting Leftover Skills with Revisions & IAM v3 Bindings:** Because `gcloud agent-registry skills delete` does **not** accept `--force`, delete any remaining test skill with revisions via REST `DELETE "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true"` with `Authorization: Bearer $(gcloud auth print-access-token --quiet)` and `x-goog-user-project: ${GCP_PROJECT_ID}` headers. On projects using IAM policy version 3 (containing conditional IAM bindings), always pass `--condition=None` to `gcloud projects remove-iam-policy-binding` so teardown does not fail or prompt interactively. Both are handled automatically by `scripts/destroy_gcp.sh`.
 
 ---
 
@@ -252,7 +251,8 @@ gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast1
 | `bindings:fetchAvailable` returns all bindings when testing locally | `X-Mock-Allowed-Auth-Providers` header omitted | Pass `-H "X-Mock-Allowed-Auth-Providers: <provider-id>"` to simulate IAM filtering in `mock_registry`. |
 | `gcloud beta iam access-policies create` fails with invalid principal format | Used a short email instead of IAM v3 Workload / Agent Identity principal URI | Format principals per IAP v2 UAP syntax (e.g. `principal://agents.global.proj-<NUM>.system.id.goog/...` or `principal://iam.googleapis.com/...`). |
 | Missing `apphubendpoint.googleapis.com` discovery audit records | Only enabled `ADMIN_READ` on `agentregistry.googleapis.com` | Enable `ADMIN_READ` Data Access on **both** `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com` (configured in `audit_logging.tf`). |
-| `gcloud agent-registry skills add-iam-policy-binding` returns `404` in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu` for CMEK) on live Agent Registry `v1` | Pass `--location=global` (matching `AGENT_REGISTRY_SKILLS_LOCATION`) for per-`Skill` IAM while keeping `Bindings` and IAP egressor IAM in `asia-southeast3` and `AuthProvider` in `asia-southeast1`. |
+| `gcloud agent-registry skills add-iam-policy-binding` returns `404` or times out in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu` for CMEK) on live Agent Registry `v1` | Pass `--location=global` (matching `AGENT_REGISTRY_SKILLS_LOCATION`) for per-`Skill` IAM while keeping `Bindings` and IAP egressor IAM in Bangkok (`asia-southeast3`) and `AuthProvider` in Singapore (`asia-southeast1`). |
+| `gcloud projects remove-iam-policy-binding` fails or prompts during teardown (`IAM policy version 3`) | Project contains unrelated conditional IAM bindings, requiring an explicit condition selector when mutating IAM policies | Pass `--condition=None` to `gcloud projects add-iam-policy-binding` and `remove-iam-policy-binding` (already automated in `scripts/deploy_gcp.sh` and `scripts/destroy_gcp.sh`, which also sweeps `deleted:serviceAccount:<email>?uid=...` tombstones). |
 
 ---
 

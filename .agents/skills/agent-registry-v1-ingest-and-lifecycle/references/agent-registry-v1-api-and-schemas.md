@@ -10,9 +10,9 @@ Deep technical reference for **Google Cloud Agent Registry (`v1` GA)** (`agentre
 - **REST Base:** `https://agentregistry.googleapis.com/v1` (Local Workshop Mock: `http://127.0.0.1:8090/v1`, resettable via `POST http://127.0.0.1:8090/_mock/reset`)
 - **Per-Product Per-Project Service Agent (P4SA):** `service-${PROJECT_NUMBER}@gcp-sa-agentregistry.iam.gserviceaccount.com`
   - Required for importing `gcsSource` skill ZIPs (`roles/storage.objectViewer` on the GCS staging bucket) and CMEK at-rest encryption (`roles/cloudkms.cryptoKeyEncrypterDecrypter`).
-- **Verified Live Regional Split (Locations):**
-  - **Regional `Services` (`McpServer`, `Agent`, `Endpoint`) & `Bindings`:** Bangkok (`asia-southeast3`, primary) and Singapore (`asia-southeast1`, secondary/DR), plus other regional endpoints such as `us-central1`, `europe-west1` (and `global` for auto-discovered Google/GCP remote MCP servers).
-  - **Standalone `Skills` (`Skill`, `SkillRevision`, `Findings`):** Hosted **only** in **`global`** (default for APAC — shared seamlessly by Bangkok & Singapore Middleware, filtering to `private-*` skills) or multi-regions **`us`** / **`eu`** (required for CMEK `SkillEncryptionSpec`). Single regions (`asia-southeast3` / `asia-southeast1`) do not host live standalone Skills. *(Local `mock_registry` accepts regional locations for offline drills.)*
+- **Verified Bangkok-First Regional Placement (Locations):**
+  - **Regional `Services` (`McpServer`, `Agent`, `Endpoint`) & `Bindings`:** Bangkok (`asia-southeast3`) primary (with Singapore `asia-southeast1` reserved strictly as the service-specific fallback for Workstream B Agent Identity `AuthProvider`, which is not yet available in Bangkok). Auto-registered Google/GCP remote MCP servers live in **`global`**.
+  - **Standalone `Skills` (`Skill`, `SkillRevision`, `Findings`):** Hosted **only** in **`global`** (default for APAC, filtering to `private-*` skills) or multi-regions **`us`** / **`eu`** (required for CMEK `SkillEncryptionSpec`). Single-region `/skills` endpoints (such as `asia-southeast3`) time out / are unsupported on live GCP. *(Local `mock_registry` accepts regional locations for offline drills.)*
 - **No Generic `labels` Map:** `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, and `Skill` reject any `labels` field with `400 INVALID_ARGUMENT`. Store plugin/provenance attributes exclusively in `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only).
 
 ### Canonical `SKILL.md` `frontmatter.metadata` Provenance Keys
@@ -255,7 +255,7 @@ data "google_agent_registry_endpoint" "finops_endpoint" {
 
 | Terraform Variable (`terraform/core/variables.tf`) | Default | Purpose & Validation |
 |---|---|---|
-| `skills_location` | `"global"` | Multi-region location for standalone Skills (`"global"`, `"us"`, or `"eu"`) shared across Bangkok/Singapore |
+| `skills_location` | `"global"` | API-mandated global/multi-region location for standalone Skills (`"global"`, `"us"`, or `"eu"`) |
 | `enable_skills_bootstrap` | `true` | Set `false` when GitLab CI exclusively publishes skills |
 | `skills_source_mode` | `"local"` | `"local"` (Option 1) or `"git"` (Option 2) |
 | `starter_plugin_dir` | `"../../starter-marketplace/plugins/gcp-finops-toolkit"` | Starter plugin ingested in `local` mode |

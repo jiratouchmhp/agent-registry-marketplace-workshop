@@ -12,7 +12,7 @@ By the end of this lab, you will:
 1. Inspect and run the **Polyglot Marketplace Middleware** ([middleware/app/main.py](../../middleware/app/main.py)) exposing `/v1/catalog`, 4 IDE marketplace feeds (`/v1/marketplace/{claude,copilot,codex,antigravity}.json`), deterministic Polyglot 5-IDE ZIP bundles (`/v1/plugins/{plugin_name}.zip`), and a Streamable HTTP `/mcp` gateway.
 2. Prove why Agent Registry's `?alt=media` **HTTP 302 redirect** requires explicit policy-based header handling—preserving `Authorization` strictly on live same-origin `/download/v1/` authenticated redirects (preventing `401 CREDENTIALS_MISSING`) while stripping `Authorization` and all `x-goog-*` headers (`x-goog-user-project`, `x-goog-api-client`) on cross-origin and signed-URL redirects (preventing `403`)—and verify how [middleware/app/registry_client.py](../../middleware/app/registry_client.py) handles both cleanly.
 3. Invoke the Middleware's Streamable HTTP `/mcp` tools (`search_catalog`, `load_verified_skill`, `list_governed_mcp_servers`, `call_remote_a2a_agent`) directly.
-4. Build and deploy the container images to **Cloud Run** in **Bangkok (`asia-southeast3`)** primary and optional **Singapore (`asia-southeast1`)** secondary/DR — both sharing **`global`** standalone `Skills` (`private-*` auto-filtered) alongside regional `Services` — with **zero local Docker** using checked-in `cloudbuild/*.yaml` configs and either `scripts/deploy_gcp.sh` (**Track 2:** Zero-Docker, Zero-Terraform) or `scripts/build_images_cloudbuild.sh` + [terraform/core/cloud_run.tf](../../terraform/core/cloud_run.tf) (**Track 3:** Full Terraform IaC).
+4. Build and deploy the container images to a single **Cloud Run** stack in **Bangkok (`asia-southeast3`)** reading **`global`** standalone `Skills` (`private-*` auto-filtered) alongside Bangkok `Services` — with **zero local Docker** using checked-in `cloudbuild/*.yaml` configs and either `scripts/deploy_gcp.sh` (**Track 2:** Zero-Docker, Zero-Terraform) or `scripts/build_images_cloudbuild.sh` + [terraform/core/cloud_run.tf](../../terraform/core/cloud_run.tf) (**Track 3:** Full Terraform IaC).
 
 ---
 
@@ -167,35 +167,33 @@ Every container build in this workshop runs remotely in **Google Cloud Build** u
 
 > **Cloud Run Service-to-Service OIDC Auth:** Both Track 2 and Track 3 deploy `sample-a2a-agent` with `--no-allow-unauthenticated` and grant `roles/run.invoker` to the least-privilege `agent-marketplace-middleware` service account. When `POST /mcp` executes `call_remote_a2a_agent` against an IAM-protected `https://*.run.app` A2A endpoint, [middleware/app/mcp_gateway.py](../../middleware/app/mcp_gateway.py) automatically fetches and caches a Cloud Run OIDC Identity Token for the target service origin from the GCE metadata server (or local ADC fallback) and attaches `Authorization: Bearer <id_token>`.
 
-> **Verified Live APAC Regional Split (Bangkok Primary + Singapore Secondary + `global` Skills):**
-> - **Bangkok (`asia-southeast3`, Primary) & Singapore (`asia-southeast1`, Secondary/DR):** Cloud Run v2, Cloud Build, Artifact Registry, Cloud Storage, Agent Registry **`Services`** (`McpServer`, `Agent`, `Endpoint`), and Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing.
-> - **`global` (Default for APAC — or `us`/`eu` for CMEK):** Agent Registry standalone **`Skills`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `var.skills_location = "global"`), ingested once and shared seamlessly by both Bangkok primary and Singapore secondary Middleware! Both Middleware (`INCLUDE_PUBLIC_SKILLS=false`) and `platform_agent` automatically filter strictly to enterprise `private-*` skills so Google's built-in first-party skills do not pollute enterprise catalogs, and `CatalogService.build_snapshot()` bounds concurrent skill verification (`asyncio.Semaphore(8)`) for responsive catalog builds even with 20+ private skills.
-> - **Workstream B APAC notes:** `AuthProvider` runs in **Singapore (`asia-southeast1`)**, native Skill CMEK (`SkillEncryptionSpec`) is `us`/`eu` multi-regions only, and Agent Gateway + IAP v2 UAP (`enable_agent_gateway = false`) is `us-central1`/`europe-west1` (see the full matrix in [Attendee Quickstart](../attendee-quickstart.md)).
+> **Verified Live Bangkok-First Regional Placement + Service-Specific Fallbacks:**
+> - **Bangkok (`asia-southeast3`) — Primary Region (all supported services):** Cloud Run v2 (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), GCS skill staging bucket, Agent Registry **`Services`** (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`), Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing, and Cloud Logging audit bucket.
+> - **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`AuthProvider`)** (`auth_provider_location = "asia-southeast1"`), because Agent Identity is GA in Singapore and not yet available in Bangkok.
+> - **Global / Multi-Region (API-Required):** Agent Registry standalone **`Skills`** live in **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, `var.skills_location = "global"`, or `us`/`eu` for CMEK — single-region `/skills` endpoints time out), auto-registered Google/GCP remote MCP servers live in **`global`**, native Skill CMEK (`SkillEncryptionSpec`) is `us`/`eu` multi-regions only, and optional Agent Gateway + IAP v2 UAP (`enable_agent_gateway = false`) is `us-central1`/`europe-west1` only (see the full placement table in [Attendee Quickstart](../attendee-quickstart.md)). Both Middleware (`INCLUDE_PUBLIC_SKILLS=false`) and `platform_agent` automatically filter strictly to enterprise `private-*` skills so Google's built-in first-party skills do not pollute enterprise catalogs, and `CatalogService.build_snapshot()` bounds concurrent skill verification (`asyncio.Semaphore(8)`) for responsive catalog builds even with 20+ private skills.
 
 Choose either **Track 2 (Zero-Docker, Zero-Terraform)** or **Track 3 (Full Terraform IaC + Zero-Docker Cloud Build)**:
 
 ### Track 2: Zero-Docker, Zero-Terraform Deploy (`scripts/deploy_gcp.sh` / `gcloud` + Cloud Build)
 
-Deploy the complete Workstream A stack (APIs, Artifact Registry, Cloud Build images, Cloud Run services, regional Agent Registry `Services` in each deployed region, and one-time `--skills-location global --wait-for-scan` Skill sync) to **Bangkok (`asia-southeast3`)** primary and optional **Singapore (`asia-southeast1`)** secondary/DR in a single command:
+Deploy the complete single-region Workstream A stack (APIs, Artifact Registry, Cloud Build images, Cloud Run services, Bangkok Agent Registry `Services`, and `--skills-location global --wait-for-scan` Skill sync) to **Bangkok (`asia-southeast3`)** in a single command:
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 
-# Deploy Bangkok primary + Singapore secondary/DR sharing global Skills (omit --enable-secondary for Bangkok-only)
+# Deploy Bangkok (asia-southeast3) stack + global Skills:
 scripts/deploy_gcp.sh \
   --project "${GCP_PROJECT_ID}" \
-  --primary-region asia-southeast3 \
-  --skills-location global \
-  --enable-secondary
+  --region asia-southeast3 \
+  --skills-location global
 
-# Or via the Makefile shortcut (ENABLE_SECONDARY defaults to false for Bangkok-only; AGENT_REGISTRY_SKILLS_LOCATION defaults to global):
+# Or via the Makefile shortcut (GCP_LOCATION defaults to asia-southeast3; AGENT_REGISTRY_SKILLS_LOCATION defaults to global):
 # make gcp-deploy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# make gcp-deploy GCP_PROJECT_ID="${GCP_PROJECT_ID}" ENABLE_SECONDARY=true
 ```
 
 *(Tip for rapid single-service iteration on `samples/` without Terraform: because [samples/mcp-server/](../../samples/mcp-server/Dockerfile) and [samples/a2a-agent/](../../samples/a2a-agent/Dockerfile) are self-contained directories with root `Dockerfile`s, you can also deploy them directly via `gcloud run deploy sample-mcp-server --source samples/mcp-server --project "${GCP_PROJECT_ID}" --region asia-southeast3 --port 8091 --no-allow-unauthenticated --quiet` — note that `polyglot-middleware` needs the repository root context so `schemas/` is included, which is why `cloudbuild/middleware.yaml` builds from `.`!)*
 
-Verify the deployed Cloud Run services and run an authenticated `/health` check against Bangkok (and Singapore if `--enable-secondary` / `ENABLE_SECONDARY=true` was used). *(Note: Google Frontend intercepts `/healthz` on external `*.run.app` requests with HTTP 404, so always probe `/health` on live Cloud Run URLs; `/healthz` remains active for local dev and internal probes.)*
+Verify the deployed Cloud Run services in Bangkok and run an authenticated `/health` check. *(Note: Google Frontend intercepts `/healthz` on external `*.run.app` requests with HTTP 404, so always probe `/health` on live Cloud Run URLs; `/healthz` remains active for local dev and internal probes.)*
 
 ```bash
 gcloud run services list \
@@ -212,17 +210,6 @@ export MIDDLEWARE_URL="$(gcloud run services describe polyglot-middleware \
 
 curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" \
   "${MIDDLEWARE_URL}/health" | .venv/bin/python -m json.tool
-
-# Optional: verify Singapore secondary/DR middleware when ENABLE_SECONDARY=true
-export SECONDARY_MIDDLEWARE_URL="$(gcloud run services describe polyglot-middleware \
-  --project="${GCP_PROJECT_ID}" \
-  --region="asia-southeast1" \
-  --format="value(status.url)" \
-  --quiet 2>/dev/null || true)"
-if [[ -n "${SECONDARY_MIDDLEWARE_URL}" ]]; then
-  curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" \
-    "${SECONDARY_MIDDLEWARE_URL}/health" | .venv/bin/python -m json.tool
-fi
 ```
 
 ### Track 3: Two-Stage Terraform + Zero-Docker Cloud Build (`terraform/core/`)
@@ -232,9 +219,8 @@ Always execute **Stage 1 (Build images remotely)** before **Stage 2 (`terraform 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 export GCP_LOCATION="asia-southeast3"
-export GCP_SECONDARY_LOCATION="asia-southeast1"
 
-# Stage 1A — Enable APIs & create the Artifact Registry Docker repository first
+# Stage 1A — Enable APIs & create the Bangkok Artifact Registry Docker repository first
 terraform -chdir=terraform/core init
 terraform -chdir=terraform/core apply \
   -target=google_project_service.core \
@@ -247,14 +233,6 @@ scripts/build_images_cloudbuild.sh \
   --repo "agent-marketplace" \
   --tag "1.0.0"
 
-# (Optional) Build images for Singapore secondary/DR when enable_secondary_region = true:
-# terraform -chdir=terraform/core apply -target=google_artifact_registry_repository.workshop_images_secondary
-# scripts/build_images_cloudbuild.sh \
-#   --project "${GCP_PROJECT_ID}" \
-#   --region "${GCP_SECONDARY_LOCATION}" \
-#   --repo "agent-marketplace" \
-#   --tag "1.0.0"
-
 # Or invoke any single checked-in Cloud Build config directly:
 # gcloud builds submit \
 #   --project="${GCP_PROJECT_ID}" \
@@ -265,7 +243,7 @@ scripts/build_images_cloudbuild.sh \
 #   . --quiet
 ```
 
-Now run **Stage 2** to deploy Cloud Run workloads ([terraform/core/cloud_run.tf](../../terraform/core/cloud_run.tf) — least-privilege `middleware_sa` gets `roles/agentregistry.viewer` ONLY), register Agent Registry services, and bootstrap scanned skills (`--wait-for-scan`):
+Now run **Stage 2** to deploy Cloud Run workloads in Bangkok ([terraform/core/cloud_run.tf](../../terraform/core/cloud_run.tf) — least-privilege `middleware_sa` gets `roles/agentregistry.viewer` ONLY), register Bangkok Agent Registry services, and bootstrap scanned `global` skills (`--wait-for-scan`):
 
 ```bash
 make tf-core-plan
@@ -274,13 +252,6 @@ terraform -chdir=terraform/core apply
 export MIDDLEWARE_URL="$(terraform -chdir=terraform/core output -raw middleware_url)"
 curl -fsSL -H "Authorization: Bearer $(gcloud auth print-identity-token --quiet)" \
   "${MIDDLEWARE_URL}/health" | .venv/bin/python -m json.tool
-```
-
-If you enabled `enable_secondary_region = true` in `terraform/core/terraform.tfvars`, inspect both regional middleware URLs for Lab 04 failover testing:
-
-```bash
-terraform -chdir=terraform/core output -raw middleware_url
-terraform -chdir=terraform/core output -raw secondary_middleware_url
 ```
 
 ---

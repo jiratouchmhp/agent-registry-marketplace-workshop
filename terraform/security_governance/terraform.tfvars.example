@@ -10,11 +10,14 @@
 
 project_id = "acme-agent-governance"
 
-# Primary region: Bangkok (asia-southeast3) for Agent Registry Bindings, IAP, KMS signing key, and audit logs.
-# Agent Identity AuthProvider region: Singapore (asia-southeast1) — verified APAC GA region for agentidentity.googleapis.com.
+# Regional architecture:
+# Aim for Bangkok (asia-southeast3) for all supported services (KMS asymmetric
+# signing key, Agent Registry Bindings, IAP egressor bindings, and Cloud Logging
+# audit bucket); use Singapore (asia-southeast1) only as a service-specific
+# fallback for services not yet available in Bangkok (Agent Identity AuthProvider).
 location               = "asia-southeast3"
 auth_provider_location = "asia-southeast1"
-cmek_location          = "us" # Use "us" for Skills in `us`, or "europe" for Skills in `eu`
+cmek_location          = "us" # Optional native Skill CMEK multi-region only: "us" (for `us` Skills) or "europe" (for `eu` Skills)
 
 # Identities (from `terraform/core` outputs or existing project service accounts)
 middleware_sa_email   = "agent-marketplace-middleware@acme-agent-governance.iam.gserviceaccount.com"
