@@ -1,35 +1,50 @@
 # Lab 00: Environment Setup & Deployment Readiness
 
-**Workstream:** A — Core Platform & Middleware  
+**Workstream:** A (Core Platform & Middleware)  
 **Duration:** 20 minutes  
-**Prerequisites:** Python 3.12+, `curl`, `jq` (recommended), `make`. For Live GCP Mode: Google Cloud project with Billing enabled and `gcloud` CLI (Track 2 — zero Docker, zero Terraform), plus optional Terraform `>= 1.6.0` (`hashicorp/google >= 7.39.0`) for Track 3. **Zero local Docker is required.**
+**Prerequisites:** Python 3.12+, `curl`, `make`, and `jq` (recommended). Live GCP adds `gcloud` CLI (Track 2) and optional Terraform `>= 1.6.0` (Track 3). No local Docker is required.
 
-> **New to this workshop?** Read the 1-page **[Attendee Quickstart & APAC Regional Matrix](../attendee-quickstart.md)** first to pick your laptop track (**Track 1:** Offline Local, **Track 2:** Live GCP `gcloud` + Cloud Build, or **Track 3:** Live GCP Full Terraform IaC).
+> **New here?** Skim the 1-page [Attendee Quickstart](../attendee-quickstart.md) to pick your track (Track 1 Local, Track 2 Live GCP with `gcloud` + Cloud Build, or Track 3 Live GCP with Terraform).
+>
+> **Know your 3 content folders:** `starter/` holds your hands-on `# WORKSHOP-TODO` exercises for Labs 01–04, `starter-marketplace/` holds the working reference plugin (`gcp-finops-toolkit` + `.gitlab-ci.yml`), and `local-skills/` holds 3 ready-to-sync standalone skills (`cloud-run-debugger`, `terraform-iam-auditor`, `incident-postmortem-writer`).
+
+---
+
+## Files You'll Work With
+
+*No `starter/` files to edit in Lab 00.* You will verify your local environment, run the offline smoke test, and preview what lives inside `starter/`.
+
+| Role | File | What You'll Do |
+| :--- | :--- | :--- |
+| **Inspect** | [`WORKSHOP_SPEC.json`](../../WORKSHOP_SPEC.json) | Review default local ports (`8090`, `8091`, `8092`, `8080`) and APAC region defaults. |
+| **Run** | [`Makefile`](../../Makefile) & [`scripts/preflight_check.sh`](../../scripts/preflight_check.sh) | Run `make preflight` and `make test` to verify `.venv` and local tooling. |
+| **Run** | [`scripts/local_smoke_test.sh`](../../scripts/local_smoke_test.sh) & [`scripts/run_local_stack.sh`](../../scripts/run_local_stack.sh) | Run `make smoke-local`, then start the persistent local stack with `make run-local-stack`. |
+| **Preview** | [`starter/README.md`](../../starter/README.md) | Run `make starter-check` to see the Labs 01–04 exercises you'll complete next. |
 
 ---
 
 ## Learning Objectives
 
 By the end of this lab, you will:
-1. Verify your Python virtual environment (`.venv`), run `make preflight`, and pass the full local unit and schema test suites (plus optional Terraform HCL formatting for Track 3).
-2. Run a 1-command **Local Mock Mode** end-to-end smoke test (`make smoke-local`), and learn how to launch the offline stack either via `make run-local-stack` (single terminal) or across 4 dedicated terminals.
-3. *(Optional — Live GCP Mode)* Authenticate `gcloud`, verify the **Bangkok (`asia-southeast3`)** primary + service-specific **Singapore (`asia-southeast1`)** fallback (Workstream B Agent Identity `AuthProvider`) + **`global` Skills** regional placement settings, and complete pre-flight checks — leaving API enablement, container builds, and Cloud Run deployment for [Lab 03](03-build-deploy-middleware.md) so fresh projects never hit chicken-and-egg Terraform failures.
+- Verify Python 3.12+ inside `.venv`, pass `make preflight`, and pass `make test`.
+- Run the offline smoke check (`make smoke-local`) and preview all Labs 01–04 exercises (`make starter-check`).
+- Start the local mock stack (`make run-local-stack`) and confirm the mock Agent Registry responds on `:8090`.
+- *(Optional, Track 2 & Track 3)* Authenticate `gcloud` and confirm project access before building images in [Lab 03](03-build-deploy-middleware.md).
 
 ---
 
-## Step 1: Verify Your Local Workspace, Virtual Environment & Pre-Flight
+## Step 1: Verify Python, Preflight, and Tests
 
-Run all commands from the repository root (`agent-registry-marketplace-workshop/`):
+Run every command from the repository root (`agent-registry-marketplace-workshop/`).
+
+First, confirm `.venv` works and inspect the default ports and resource names:
 
 ```bash
-# Confirm Python 3.12+ inside .venv
 .venv/bin/python --version
-
-# Inspect canonical ports, APAC region defaults, resource names, and URNs
 cat WORKSHOP_SPEC.json
 ```
 
-If `.venv` has not been created yet on a fresh machine, create it and install dependencies from [pyproject.toml](../../pyproject.toml):
+If `.venv` does not exist yet on your laptop, create it and install packages from [`pyproject.toml`](../../pyproject.toml):
 
 ```bash
 python3 -m venv .venv
@@ -37,52 +52,48 @@ python3 -m venv .venv
 .venv/bin/pip install -e .
 ```
 
-Run the workshop pre-flight checker and full offline unit/schema test suite (zero Docker and zero Terraform required):
+Now run the preflight check and the offline test suite:
 
 ```bash
 make preflight
 make test
 ```
 
-*(Track 3 Terraform IaC attendees can also verify HCL formatting with `make validate-hcl`.)*
+**You should see:**
+- `make preflight` prints `[OK]` for `python3`, `.venv`, `git`, `curl`, and local ports `8080/8090/8091/8092`.
+- `make test` finishes with zero failures.
 
 ---
 
-## Step 2: Choose Your Execution Mode
+## Step 2: Run the Local Smoke Test and Preview `starter/`
 
-Every lab in Workstream A and Workstream B supports **two modes** (with **zero local Docker**):
-- **Local Mock Mode (Track 1 — Default):** Runs completely offline against `mock_registry` on `http://127.0.0.1:8090/v1`, faithfully simulating `private-` skill auto-prefixing, `ENABLED_BLOCKING` secret/injection scanning, `A2A_AGENT_CARD` validation, `bindings:fetchAvailable` IAM filtering, and `?alt=media` HTTP 302 signed-URL header enforcement.
-- **Live GCP Mode (Track 2 `gcloud` + Cloud Build, or Track 3 Terraform IaC):** Targets `https://agentregistry.googleapis.com/v1` using a **single Bangkok-first deployment with service-specific fallbacks**:
-  - **Bangkok (`asia-southeast3`) — Primary Region:** Cloud Run (`sample-mcp-server`, `sample-a2a-agent`, `polyglot-middleware`), Cloud Build (`--region=asia-southeast3`), Artifact Registry (`asia-southeast3-docker.pkg.dev`), Agent Registry **`Services`** (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` → `McpServer`, `Agent`, `Endpoint`) & `Bindings`, GCS skill staging bucket, Cloud KMS Asymmetric Signing (`EC_SIGN_P256_SHA256`), and Cloud Logging audit bucket.
-  - **Singapore (`asia-southeast1`) — Service-Specific Fallback ONLY:** Workstream B **Agent Identity Auth Manager (`AuthProvider`)** (`auth_provider_location = "asia-southeast1"`), because Agent Identity is GA in Singapore and not yet available in Bangkok.
-  - **Global / Multi-Region (API-Required):** Standalone **`Skills`** live in **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK — single-region `/skills` endpoints time out), auto-registered Google/GCP remote MCP servers live in **`global`**, optional native CMEK (`SkillEncryptionSpec`) uses `us`/`eu`, and optional Network Services Agent Gateway uses `us-central1`/`europe-west1` (`enable_agent_gateway = false` by default for APAC).
-
-### Mode A: Local Mock Mode Smoke Test
-
-#### Option A1 — 1-Command Automated Smoke Check (Fastest)
-
-Run the self-contained end-to-end local smoke check (starts the local services ephemerally, syncs skills, verifies `/v1/catalog` and 4-IDE hydration, and shuts down cleanly):
+Run the 1-command offline smoke test. It boots the local mock registry, sample MCP/A2A servers, and Middleware on isolated ports, uploads sample skills, installs configs for all 4 IDEs into a temp folder, and shuts everything down:
 
 ```bash
 make smoke-local
 ```
 
-#### Option A2 — Persistent Local Stack (1-Terminal or 4-Terminal)
+Next, preview the hands-on exercises waiting for you in [`starter/`](../../starter/README.md):
 
-When you want servers running continuously across Labs 01–05, either launch all three local servers in a single terminal:
+```bash
+make starter-check
+```
+
+**You should see:**
+- `make smoke-local` passes end-to-end with zero errors.
+- `make starter-check` prints `0/6 present` for Lab 01 (`starter/lab01_plugin_skeleton`), `0/4` for Lab 02, `0/3` for Lab 03, and `0/3` for Lab 04. Those are the exact files you will build in Labs 01–04.
+
+---
+
+## Step 3: Start the Persistent Local Stack
+
+Labs 01–05 run against a local Mock Agent Registry (`:8090`), sample FinOps MCP/A2A servers (`:8091` / `:8092`), and Polyglot Middleware (`:8080`). Start all of them in one terminal:
 
 ```bash
 make run-local-stack
 ```
 
-Or open dedicated terminals so you can watch each server's logs individually:
-
-```bash
-# Terminal 1 — Start the Mock Agent Registry v1 server on port 8090
-make run-mock
-```
-
-In another terminal, verify the mock registry health endpoint and inspect the built-in Publisher tiers (using Bangkok `asia-southeast3` defaults):
+Leave that terminal running. In a second terminal, verify the mock registry health endpoint and list the built-in publisher tiers:
 
 ```bash
 export AGENT_REGISTRY_BASE_URL="http://127.0.0.1:8090/v1"
@@ -94,18 +105,45 @@ curl -fsSL "${AGENT_REGISTRY_BASE_URL}/projects/${GCP_PROJECT_ID}/locations/${GC
   | .venv/bin/python -m json.tool
 ```
 
-Verify that three publishers are returned: `FIRST_PARTY` (`google-`), `THIRD_PARTY` (`partner-`), and `PRIVATE` (`private-`).
+**You should see:**
+- `/healthz` returns `{"status": "ok", "service": "mock-agent-registry"}`.
+- `/publishers` returns three publisher tiers: `FIRST_PARTY` (`google-`), `THIRD_PARTY` (`partner-`), and `PRIVATE` (`private-`).
 
-### Mode B: Live GCP Mode — Authentication & Pre-Flight ONLY
+<details>
+<summary>Prefer 4 separate terminals instead of <code>make run-local-stack</code>?</summary>
 
-> **Live GCP Journey Across Labs 00 → 03:** On a fresh GCP project, Cloud Run v2 requires container images to exist in Artifact Registry **before** `terraform -chdir=terraform/core apply` runs. Complete **authentication and pre-flight ONLY** here in Lab 00, author and test your plugins/skills locally in **[Lab 01](01-author-agent-plugin.md)** and **[Lab 02](02-register-agent-registry.md)**, and let **[Lab 03](03-build-deploy-middleware.md)** enable APIs, build images remotely via Cloud Build (zero local Docker!), deploy Cloud Run to Bangkok (`asia-southeast3`), register Bangkok Services, and ingest `global` Skills cleanly (via either **Track 2** `scripts/deploy_gcp.sh` or **Track 3** `scripts/build_images_cloudbuild.sh` + `terraform/core`).
+Open three terminals and run one server per window so you can watch each log stream on its own:
 
-1. Authenticate `gcloud` and set your **Bangkok (`asia-southeast3`)** primary and **`global` Skills** environment variables:
+```bash
+# Terminal 1: Mock Agent Registry v1 (:8090)
+make run-mock
+
+# Terminal 2: FinOps MCP server (:8091) and A2A v1.0 agent (:8092)
+make run-samples
+
+# Terminal 3: Polyglot Middleware (:8080)
+make run-middleware
+```
+
+Use Terminal 4 for your `curl`, `tools.plugin_sync`, and `tools.hub_sync` commands.
+
+</details>
+
+---
+
+## Going Live on GCP (Optional — Track 2 & Track 3)
+
+Skip this section if you are running **Track 1 (Local Mode)**. You can complete every lab offline first and deploy to Google Cloud later.
+
+> **Region note:** Live GCP runs Services, Cloud Run, and Cloud Build in Bangkok (`asia-southeast3`), standalone Skills in `global`, and Workstream B Agent Identity `AuthProvider` in Singapore (`auth_provider_location = "asia-southeast1"`). See the full table in [Attendee Quickstart](../attendee-quickstart.md#2-apac-region-guide).
+
+Complete **authentication and preflight only** here in Lab 00. Wait until [Lab 03](03-build-deploy-middleware.md) to enable APIs, build images via Cloud Build, and deploy Cloud Run (that avoids fresh-project Terraform failures when images do not exist yet).
+
+1. Sign in with `gcloud` and set your project and APAC region variables (leave `AGENT_REGISTRY_BASE_URL` and `AGENT_REGISTRY_SKILLS_LOCATION` unset for now; you will set them in the live-GCP sections of [Lab 02](02-register-agent-registry.md) and [Lab 03](03-build-deploy-middleware.md) so local `make` commands still target `127.0.0.1:8090`):
+
    ```bash
    export GCP_PROJECT_ID="<your-gcp-project-id>"
    export GCP_LOCATION="asia-southeast3"
-   export AGENT_REGISTRY_SKILLS_LOCATION="global"
-   export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
 
    gcloud auth login --quiet
    gcloud auth application-default login --quiet
@@ -113,7 +151,8 @@ Verify that three publishers are returned: `FIRST_PARTY` (`google-`), `THIRD_PAR
    gcloud auth application-default set-quota-project "${GCP_PROJECT_ID}" --quiet
    ```
 
-2. Verify billing, active credentials, and regional access via pre-flight:
+2. Confirm your project is active and re-run preflight:
+
    ```bash
    gcloud projects describe "${GCP_PROJECT_ID}" --project="${GCP_PROJECT_ID}" --quiet \
      --format="value(projectId,projectNumber,lifecycleState)"
@@ -121,36 +160,52 @@ Verify that three publishers are returned: `FIRST_PARTY` (`google-`), `THIRD_PAR
    make preflight
    ```
 
-3. *(Optional for Track 3 Terraform users)* Verify HCL formatting and copy [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars` now (fill in `project_id`, `location = "asia-southeast3"`, and `skills_location = "global"` — **do not run full `terraform apply` until Stage 1 Cloud Build completes in [Lab 03](03-build-deploy-middleware.md)**):
-   ```bash
-   make validate-hcl
-   cp terraform/core/terraform.tfvars.example terraform/core/terraform.tfvars
-   ```
+> **Continuing in Local Mode next?** If you plan to run Local Mode `make` targets (`make demo-sync-local`, `make run-middleware`) in Labs 02–04 from this same shell, use a separate terminal or reset your shell back to the local mock defaults:
+>
+> ```bash
+> unset AGENT_REGISTRY_BASE_URL AGENT_REGISTRY_SKILLS_LOCATION
+> export GCP_PROJECT_ID="acme-agent-governance"
+> ```
+
+<details>
+<summary>Track 3 only: prepare Terraform variables now (do not apply yet)</summary>
+
+Verify HCL formatting and copy [`terraform/core/terraform.tfvars.example`](../../terraform/core/terraform.tfvars.example) to `terraform/core/terraform.tfvars`:
+
+```bash
+make validate-hcl
+cp terraform/core/terraform.tfvars.example terraform/core/terraform.tfvars
+```
+
+Edit `terraform/core/terraform.tfvars` to replace `acme-agent-governance` with your own GCP project ID in `project_id`, `middleware_image`, `sample_mcp_image`, and `sample_a2a_image` (keeping the `:1.0.0` tag to match `scripts/build_images_cloudbuild.sh`), along with `location = "asia-southeast3"` and `skills_location = "global"`. Do not run `terraform apply` yet; you will run Stage 1 (enable APIs + Artifact Registry, then Cloud Build) first in [Lab 03](03-build-deploy-middleware.md).
+
+</details>
 
 ---
 
 ## Verification Checkpoint
 
-Before moving to Lab 01, confirm all checks pass:
+Before moving to Lab 01, confirm:
 
-- [ ] `make preflight` passes with Python 3.12+ inside `.venv` and local ports `8080/8090/8091/8092` ready.
-- [ ] `make test` completes with zero failures.
-- [ ] *(Track 3 Terraform only)* `make validate-hcl` passes cleanly on both `terraform/core/` and `terraform/security_governance/`.
-- [ ] *(Track 1 Local Mode)* `make smoke-local` passes, or `curl -fsSL http://127.0.0.1:8090/healthz` returns `{"status": "ok", "service": "mock-agent-registry"}`.
-- [ ] *(Track 2 / Track 3 Live GCP Mode)* `gcloud projects describe "${GCP_PROJECT_ID}" --project="${GCP_PROJECT_ID}" --quiet` succeeds and `GCP_LOCATION=asia-southeast3` and `AGENT_REGISTRY_SKILLS_LOCATION=global` are exported.
+- [ ] `make preflight` passes with Python 3.12+ in `.venv` and ports `8080/8090/8091/8092` ready.
+- [ ] `make test` passes with zero failures.
+- [ ] `make smoke-local` passes and `make starter-check` lists Labs 01–04 cleanly.
+- [ ] `http://127.0.0.1:8090/healthz` returns `{"status": "ok", "service": "mock-agent-registry"}`.
+- [ ] *(Optional, Live GCP)* `gcloud projects describe "${GCP_PROJECT_ID}"` and `make preflight` succeed (with `GCP_LOCATION=asia-southeast3`).
+- [ ] *(Optional, Track 3)* `make validate-hcl` passes on `terraform/core/` and `terraform/security_governance/`.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Symptom | Why It Happens | How to Fix |
 | :--- | :--- | :--- |
-| `ModuleNotFoundError` or stdlib `calendar` shadow error | Running `python` outside the repository root or using system Python instead of `.venv` | `cd` into the repository root and always invoke `.venv/bin/python` / `.venv/bin/pytest` (or `make` targets). |
-| `Address already in use` on port `8090`, `8091`, `8092`, or `8080` | A previous workshop server process is still listening | Run `lsof -i :8090` (or the conflicting port) and stop the old process before retrying. |
-| `gcloud: command not found` even though `make preflight` found `$HOME/.local/bin/gcloud` | `gcloud` is installed under `$HOME/.local/bin`, which is not in your shell `$PATH` | Run `export PATH="$HOME/.local/bin:$PATH"` in your terminal (and add it to `~/.bashrc` or `~/.zshrc`) so bare `gcloud` commands across Labs 00–08 work directly. |
-| `terraform: command not found` | Terraform CLI is not installed locally | Use **Track 1 (Offline Local Mode)** or **Track 2 (Live GCP `scripts/deploy_gcp.sh` — zero Docker & zero Terraform)**. `make validate-hcl` is only needed for **Track 3 (Terraform IaC)** and skips cleanly unless `STRICT_HCL=true` is set. |
-| `Container image not found` during `terraform apply` | Attempted full `terraform/core apply` before building images | Wait until [Lab 03](03-build-deploy-middleware.md) Stage 1 (`scripts/build_images_cloudbuild.sh`) before applying Cloud Run resources. |
-| External `https://*.run.app/healthz` returns Google 404 HTML page | Google Frontend (GFE) reserves `/healthz` on Cloud Run custom/default URLs | Always probe `/health` (or `/v1/health` on Middleware) on live Cloud Run URLs; `/healthz` works locally on `127.0.0.1` and for internal Cloud Run probes. |
+| `ModuleNotFoundError` or stdlib import collision | Running system `python` or running outside the repo root | `cd` into the repository root and always use `.venv/bin/python`, `.venv/bin/pytest`, or `make` targets. |
+| `Address already in use` on `8080`, `8090`, `8091`, or `8092` | An earlier workshop server is still running | Run `lsof -i :8090` (or the conflicting port) and stop that process first. |
+| `gcloud: command not found` even though `make preflight` saw `$HOME/.local/bin/gcloud` | `$HOME/.local/bin` is missing from your shell `$PATH` | Run `export PATH="$HOME/.local/bin:$PATH"` and add it to `~/.bashrc` or `~/.zshrc`. |
+| `terraform: command not found` | Terraform CLI is not installed locally | Use Track 1 (Local) or Track 2 (`make gcp-deploy`). `make validate-hcl` skips cleanly unless `STRICT_HCL=true`. |
+| `Container image not found` during `terraform apply` | Ran `terraform/core apply` before building container images | Wait until [Lab 03](03-build-deploy-middleware.md) and run Stage 1 (`scripts/build_images_cloudbuild.sh`) first. |
+| Live `https://*.run.app/healthz` returns an HTML `404` | Google Frontend reserves `/healthz` on external Cloud Run URLs | Curl `/health` (or `/v1/health` on Middleware) for live Cloud Run URLs. Keep `/healthz` for local `127.0.0.1` checks. |
 
 ---
 

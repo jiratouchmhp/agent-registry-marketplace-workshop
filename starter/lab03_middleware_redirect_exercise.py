@@ -1,30 +1,36 @@
 """Lab 03 Starter Exercise: Agent Registry ``?alt=media`` Redirect & Polyglot Bundle Assembly.
 
+Workshop Guide:
+    ``docs/labs/03-build-deploy-middleware.md`` (Step 2)
+
 Goal:
     When Enterprise Marketplace Middleware fetches a skill revision archive from
     Google Cloud Agent Registry ``v1``:
         ``GET /v1/projects/{p}/locations/{l}/skills/private-{id}/revisions/{rev}?alt=media``
-    Agent Registry returns **HTTP 302 Found** redirecting to a short-lived
+    Agent Registry returns HTTP 302 Found redirecting to a short-lived
     Cloud Storage (GCS) signed URL on a different origin.
 
     CRITICAL GOTCHA:
     If your HTTP client blindly forwards ``Authorization`` or ``x-goog-*``
     headers (such as ``x-goog-user-project`` or ``x-goog-api-client``) across
-    the redirect to GCS, GCS rejects the signed URL!
+    the redirect to GCS, GCS rejects the signed URL.
 
     In this exercise you will implement:
-    1. ``strip_headers_for_cross_origin_redirect`` — removing ``Authorization``
+    1. ``strip_headers_for_cross_origin_redirect``: remove ``Authorization``
        and every ``x-goog-*`` header (case-insensitively) when the redirect
        origin changes.
-    2. ``download_skill_revision_media`` — following the ``?alt=media`` 302
-       redirect safely without leaking auth/Google headers to GCS, and verifying
+    2. ``download_skill_revision_media``: follow the ``?alt=media`` 302
+       redirect safely without leaking auth/Google headers to GCS, and verify
        the downloaded ZIP's SHA-256 digest against ``expected_sha256``.
-    3. ``assemble_polyglot_plugin_zip`` — combining verified skill archives +
+    3. ``assemble_polyglot_plugin_zip``: combine verified skill archives and
        MCP server config into a single Polyglot 5-IDE plugin ZIP containing
        manifests for Agent Plugins 1.0, Antigravity, Claude Code, Copilot, and Codex.
 
+Run Self-Check:
+    ``.venv/bin/python starter/lab03_middleware_redirect_exercise.py`` (or ``make starter-check``)
+
 Reference Solution:
-    ``middleware/``
+    ``middleware/app/registry_client.py`` and ``middleware/app/polyglot_builder.py``
 """
 
 from __future__ import annotations

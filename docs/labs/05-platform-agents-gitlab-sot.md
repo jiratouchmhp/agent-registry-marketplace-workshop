@@ -1,44 +1,56 @@
-# Lab 05: Platform Agents (Google ADK) & GitLab Dual-Role Source of Truth
+# Lab 05: Platform Agents (Google ADK) & GitLab Source of Truth
 
 **Workstream:** A — Core Platform & Middleware  
 **Duration:** 40 minutes  
-**Prerequisites:** Completed [Lab 02](02-register-agent-registry.md) (mock or live Agent Registry populated with `gcp-finops-toolkit` skills & services).
+**Prerequisites:** Completed [Lab 03](03-build-deploy-middleware.md) with `make run-mock` (`:8090`) and `make run-middleware` (`:8080`) running locally.
 
----
+## Files You'll Work With
+
+No `starter/` coding stub in this lab — you'll run and inspect the repo files below directly.
+
+| Role | File | What You'll Do |
+| :--- | :--- | :--- |
+| **Run / Inspect** | [`platform_agent/adk_orchestrator.py`](../../platform_agent/adk_orchestrator.py) | Print the offline ADK wiring and run live local capability discovery. |
+| **Inspect** | [`platform_agent/rest_consumer.py`](../../platform_agent/rest_consumer.py) | Read how direct REST calls handle `skills:search`, `?alt=media` redirects, and `bindings:fetchAvailable`. |
+| **Inspect** | [`starter-marketplace/.gitlab-ci.yml`](../../starter-marketplace/.gitlab-ci.yml) | Review the 3-stage GitLab CI pipeline separating MR drafts from tagged releases. |
+| **Run** | [`tools/plugin_sync/cli.py`](../../tools/plugin_sync/cli.py), [`starter-marketplace/plugins/gcp-finops-toolkit/`](../../starter-marketplace/plugins/gcp-finops-toolkit/plugin.json) | Simulate the GitLab CI MR draft (`TARGET_STATE_DRAFT`) and release (`TARGET_STATE_ACTIVE`) sync commands locally. |
+| **Install (Live GCP)** | [`platform_agent/requirements.txt`](../../platform_agent/requirements.txt) | Optional `google-adk` dependencies for running `--mode adk` against live GCP. |
+| **Run (Live GCP)** | [`scripts/validate_live_gcp.sh`](../../scripts/validate_live_gcp.sh) | Run end-to-end checks against a live Workstream A GCP deployment (`make gcp-validate`). |
+| **Run (Live GCP)** | [`scripts/destroy_gcp.sh`](../../scripts/destroy_gcp.sh) | Cleanly remove Workstream A GCP resources (`make gcp-destroy`). |
 
 ## Learning Objectives
 
 By the end of this lab, you will:
-1. Run the dual-mode **Platform Agent Orchestrator** ([platform_agent/adk_orchestrator.py](../../platform_agent/adk_orchestrator.py)) that connects **directly** to Google Cloud Agent Registry `v1`—bypassing IDE marketplace wrappers—using:
-   - `AgentRegistry` (`list_agents`, `search_agents`, `get_remote_a2a_agent`, `list_mcp_servers`, `search_mcp_servers`, `get_mcp_toolset`)
-   - `GCPSkillRegistry` + `SkillToolset` (`skills:search` with `SEMANTIC` + `state=ACTIVE AND defaultRevisionFindingCount=0` + `?alt=media` 302 header-stripping download)
-   - `CredentialManager.register_auth_provider(GcpAuthProvider())` for automatic `Binding` credential resolution
-2. Inspect and walk through the **GitLab Authoring SoT → Agent Registry Runtime SoT** dual-role split in [starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml).
-3. Simulate the exact 3-stage GitLab CI workflow locally (MR `TARGET_STATE_DRAFT` upload vs. release tag `TARGET_STATE_ACTIVE` promotion).
+1. Verify how a headless Platform Agent connects directly to Agent Registry `v1` using read-only runtime roles.
+2. Run local semantic skill search, safe `?alt=media` downloads, and MCP/A2A discovery against port `8090`.
+3. Walk through `starter-marketplace/.gitlab-ci.yml` and simulate MR draft quarantine vs. release promotion locally.
+4. *(Optional)* Run live Google ADK mode, validate a live Workstream A GCP deployment, and tear it down cleanly.
 
 ---
 
-## Part 1: Direct Platform Agent Consumption (ADK & REST `v1`)
+Developer IDEs need plugin ZIPs and marketplace feeds from the Polyglot Middleware. Headless Platform Agents on Vertex AI Agent Engine or Cloud Run skip that wrapper and call Agent Registry `v1` directly. They run with least-privilege roles (`roles/agentregistry.viewer`, `roles/agentidentity.user`, and `roles/iap.egressor`), never `editor` or `admin`.
 
-Developer IDEs require plugin ZIPs and marketplace feeds from the Polyglot Middleware. Headless **Platform Agents** running on **Vertex AI Agent Engine** or **Cloud Run** consume Agent Registry `v1` **directly** with least-privilege runtime roles (`roles/agentregistry.viewer` + `roles/agentidentity.user` + `roles/iap.egressor`—**never** `editor` or `admin`).
+## Step 1: Print the ADK Wiring Offline
 
-### Step 1: Inspect the Declarative ADK Wiring
+Start by inspecting the declarative ADK configuration in [`platform_agent/adk_orchestrator.py`](../../platform_agent/adk_orchestrator.py). This runs completely offline without installing `google-adk`.
 
-Print the declarative ADK configuration (works offline with zero `google-adk` dependency):
+Run:
 
 ```bash
 .venv/bin/python -m platform_agent.adk_orchestrator --mode adk --print-config
 ```
 
-Verify the printed JSON confirms:
+You should see JSON confirming these guardrails:
 - `auth_manager.registration_call`: `"CredentialManager.register_auth_provider(GcpAuthProvider())"`
-- `auth_manager.required_iam_roles`: `["roles/agentregistry.viewer", "roles/agentidentity.user"]` (IAP runtime egress is recorded under `governance.egress_policy`: `"Agent Gateway + IAP v2 UAP (iap.googleapis.com/resources.egressViaIAP)"`)
+- `auth_manager.required_iam_roles`: `["roles/agentregistry.viewer", "roles/agentidentity.user"]` (IAP runtime egress is listed under `governance.egress_policy`)
 - `governance.skill_filter` and `integrations.skill_registry.filter`: `"state=ACTIVE AND defaultRevisionFindingCount=0"`
 - `governance.disallowed_runtime_roles`: `["roles/agentregistry.editor", "roles/agentregistry.admin"]`
 
-### Step 2: Run Live Capability Discovery (Mode A: Local Mock Mode)
+## Step 2: Run Live Local Discovery Against Port 8090
 
-With `make run-mock` (`:8090`) and `make demo-sync` active, run `PlatformAgentOrchestrator` in `rest` mode to execute semantic skill search, 2-step `?alt=media` 302 download + SHA-256 verification, keyword MCP/A2A discovery, and `bindings:fetchAvailable`:
+Make sure `make run-mock` (`:8090`) is running and populated (`make demo-sync-local` or `make demo-sync`). Now run `PlatformAgentOrchestrator` in `rest` mode to query skills, MCP servers, A2A agents, and auth bindings directly.
+
+Run:
 
 ```bash
 AGENT_REGISTRY_BASE_URL="http://127.0.0.1:8090/v1" \
@@ -53,80 +65,31 @@ REQUIRE_KMS_SIGNATURE="false" \
   --source-agent-urn "urn:agent:projects-123456789012:projects:123456789012:locations:asia-southeast3:agentregistry:services:finops-advisor-agent"
 ```
 
-Examine the JSON output:
-- `skills`: `private-cost-anomaly-triage` matched via `POST .../skills:search` (`searchType: "SEMANTIC"`) and extracted safely in memory after `?alt=media` 302 redirect header stripping and `sha256Hash` comparison.
-- `mcp_servers`: `finops-mcp-server` matched via `POST .../mcpServers:search` (keyword/prefix only; remember `mcpServers:search` and `agents:search` do **not** accept `searchType`!).
-- `agents`: `finops-advisor-agent` matched via `POST .../agents:search`.
+You should see JSON results across three resource types:
+- **Skills:** `private-cost-anomaly-triage` matched via `POST .../skills:search` (`searchType: "SEMANTIC"`), downloaded via `?alt=media` with 302 redirect header stripping, and checked against `sha256Hash`.
+- **MCP Servers:** `finops-mcp-server` matched via `POST .../mcpServers:search`.
+- **Agents:** `finops-advisor-agent` matched via `POST .../agents:search`.
 
-### Step 3: Run Live ADK Mode (Mode B: Live GCP Mode)
+Note that `mcpServers:search` and `agents:search` accept `{"searchString": "..."}` only; passing `searchType` triggers an HTTP 400 error. Open [`platform_agent/rest_consumer.py`](../../platform_agent/rest_consumer.py) if you want to read the two-hop redirect and hash-check implementation.
 
-On a workstation or Vertex AI Agent Engine runtime with `google-adk >= 1.29.0`, remember the **verified Bangkok-first regional placement**: `AgentRegistry` discovers Bangkok `McpServer` and `Agent` Services in **Bangkok (`asia-southeast3`)** (while auto-registered Google/GCP remote MCP servers live in `global`), and `GCPSkillRegistry` / `PlatformAgentConsumer` reads standalone **`Skills`** from **`global`** (`AGENT_REGISTRY_SKILLS_LOCATION=global`, or `us`/`eu` for CMEK) and automatically filters to enterprise `private-*` skills:
+## Step 3: Walk Through GitLab CI and Simulate MR Draft to Release Promotion
 
-```bash
-# Install ADK with A2A, Agent Identity, and MCP extras (see platform_agent/requirements.txt)
-.venv/bin/pip install -r platform_agent/requirements.txt
+Open [`starter-marketplace/.gitlab-ci.yml`](../../starter-marketplace/.gitlab-ci.yml). GitLab handles code review and version history, while Agent Registry serves approved runtime artifacts. Three CI stages enforce that boundary:
 
-# Export BOTH GCP_* and GOOGLE_CLOUD_* vars (adk_orchestrator.py gives precedence to
-# GCP_PROJECT_ID, GCP_LOCATION, AGENT_REGISTRY_SKILLS_LOCATION, and AGENT_REGISTRY_BASE_URL
-# over GOOGLE_CLOUD_* / AGENT_REGISTRY_ENDPOINT so any local-mock env vars are overridden!)
-export GCP_PROJECT_ID="<your-gcp-project-id>"
-export GCP_LOCATION="asia-southeast3"
-export AGENT_REGISTRY_SKILLS_LOCATION="global"
-export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
-export GOOGLE_CLOUD_PROJECT="${GCP_PROJECT_ID}"
-export GOOGLE_CLOUD_LOCATION="${GCP_LOCATION}"
-export AGENT_REGISTRY_ENDPOINT="${AGENT_REGISTRY_BASE_URL}"
-
-# Construct the live ADK LlmAgent wired to regional AgentRegistry + global GCPSkillRegistry + SkillToolset
-.venv/bin/python -m platform_agent.adk_orchestrator \
-  --mode adk \
-  --project-id "${GCP_PROJECT_ID}" \
-  --location "${GCP_LOCATION}" \
-  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
-  --base-url "${AGENT_REGISTRY_BASE_URL}"
-```
-
-> **Remember the Project-Scoping & Regional Split Rules:** Standalone `Skill` resources in live Agent Registry `v1` are strictly project-scoped (they do **not** roll up across folder/organization management boundaries) and live in **`global`** (APAC default) or **`us`/`eu`** (CMEK). Point `GCPSkillRegistry(project_id=..., location="global")` to your governed catalog project while keeping `AgentRegistry(project_id=..., location="asia-southeast3")` regional.
-
----
-
-## Part 2: GitLab Authoring SoT vs. Agent Registry Runtime SoT
-
-Review [starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml). Notice how the **Dual-Role Split** separates code review from runtime publication across three CI stages:
-
-| GitLab CI Stage | Job(s) | Trigger | What It Enforces |
+| Stage | Job(s) | Trigger | What It Does |
 | :--- | :--- | :--- | :--- |
-| **1. `validate`** | `validate:schemas`, `validate:antigravity-cli` | MR, `main`, Tags | Validates every plugin under `plugins/` against all 5 IDE schemas + runs `agy plugin validate --json` with the multi-tool `jq` warning filter. |
-| **2. `package-and-sign`** | `package-and-sign` | MR, `main`, Tags | Runs `python -m tools.plugin_sync sync --dry-run` to build deterministic per-skill ZIPs, inject `source_repo` & `git_commit`, and sign with Cloud KMS (`--kms-key-version`) or PEM (`--sign-pem`). |
-| **3. `register-registry`** | `register:draft-mr` | Merge Requests | Uploads skills with `--target-state TARGET_STATE_DRAFT --scanning-policy ENABLED_BLOCKING`. Skills are **quarantined** while security scans run—developers never see unreviewed MR changes. |
-| **3. `register-registry`** | `register:active-release` | Semver Tags (`v*.*.*`) or manual on `main` | Promotes clean, signed revisions to `--target-state TARGET_STATE_ACTIVE`. |
+| **1. `validate`** | `validate:schemas`, `validate:antigravity-cli` | MR, `main`, tags | Validates every plugin under `plugins/` against all 5 IDE schemas and runs `agy plugin validate --json` with the `jq` filter. |
+| **2. `package-and-sign`** | `package-and-sign` | MR, `main`, tags | Runs `python -m tools.plugin_sync sync --dry-run`, records `source_repo` and `git_commit`, and signs ZIPs (`--kms-key-version` or `--sign-pem`). |
+| **3. `register-registry`** | `register:draft-mr` | Merge Requests | Uploads with `--target-state TARGET_STATE_DRAFT --scanning-policy ENABLED_BLOCKING` so unreviewed MR changes stay hidden from developers. |
+| **3. `register-registry`** | `register:active-release` | Semver tags (`v*.*.*`) or manual on `main` | Promotes clean, signed revisions to `--target-state TARGET_STATE_ACTIVE`. |
 
-### Pull-Based Option 2 (`ingest --source-type git`) vs. Push-Based GitLab CI (`.gitlab-ci.yml`)
-
-These two mechanisms complement each other cleanly across a team's adoption lifecycle:
-- **Pull-based Option 2 (`python -m tools.plugin_sync ingest --source-type git` / `make demo-sync-repo` / Terraform `skills_source_mode = "git"`):** Ideal for Day-0 onboarding of an existing centralized GitLab or GitHub skills/plugins repository, Terraform environment bootstrapping, or scheduled catalog ingestion across repositories that have not yet adopted `.gitlab-ci.yml`. It auto-detects `agent-plugins.org` multi-plugin repos, standalone `skills/*/SKILL.md` repos, and hybrid layouts while recording exact sanitized `source_repo` and 40-char `git_commit` provenance.
-- **Push-based GitLab CI ([starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml)):** Target-state production governance triggered directly on Merge Requests and semver tags—enforcing 5-IDE schema + `agy plugin validate` gates, `TARGET_STATE_DRAFT` MR quarantine, keyless GCP Workload Identity Federation OIDC exchange, and Cloud KMS ECDSA P-256 signing before any release enters `TARGET_STATE_ACTIVE`.
-
-### Migrating `starter-marketplace/.gitlab-ci.yml` to a Standalone GitLab Repository
-
-[starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml) runs cleanly both inside this workshop monorepo and when copied into a standalone enterprise GitLab repository rooted at `starter-marketplace/`. Configure these four CI/CD variables when migrating to a standalone GitLab project:
-
-| GitLab CI Variable | Purpose | Example Value |
-| :--- | :--- | :--- |
-| `WORKSHOP_TOOLS_PACKAGE` | Pip spec, Artifact Registry Python wheel URL, or `git+https://` URL installing `schemas` and `tools.plugin_sync` when `pyproject.toml`/`tools/` are not in the standalone repo | `git+https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git@main` (or private Artifact Registry wheel) |
-| `PLUGINS_DIR` | Override the directory containing plugin folders; leave empty to auto-detect `plugins` (standalone repo) or `starter-marketplace/plugins` (monorepo) | `plugins` |
-| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full GCP Workload Identity Provider resource path used for keyless GitLab OIDC (`GCP_OIDC_TOKEN`) → STS token exchange (zero static JSON keys!) | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/gitlab-pool/providers/gitlab-oidc` |
-| `GCP_SERVICE_ACCOUNT_EMAIL` | Least-privilege CI publisher service account impersonated via `iamcredentials.googleapis.com` (`roles/agentregistry.editor` + `roles/cloudkms.signerVerifier`) | `agent-registry-ci-publisher@<PROJECT_ID>.iam.gserviceaccount.com` |
-
-### Step 4: Simulate the MR (`DRAFT`) → Release Tag (`ACTIVE`) Promotion Locally
-
-Test the exact commands from [starter-marketplace/.gitlab-ci.yml](../../starter-marketplace/.gitlab-ci.yml) against `mock_registry` (or live GCP by setting `AGENT_REGISTRY_BASE_URL` and `AGENT_REGISTRY_AUTH_TOKEN`):
+Make sure `make run-mock` (`:8090`) and `make run-middleware` (`:8080`) are both running, then run the exact MR draft and release tag commands locally:
 
 ```bash
-# 1. Reset mock registry to a clean slate (Local Mock Mode only)
+# 1. Reset mock_registry to a clean slate
 curl -fsSL -X POST http://127.0.0.1:8090/_mock/reset
 
-# 2. Simulate Merge Request job (register:draft-mr) -> uploads in TARGET_STATE_DRAFT
+# 2. Simulate the MR job (register:draft-mr) -> uploads in TARGET_STATE_DRAFT
 .venv/bin/python -m tools.plugin_sync sync \
   --plugin-dir starter-marketplace/plugins/gcp-finops-toolkit \
   --registry-url http://127.0.0.1:8090/v1 \
@@ -138,11 +101,11 @@ curl -fsSL -X POST http://127.0.0.1:8090/_mock/reset
   --git-commit "mr-preview-sha1234" \
   --skip-mcp-probe
 
-# 3. Verify Middleware hides DRAFT skills from developers!
+# 3. Confirm Middleware hides DRAFT skills from developers
 curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
-# Observe: plugins=[] and both skills appear in rejectedSkills (STATE_DRAFT)!
+# You should see plugins: [] and both skills under rejectedSkills (STATE_DRAFT).
 
-# 4. Simulate Tagged Release job (register:active-release) -> promotes to TARGET_STATE_ACTIVE
+# 4. Simulate the release tag job (register:active-release) -> promotes to TARGET_STATE_ACTIVE
 .venv/bin/python -m tools.plugin_sync sync \
   --plugin-dir starter-marketplace/plugins/gcp-finops-toolkit \
   --registry-url http://127.0.0.1:8090/v1 \
@@ -154,66 +117,110 @@ curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
   --git-commit "v1.0.0-release-sha" \
   --skip-mcp-probe
 
-# 5. Verify Middleware now serves gcp-finops-toolkit immediately!
+# 5. Confirm Middleware now serves gcp-finops-toolkit
 curl -fsSL http://127.0.0.1:8080/v1/catalog | .venv/bin/python -m json.tool
 ```
 
-> **Continuing Locally to Workstream B (Labs 06–08)?** Because step 1 called `POST /_mock/reset` and only re-synced `gcp-finops-toolkit`, `local-ops-toolkit` and `finops-billing-api` were cleared from local `mock_registry` memory. Run `make demo-sync-local` to restore the full multi-plugin catalog before continuing locally.
+> **Continuing locally to Labs 06–08?** Step 3 reset `mock_registry` and only re-synced `gcp-finops-toolkit`, which cleared `local-ops-toolkit` and `finops-billing-api`. Run `make demo-sync-local` afterward if you want the full local catalog back.
 
 ---
 
-## Part 3: Workstream A Live GCP Validation & Cleanup Checkpoint
+## Going Live on GCP (Optional)
 
-If you deployed Workstream A to Google Cloud in Lab 03 (**Bangkok `asia-southeast3`** primary + **`global`** Skills), run the automated end-to-end live verification and — if you are stopping after Workstream A or want to avoid idle cloud charges — tear down all workshop Cloud Run, Agent Registry, and Artifact Registry resources cleanly:
+**Region note:** On live GCP, `AgentRegistry` reads regional `Services` (`McpServer`, `Agent`, `Endpoint`) from Bangkok (`asia-southeast3`), while `GCPSkillRegistry` reads standalone `Skills` from `global` (filtered to `private-*` skills). In Workstream B later, Agent Identity `AuthProvider` uses Singapore (`auth_provider_location = "asia-southeast1"`). See the full APAC matrix in [Attendee Quickstart](../attendee-quickstart.md).
+
+### Live Google ADK Mode (`--mode adk`)
+
+On a workstation or Vertex AI Agent Engine runtime with `google-adk >= 1.29.0`, run `adk_orchestrator.py` against live Agent Registry `v1`. Standalone `Skill` resources are project-scoped and do not roll up across folders or organizations, so point `GCPSkillRegistry` directly at your catalog project.
+
+```bash
+# Install ADK with A2A, Agent Identity, and MCP extras
+.venv/bin/pip install -r platform_agent/requirements.txt
+
+# Export both GCP_* and GOOGLE_CLOUD_* vars (adk_orchestrator.py gives GCP_* precedence
+# so any local mock settings in your shell are overridden)
+export GCP_PROJECT_ID="<your-gcp-project-id>"
+export GCP_LOCATION="asia-southeast3"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
+export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
+export GOOGLE_CLOUD_PROJECT="${GCP_PROJECT_ID}"
+export GOOGLE_CLOUD_LOCATION="${GCP_LOCATION}"
+export AGENT_REGISTRY_ENDPOINT="${AGENT_REGISTRY_BASE_URL}"
+
+# Build the live ADK LlmAgent wired to Bangkok Services + global Skills
+.venv/bin/python -m platform_agent.adk_orchestrator \
+  --mode adk \
+  --project-id "${GCP_PROJECT_ID}" \
+  --location "${GCP_LOCATION}" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --base-url "${AGENT_REGISTRY_BASE_URL}"
+```
+
+### Workstream A Live GCP Validation & Teardown
+
+If you deployed Workstream A to Google Cloud in Lab 03, run the end-to-end validation script. Tear down the resources afterward unless you are heading straight into live Workstream B.
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 
-# 1. Validate live Bangkok Cloud Run services (/health), Agent Registry v1 Bangkok Services + global Skills, and 4-IDE feeds:
+# 1. Validate live Cloud Run services (/health), Bangkok Services, global Skills, and 4-IDE feeds
 make gcp-validate GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 # Direct script equivalent:
 # scripts/validate_live_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 
-# 2. Tear down Live GCP Workstream A resources when finished (skip if continuing straight to live Workstream B!)
+# 2. Tear down Workstream A resources when done
 # Track 2 (gcloud + Cloud Build):
 make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
-# Direct script equivalent (add --delete-source-deploy-repo ONLY if you tested --deploy-mode source in a dedicated sandbox):
+# Direct script equivalent:
 # scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
 
 # Track 3 (Terraform): set force_destroy_staging_bucket = true in sandbox .tfvars if objects exist
 # terraform -chdir=terraform/core destroy
 ```
 
-> **Note on Deleting Skills with Revisions, IAM v3 Teardown & Build Side Effects:**
-> - `gcloud agent-registry skills delete` does **not** expose a `--force` flag. `scripts/destroy_gcp.sh` automatically calls REST `DELETE https://agentregistry.googleapis.com/v1/projects/{p}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/{id}?force=true` with `Authorization` and `x-goog-user-project` headers so skills with revisions in `global` (or `us`/`eu`) are removed cleanly.
-> - On projects with IAM policy version 3 (containing conditional bindings), `gcloud projects remove-iam-policy-binding` requires explicit `--condition=None` (and `scripts/destroy_gcp.sh` also sweeps `deleted:serviceAccount:<email>?uid=...` tombstones cleanly).
-> - If you tested `scripts/deploy_gcp.sh --deploy-mode source`, Cloud Run auto-creates an Artifact Registry repository named `cloud-run-source-deploy` in `asia-southeast3`. Pass `--delete-source-deploy-repo` to `scripts/destroy_gcp.sh` **only** in a dedicated single-purpose sandbox (never in a shared project!).
-> - Regional Cloud Build user-owned staging buckets (`--default-buckets-behavior=regional-user-owned-bucket`) are retained by default to avoid disrupting other builds in the project; inspect with `gcloud storage buckets list --project="${GCP_PROJECT_ID}" --limit=50 --quiet`.
+A few live teardown details handled by `scripts/destroy_gcp.sh`:
+- **Deleting skills with revisions:** `gcloud agent-registry skills delete` has no `--force` flag. The script calls REST `DELETE .../locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/{id}?force=true` with `Authorization` and `x-goog-user-project` headers instead.
+- **IAM policy version 3:** Projects with conditional IAM bindings require `--condition=None` on `gcloud projects remove-iam-policy-binding`. The script passes `--condition=None` and cleans up `deleted:serviceAccount:<email>?uid=...` tombstones.
+- **Source-deploy repo and build buckets:** Pass `--delete-source-deploy-repo` only in a dedicated sandbox if you tested `--deploy-mode source`. Regional Cloud Build staging buckets stay intact by default (`gcloud storage buckets list --project="${GCP_PROJECT_ID}" --limit=50 --quiet`).
 
-> **Bangkok-First Regional Placement Reminder (Transitioning to Workstream B):** As detailed in the [Attendee Quickstart](../attendee-quickstart.md), **Bangkok (`asia-southeast3`)** is the primary region for Cloud Run, Cloud Build, Artifact Registry, Agent Registry **`Services`** (`McpServer`, `Agent`, `Endpoint`) & `Bindings`, GCS staging, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing (Lab 07), and Cloud Logging audit bucket (Lab 08). **Singapore (`asia-southeast1`)** is used **only** as the service-specific fallback for Workstream B **Agent Identity `AuthProvider`** (`auth_provider_location = "asia-southeast1"`, since Agent Identity is GA in Singapore and not yet available in Bangkok). Standalone **`Skills`** live in **`global`** (API supports `global`, `us`, `eu` only; `us`/`eu` required for native CMEK `SkillEncryptionSpec`), auto-registered Google/GCP remote MCP servers live in **`global`**, and optional Agent Gateway + IAP v2 UAP (`enable_agent_gateway = false` by default for APAC) is `us-central1`/`europe-west1` only.
+<details>
+<summary>Reference: Pull-Based Git Ingest vs. Push-Based GitLab CI &amp; Standalone Migration Variables</summary>
+
+Two ingestion patterns complement each other as teams adopt Agent Registry:
+- **Pull-based Option 2 (`python -m tools.plugin_sync ingest --source-type git` / `make demo-sync-repo` / `skills_source_mode = "git"`):** Good for onboarding an existing GitLab or GitHub skill repo before teams add `.gitlab-ci.yml`. It auto-detects multi-plugin, standalone `skills/*/SKILL.md`, and hybrid layouts while recording `source_repo` and `git_commit`.
+- **Push-based GitLab CI ([`starter-marketplace/.gitlab-ci.yml`](../../starter-marketplace/.gitlab-ci.yml)):** Good for ongoing governance on Merge Requests and semver tags, combining 5-IDE schema validation, `TARGET_STATE_DRAFT` quarantine, keyless GCP OIDC, and Cloud KMS signing.
+
+`starter-marketplace/.gitlab-ci.yml` works both inside this monorepo and when copied into a standalone GitLab repo. Set these four CI/CD variables when migrating to a standalone GitLab project:
+
+| GitLab CI Variable | Purpose | Example Value |
+| :--- | :--- | :--- |
+| `WORKSHOP_TOOLS_PACKAGE` | Pip spec, Artifact Registry wheel, or `git+https://` URL installing `schemas` and `tools.plugin_sync` | `git+https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git@main` |
+| `PLUGINS_DIR` | Override the plugin folder path (blank auto-detects `plugins` or `starter-marketplace/plugins`) | `plugins` |
+| `GCP_WORKLOAD_IDENTITY_PROVIDER` | Full Workload Identity Provider path for keyless GitLab OIDC to STS token exchange | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/gitlab-pool/providers/gitlab-oidc` |
+| `GCP_SERVICE_ACCOUNT_EMAIL` | Least-privilege CI publisher SA (`roles/agentregistry.editor` + `roles/cloudkms.signerVerifier`) | `agent-registry-ci-publisher@<PROJECT_ID>.iam.gserviceaccount.com` |
+
+</details>
 
 ---
 
 ## Verification Checkpoint
 
-- [ ] `python -m platform_agent.adk_orchestrator --mode adk --print-config` prints valid ADK wiring.
-- [ ] `platform_agent.adk_orchestrator --mode rest` discovers and extracts `private-cost-anomaly-triage` after `?alt=media` 302 redirect header stripping.
-- [ ] Confirmed `TARGET_STATE_DRAFT` skills from MR uploads are quarantined and hidden from `/v1/catalog` until promoted to `TARGET_STATE_ACTIVE`.
-- [ ] `.venv/bin/pytest -v tests/test_track1d_platform_agent.py` and `make test-e2e` pass completely.
-
----
+- [ ] `.venv/bin/python -m platform_agent.adk_orchestrator --mode adk --print-config` prints valid ADK wiring and least-privilege roles.
+- [ ] `platform_agent.adk_orchestrator --mode rest` discovers and extracts `private-cost-anomaly-triage` from `:8090`.
+- [ ] Confirmed MR uploads in `TARGET_STATE_DRAFT` stay hidden from `/v1/catalog` until promoted to `TARGET_STATE_ACTIVE`.
+- [ ] `.venv/bin/pytest -v tests/test_track1d_platform_agent.py` and `make test-e2e` pass.
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Symptom | Why It Happens | How to Fix |
 | :--- | :--- | :--- |
-| `SkillSignatureError` when running `adk_orchestrator --mode rest` | `REQUIRE_KMS_SIGNATURE` defaults to `"false"` in `adk_orchestrator.py` and `rest_consumer.py`; `SkillSignatureError` is raised when `REQUIRE_KMS_SIGNATURE=true` is enabled in the environment without `KMS_PUBLIC_KEY_PEM_PATH` (fail-closed) or when a downloaded skill ZIP is unsigned/tampered | Unset `REQUIRE_KMS_SIGNATURE` (or set `REQUIRE_KMS_SIGNATURE=false`) for unsigned Workstream A runs, or supply `KMS_PUBLIC_KEY_PEM_PATH` pointing to the trusted ECDSA P-256 public key PEM after completing [Lab 07](07-kms-encryption-and-signing.md). |
-| `RuntimeError: Live ADK mode requires google-adk>=1.29.0` | Running `--mode adk` without installing optional `platform_agent/requirements.txt` | Install `pip install -r platform_agent/requirements.txt` or use `--mode rest` / `--print-config`. |
-| `400 INVALID_ARGUMENT` on `agents:search` | Passing `searchType` to `agents:search` or `mcpServers:search` | Only `skills:search` accepts `searchType` (`KEYWORD`\|`SEMANTIC`); `agents:search` and `mcpServers:search` accept `{"searchString": "..."}` only. |
-| `401 CREDENTIALS_MISSING` downloading `?alt=media` in Live GCP Mode | Stripped `Authorization` on live Agent Registry's same-origin `302` → `/download/v1/...?alt=media` redirect | `platform_agent/rest_consumer.py` preserves `Authorization` strictly on same-origin `/download/...` redirects without signed-URL tokens while stripping `Authorization` and `x-goog-*` on cross-origin and signed-URL redirects. |
-| Live `skills:search` or `list_skills` returns 404/empty or times out in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu`), not single regions | Pass `--skills-location global` (or export `AGENT_REGISTRY_SKILLS_LOCATION=global`); `platform_agent` auto-defaults to `global` on `googleapis.com` and filters strictly to `private-*` enterprise skills. |
-| `gcloud projects remove-iam-policy-binding` fails or prompts during teardown on IAM v3 projects | Project IAM policy version 3 has unrelated conditional bindings and requires an explicit condition matcher | Pass `--condition=None` on both `add-iam-policy-binding` and `remove-iam-policy-binding` (already handled automatically by `scripts/deploy_gcp.sh` and `scripts/destroy_gcp.sh`). |
+| `SkillSignatureError` in `--mode rest` | `REQUIRE_KMS_SIGNATURE=true` is set in your shell without a trusted public key, or the skill ZIP is unsigned | Unset `REQUIRE_KMS_SIGNATURE` (or set `REQUIRE_KMS_SIGNATURE=false`) for unsigned Workstream A runs, or set `KMS_PUBLIC_KEY_PEM_PATH` after [Lab 07](07-kms-encryption-and-signing.md). |
+| `RuntimeError: Live ADK mode requires google-adk>=1.29.0` | Running `--mode adk` without installing optional ADK dependencies | Run `.venv/bin/pip install -r platform_agent/requirements.txt`, or stick to `--mode rest` and `--print-config`. |
+| `400 INVALID_ARGUMENT` on `agents:search` or `mcpServers:search` | Sent `searchType` to an endpoint that does not accept it | Only `skills:search` accepts `searchType` (`KEYWORD` or `SEMANTIC`). Send `{"searchString": "..."}` only to `agents:search` and `mcpServers:search`. |
+| `401 CREDENTIALS_MISSING` on `?alt=media` in Live GCP | `Authorization` header was stripped on the same-origin `302` redirect to `/download/v1/...` | [`platform_agent/rest_consumer.py`](../../platform_agent/rest_consumer.py) keeps `Authorization` on same-origin `/download/...` redirects without signed-URL tokens and strips `Authorization` and `x-goog-*` on cross-origin or signed redirects. |
+| Live `skills:search` returns 404 or times out in `asia-southeast3` | Standalone `Skills` live in `global` (or `us`/`eu`), not single regions | Pass `--skills-location global` or export `AGENT_REGISTRY_SKILLS_LOCATION="global"`. |
+| `gcloud projects remove-iam-policy-binding` fails or prompts on teardown | Project uses IAM policy version 3 with conditional bindings | Pass `--condition=None` on `add-iam-policy-binding` and `remove-iam-policy-binding` (already automated in `scripts/destroy_gcp.sh`). |
 
 ---
 
-**Workstream A Complete!** Continue to the standalone Security & Governance Track: [Lab 06: Governance, Scanning & Skill Lifecycle →](06-governance-scanning-lifecycle.md)
+**Workstream A Complete!** Continue to the standalone Security & Governance track: [Lab 06: Governance, Automated Scanning & Skill Lifecycle →](06-governance-scanning-lifecycle.md)

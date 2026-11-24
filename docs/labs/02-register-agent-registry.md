@@ -1,40 +1,50 @@
 # Lab 02: Decompose & Register Assets in Google Cloud Agent Registry (`v1`)
 
-**Workstream:** A — Core Platform & Middleware  
+**Workstream:** A (Core Platform & Middleware)  
 **Duration:** 35 minutes  
 **Prerequisites:** Completed [Lab 00](00-environment-setup.md) and [Lab 01](01-author-agent-plugin.md).
+
+---
+
+## Files You'll Work With
+
+| Role | File | What You'll Do |
+| :--- | :--- | :--- |
+| **Edit (Starter Exercise)** | [starter/lab02_plugin_sync_exercise.py](../../starter/lab02_plugin_sync_exercise.py) | Complete 4 `# WORKSHOP-TODO(lab-02)` functions (`canonical_private_skill_id`, `enrich_skill_frontmatter`, `build_single_skill_zip`, `register_skill_revision`). |
+| **Input** | [starter/lab01_plugin_skeleton/skills/hello-finops/SKILL.md](../../starter/lab01_plugin_skeleton/skills/hello-finops/SKILL.md)<br>[starter-marketplace/plugins/gcp-finops-toolkit/](../../starter-marketplace/plugins/gcp-finops-toolkit/plugin.json)<br>[local-skills/](../../local-skills/README.md) | Sample skill and plugin folders packaged and uploaded into Agent Registry `v1`. |
+| **Run** | `make demo-sync-local` ([tools/plugin_sync/cli.py](../../tools/plugin_sync/cli.py)) | Sync the reference plugin and standalone local skills into the local mock registry. |
+| **Reference Solution** | [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py)<br>[tools/plugin_sync/sources.py](../../tools/plugin_sync/sources.py) | Peek here if you get stuck on any TODO function or want to inspect the full CLI logic. |
 
 ---
 
 ## Learning Objectives
 
 By the end of this lab, you will:
-1. Understand how `tools.plugin_sync` decomposes an `agent-plugins.org` bundle—or ingests standalone `agentskills.io` directories—into Google Cloud Agent Registry `v1` primitives:
-   - Standalone **`Skill`** resources (`agentskills.io` ZIP ≤ 1 MB, strictly one uppercase `SKILL.md`, `private-` auto-prefixing).
-   - **`Service`** resources projecting read-only **`McpServer`** (`TOOL_SPEC`), **`Agent`** (`A2A_AGENT_CARD` with **empty** top-level `interfaces`), and **`Endpoint`** (`NO_SPEC`).
-2. Execute **both first-class skill ingestion paths** via `python -m tools.plugin_sync ingest`:
-   - **Option 1 — Local Skills Path**: Ingest [local-skills/](../../local-skills/README.md) (`local-ops-toolkit`) + `starter-marketplace/plugins/gcp-finops-toolkit` directly from disk (`make demo-sync-local`).
-   - **Option 2 — Centralized Git Repository Path**: Shallow-clone and ingest a centralized GitLab/GitHub (or offline local test) repository (`make demo-sync-repo` / `--source-type git`) with automatic layout detection and exact 40-char `git_commit` provenance.
-3. Configure Terraform's dual-source `skills_source_mode = "local" | "git"` bootstrapper in [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf) and complete the optional coding exercise in [starter/lab02_plugin_sync_exercise.py](../../starter/lab02_plugin_sync_exercise.py).
+1. Preview how `tools.plugin_sync` splits an `agent-plugins.org` plugin into single-skill ZIPs and Agent Registry `Service` payloads.
+2. Implement the 4 core packaging and registration functions in `starter/lab02_plugin_sync_exercise.py` and pass `4/4 [DONE]`.
+3. Register the reference plugin, standalone `local-skills/`, and an external `Endpoint` against the local Mock Registry (`:8090`).
+4. Verify the projected `/skills`, `/mcpServers`, `/agents`, and `/endpoints` views and trigger the A2A validation guardrail.
 
 ---
 
-## Key Agent Registry `v1` Invariants (Read Before Running)
+## Before You Start: 4 Agent Registry `v1` Rules
 
-1. **Verified Bangkok-first regional placement (`Services` vs. standalone `Skills`):** On live Google Cloud Agent Registry `v1`, all regional **`Services`** (`McpServer`, `Agent`, `Endpoint`) run in a single **Bangkok (`asia-southeast3`)** primary deployment, while standalone **`Skills`** (`Skill`, `SkillRevision`, `Findings`) are hosted **only** in **`global`** (default for APAC — `AGENT_REGISTRY_SKILLS_LOCATION=global` / `--skills-location global`) or **`us` / `eu`** (required for CMEK; single-region `/skills` endpoints time out), and auto-registered Google/GCP remote MCP servers live in **`global`**. *(Singapore `asia-southeast1` is reserved exclusively as the service-specific fallback for Workstream B Agent Identity `AuthProvider`, which is not yet available in Bangkok.)* Middleware (`INCLUDE_PUBLIC_SKILLS=false`) automatically filters strictly to `private-*` skills so Google's built-in first-party skills do not pollute enterprise catalogs. *(Local `mock_registry` accepts regional `asia-southeast3` for backward-compatible offline drills.)*
-2. **No generic `labels` map** exists on `Service`, `Agent`, `McpServer`, `Endpoint`, `Binding`, or `Skill` in `v1`. Plugin lineage is stored inside `SKILL.md` YAML `frontmatter.metadata` (`map<string, string>` scalar strings only): `plugin_name`, `plugin_display_name`, `plugin_version`, `source_repo`, `git_commit`, `mcp_service_id`, `agent_service_id`, `kms_signature`, `kms_key_version`.
-3. **Automatic `private-` Skill ID prefix**: Calling `POST /v1/projects/{p}/locations/{skills_loc}/skills?skillId=cost-anomaly-triage` creates `projects/{p}/locations/{skills_loc}/skills/private-cost-anomaly-triage`. Every subsequent `GET`, `PATCH`, `DELETE`, and `/revisions` call **must** use `private-cost-anomaly-triage`!
-4. **A2A v1.0 `A2A_AGENT_CARD` strict validation rules**:
-   - Top-level `interfaces` on the `Service` **must be empty**—endpoints are declared exclusively inside `agentSpec.content.supportedInterfaces` (≤ 10 KB).
-   - **No legacy A2A v0.x `capabilities.stateTransitionHistory`**: Live Agent Registry rejects it with `400 INVALID_ARGUMENT` (`proto unmarshal failed: unknown field "stateTransitionHistory"`). Use only A2A v1.0 capabilities (`streaming`, `pushNotifications`).
-   - **Unique `supportedInterfaces` URLs**: Live Agent Registry rejects duplicate URLs across bindings with `400 INVALID_ARGUMENT` (`duplicate interface url found in agent card`). Split `JSONRPC` onto `/a2a` and `HTTP+JSON` onto `/a2a/http` (both served by `samples/a2a-agent/app.py`, and enforced locally in `mock_registry/app.py` and `tools/plugin_sync/sync.py`).
-5. **Immutable `oneof spec` type**: Once a `Service` is created as `mcpServerSpec`, `agentSpec`, or `endpointSpec`, its spec type cannot be mutated via `PATCH`.
+Keep these 4 API rules in mind while coding in Step 2:
+
+1. **Automatic `private-` prefix on Skill IDs:** Calling `POST .../skills?skillId=cost-anomaly-triage` creates `skills/private-cost-anomaly-triage`. Every later `GET`, `PATCH`, `DELETE`, and `/revisions` call must use `private-cost-anomaly-triage`.
+2. **No `labels` map in `v1`:** Agent Registry `v1` resources do not have a generic `labels` map. Store plugin metadata (`plugin_name`, `plugin_version`, `source_repo`, `git_commit`, `mcp_service_id`, `agent_service_id`) as flat `map<string, string>` entries inside `SKILL.md` `frontmatter.metadata`.
+3. **Strict A2A v1.0 Agent Cards:** Leave top-level `interfaces` empty on A2A `Service` payloads and put endpoints inside `agentSpec.content.supportedInterfaces` (`<= 10 KB`). Omit legacy `stateTransitionHistory`, and give each binding a unique URL (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`).
+4. **Immutable `oneof spec`:** Once you create a `Service` as `mcpServerSpec`, `agentSpec`, or `endpointSpec`, you cannot switch its spec type with `PATCH`.
+
+> **Local vs. Live GCP note:** Steps 1–4 run completely offline against `http://127.0.0.1:8090`. On Live GCP, regional `Services` run in Bangkok (`asia-southeast3`) while standalone `Skills` live in `global` (covered in [Going Live on GCP](#going-live-on-gcp-optional--track-2--track-3) below and the [Attendee Quickstart](../attendee-quickstart.md)).
 
 ---
 
-## Step 1: Dry-Run Decomposition & Inspect the Sync Plan
+## Step 1: Preview What `tools.plugin_sync` Builds (`--dry-run`)
 
-Run `tools.plugin_sync` in `--dry-run` mode to package deterministic per-skill ZIPs and inspect the exact `v1` payloads without mutating any API:
+Before writing code, run `tools.plugin_sync` in `--dry-run` mode on `gcp-finops-toolkit`. This writes per-skill ZIPs and the full `sync-plan.json` to `/tmp/finops-sync-dryrun/` without touching any API.
+
+Run:
 
 ```bash
 .venv/bin/python -m tools.plugin_sync sync \
@@ -48,22 +58,62 @@ Run `tools.plugin_sync` in `--dry-run` mode to package deterministic per-skill Z
   --dry-run
 ```
 
-Inspect the generated deterministic skill ZIPs and `sync-plan.json`:
+Inspect the generated files and peek inside one skill archive:
 
 ```bash
 ls -la /tmp/finops-sync-dryrun/
 .venv/bin/python -m zipfile -l /tmp/finops-sync-dryrun/cost-anomaly-triage.zip
 ```
 
-Notice each archive contains **strictly one uppercase `SKILL.md`** and stays well under the 500 KB inline upload guideline (1 MB hard limit).
+You should see one ZIP per skill (`cost-anomaly-triage.zip`, `bq-query-optimizer.zip`) plus `sync-plan.json`. Each archive holds one uppercase `SKILL.md` under `<skill-name>/SKILL.md` and stays well below the 500 KB inline upload guideline (1 MB hard cap).
 
 ---
 
-## Step 2: Register Skills, MCP Server, A2A Agent & Endpoint (Choose Option 1 or Option 2)
+## Step 2: Hands-On Coding — Complete `starter/lab02_plugin_sync_exercise.py`
 
-> **Already running `make run-local-stack` from Lab 00?** Skip starting individual servers below (ports `:8090`, `:8091`, `:8092`, and `:8080` are already active) and run your sync commands directly in a second terminal.
+Open [starter/lab02_plugin_sync_exercise.py](../../starter/lab02_plugin_sync_exercise.py). First run its built-in self-check to confirm you start at `0/4`:
 
-If you are using the 4-terminal interactive layout instead, ensure the Mock Registry (`:8090`) and Sample FinOps Workloads (`:8091` MCP server + `:8092` A2A agent) are running in two terminals before running **Mode A (Local Mock Mode)**:
+```bash
+.venv/bin/python starter/lab02_plugin_sync_exercise.py
+```
+
+You should see 4 `[TODO]` lines and `Progress: 0/4 checks passed`.
+
+Now implement the 4 `# WORKSHOP-TODO(lab-02)` functions in order, re-running the script after each one:
+
+| # | Function | What to Implement | Stuck? Peek Here |
+| :---: | :--- | :--- | :--- |
+| 1 | `canonical_private_skill_id(raw_skill_id)` | Strip whitespace, raise `ValueError` if empty, and prepend `"private-"` only when not already present (never `private-private-...`). | `canonical_private_skill_id` in [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py) |
+| 2 | `enrich_skill_frontmatter(skill_md_text, plugin_metadata)` | Parse YAML with `parse_frontmatter()`, reject list/dict values in `metadata`, merge `plugin_metadata` as plain strings, and serialize `---\n<yaml>\n---\n\n<body>`. | `_serialize_frontmatter_markdown` & `build_skill_zip` in [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py) |
+| 3 | `build_single_skill_zip(skill_dir, plugin_metadata)` | Validate `SKILL.md` via `validate_skill_md()`, enrich it, zip `<skill-name>/...` while rejecting symlinks, `..` paths, and ZIPs over `MAX_SKILL_ZIP_BYTES`, then return `SkillArchiveArtifact`. | `build_skill_zip` in [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py) |
+| 4 | `register_skill_revision(...)` | `GET .../skills/{canonical_skill_id}` first. On `404`, `POST .../skills?skillId={skill_id}` with base64 `initialRevision`; on `200`, `POST .../revisions?skillRevisionId={revision_id}` and `PATCH` `defaultRevision`. | `apply_sync_plan` in [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py) |
+
+Re-run the self-check once all 4 functions are filled in:
+
+```bash
+.venv/bin/python starter/lab02_plugin_sync_exercise.py
+```
+
+You should see all 4 checks pass:
+
+```text
+Lab 02 Self-Check
+  [PASS] canonical_private_skill_id
+  [PASS] enrich_skill_frontmatter
+  [PASS] build_single_skill_zip (sha256=...)
+  [PASS] register_skill_revision (create + new revision promotion)
+  [DONE] Progress: 4/4 checks passed — all Lab 02 checks passed!
+```
+
+*(You can also run `make starter-check` anytime to see your progress across Labs 01–04 together.)*
+
+---
+
+## Step 3: Sync to the Local Mock Registry (`make demo-sync-local`)
+
+> **Already running `make run-local-stack` from Lab 00?** Your local servers (`:8090`, `:8091`, `:8092`, `:8080`) are already up. Jump straight to `make demo-sync-local` below.
+
+If you are running servers in separate terminals instead, start the Mock Registry (`:8090`) and sample FinOps workloads (`:8091` MCP + `:8092` A2A) first:
 
 ```bash
 # Terminal 1
@@ -73,54 +123,83 @@ make run-mock
 make run-samples
 ```
 
-> **Unified `ingest` Auto-Discovery:** `python -m tools.plugin_sync ingest` ([tools/plugin_sync/sources.py](../../tools/plugin_sync/sources.py)) automatically detects all 5 layouts—`single_plugin`, `multi_plugin`, `single_skill`, `standalone_skills`, and `hybrid`—for both **Option 1 (`--source-type local`)** and **Option 2 (`--source-type git`)**, while legacy `python -m tools.plugin_sync sync` and `make demo-sync` remain 100% backward compatible.
+Now run Option 1 (Local Skills default) to ingest both `starter-marketplace/plugins/gcp-finops-toolkit` and all 3 standalone skills in `local-skills/` (grouped as `local-ops-toolkit`). It also live-probes `http://127.0.0.1:8091/mcp` for MCP tool annotations:
+
+```bash
+make demo-sync-local
+```
+
+*(Need to sync only `gcp-finops-toolkit`? `make demo-sync` still works as a shortcut.)*
+
+Next, register the `finops-billing-api` Endpoint `Service` (`NO_SPEC` + `HTTP_JSON`) directly via REST `v1`:
+
+```bash
+curl -fsSL -X POST \
+  "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3/services?serviceId=finops-billing-api" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "displayName": "FinOps Cloud Billing API Endpoint",
+    "description": "External Cloud Billing REST API endpoint registered for governed agent egress policies.",
+    "interfaces": [
+      {"url": "https://cloudbilling.googleapis.com/v1", "protocolBinding": "HTTP_JSON"}
+    ],
+    "endpointSpec": {"type": "NO_SPEC"}
+  }' | .venv/bin/python -m json.tool
+```
 
 ---
 
-### Option 1: Local Skills Path (`local-skills/` + `starter-marketplace/`)
+## Step 4: Inspect Projected Resources & Test the Bad A2A Guardrail
 
-Use Option 1 for zero-friction classroom labs and offline environments—no GitLab/GitHub credentials required.
+Query the read-only discovery collections on your local Mock Registry:
 
-1. **One-command shortcut** (ingests both `starter-marketplace/plugins/gcp-finops-toolkit` AND `local-skills/` as `local-ops-toolkit` into Agent Registry, live-probing `http://127.0.0.1:8091/mcp` for `tools/list` annotations):
-   ```bash
-   make demo-sync-local
-   ```
-   *(To sync only `gcp-finops-toolkit` via the legacy `sync` subcommand, `make demo-sync` continues to work unchanged.)*
+```bash
+BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3"
 
-2. **Explicit `tools.plugin_sync ingest --source-type local` commands** (useful for inspecting individual options such as `--plugin-name`, `--per-skill-plugin`, `--only-skills`, or `--sign-pem`):
-   ```bash
-   # Option 1A: Ingest the full starter plugin (skills + MCP Server + A2A Agent)
-   .venv/bin/python -m tools.plugin_sync ingest \
-     --source-type local \
-     --path starter-marketplace/plugins/gcp-finops-toolkit \
-     --registry-url http://127.0.0.1:8090/v1 \
-     --project acme-agent-governance \
-     --location asia-southeast3 \
-     --target-state TARGET_STATE_ACTIVE \
-     --scanning-policy ENABLED_BLOCKING
+# 1. Standalone Skills (check the 'private-' prefix across all 5 skills)
+curl -fsSL "${BASE}/skills" | .venv/bin/python -m json.tool
 
-   # Option 1B: Ingest all 3 pre-prepared standalone skills in local-skills/ as local-ops-toolkit
-   .venv/bin/python -m tools.plugin_sync ingest \
-     --source-type local \
-     --path local-skills \
-     --plugin-name local-ops-toolkit \
-     --registry-url http://127.0.0.1:8090/v1 \
-     --project acme-agent-governance \
-     --location asia-southeast3 \
-     --target-state TARGET_STATE_ACTIVE \
-     --scanning-policy ENABLED_BLOCKING
-   ```
-   *(Tip: Pass `--per-skill-plugin` to emit 1 separate IDE plugin per standalone skill instead of grouping them under `local-ops-toolkit`, or `--only-skills` to skip `Service` registration.)*
+# 2. Projected MCP Server (check readOnlyHint & destructiveHint annotations)
+curl -fsSL "${BASE}/mcpServers" | .venv/bin/python -m json.tool
+
+# 3. Projected A2A Agent (interfaces projected from supportedInterfaces)
+curl -fsSL "${BASE}/agents" | .venv/bin/python -m json.tool
+
+# 4. Projected Endpoint
+curl -fsSL "${BASE}/endpoints" | .venv/bin/python -m json.tool
+```
+
+You should see:
+- **5 `private-` skills** in `STATE_ACTIVE` (`private-cost-anomaly-triage`, `private-bq-query-optimizer`, `private-cloud-run-debugger`, `private-terraform-iam-auditor`, `private-incident-postmortem-writer`).
+- **`finops-mcp-server`** exposing 3 tools (`get_billing_summary`, `analyze_bq_query`, `delete_idle_dataset`).
+- **`finops-advisor-agent`** with projected `/a2a` (`JSONRPC`) and `/a2a/http` (`HTTP+JSON`) interfaces.
+- **`finops-billing-api`** under `/endpoints`.
+
+Finally, send a deliberately invalid A2A `Service` that includes top-level `interfaces` to prove the API guardrail rejects it with `400 INVALID_ARGUMENT`:
+
+```bash
+curl -i -s -X POST \
+  "${BASE}/services?serviceId=bad-a2a-test" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "displayName": "Invalid A2A Service",
+    "interfaces": [{"url": "http://127.0.0.1:8092/a2a", "protocolBinding": "JSONRPC"}],
+    "agentSpec": {"type": "A2A_AGENT_CARD", "content": "{\"supportedInterfaces\": [{\"url\": \"http://127.0.0.1:8092/a2a\"}]}"}
+  }'
+```
+
+You should get an `HTTP/1.1 400 Bad Request` response explaining that top-level `interfaces` must be empty for `A2A_AGENT_CARD`.
 
 ---
 
-### Option 2: Centralized Git Repository Path (Clone & Ingest)
+## Optional: Option 2 — Clone & Ingest a Git Repo
 
-Use Option 2 when onboarding an existing centralized GitLab or GitHub skills/plugins repository. `tools.plugin_sync ingest --source-type git` runs a shallow clone (`git clone --depth 1`) into an auto-cleaned temporary directory, strips embedded URL credentials before recording `frontmatter.metadata.source_repo`, stamps the exact 40-char `HEAD` commit SHA in `git_commit`, enforces `--subdir` containment (rejecting `..` and symlink escapes), and ingests every discovered plugin and/or standalone skill.
+`python -m tools.plugin_sync ingest` ([tools/plugin_sync/sources.py](../../tools/plugin_sync/sources.py)) supports both `--source-type local` and `--source-type git`. It auto-detects 5 folder layouts (`single_plugin`, `multi_plugin`, `single_skill`, `standalone_skills`, `hybrid`), shallow-clones remote repos into a temporary directory, strips embedded URL credentials before recording `source_repo`, and stamps the 40-char `HEAD` commit SHA in `git_commit`.
 
-#### Option 2A: Self-Contained Offline Local Git Repo Demo (Zero Internet Required)
+<details>
+<summary><strong>Offline local Git repo demo (no internet required)</strong></summary>
 
-Prove the full Git clone-and-ingest workflow completely offline against a temporary local Git repository:
+Create a temporary local Git repo at `/tmp/central-skills-repo` and ingest it with `--source-type git`:
 
 ```bash
 rm -rf /tmp/central-skills-repo
@@ -145,7 +224,6 @@ git -C /tmp/central-skills-repo config user.email "author@acme.example.com"
 git -C /tmp/central-skills-repo add .
 git -C /tmp/central-skills-repo commit -m "Add central-security-checker skill"
 
-# Clone & ingest the local Git repository via Option 2 (--source-type git)
 .venv/bin/python -m tools.plugin_sync ingest \
   --source-type git \
   --repo-url /tmp/central-skills-repo \
@@ -159,15 +237,18 @@ git -C /tmp/central-skills-repo commit -m "Add central-security-checker skill"
   --scanning-policy ENABLED_BLOCKING
 ```
 
-Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_skills"`, and a real 40-character `"git_commit"` SHA matching `git -C /tmp/central-skills-repo rev-parse HEAD`.
+Check the JSON output for `"source_type": "git"`, `"layout": "standalone_skills"`, and a 40-character `"git_commit"` SHA matching `git -C /tmp/central-skills-repo rev-parse HEAD`.
 
-#### Option 2B: Live GitHub / Private GitLab Repository Examples
+</details>
 
-1. **One-command shortcut** (defaults to `SKILLS_REPO_URL=https://github.com/jiratouchmhp/agent-registry-marketplace-workshop.git`, `SKILLS_REPO_REF=main`, `SKILLS_REPO_SUBDIR=local-skills`, `SKILLS_REPO_PLUGIN_NAME=central-repo-skills`):
+<details>
+<summary><strong>Ingest a GitHub or private GitLab repository (<code>make demo-sync-repo</code> &amp; <code>--git-token-env</code>)</strong></summary>
+
+1. **Shortcut command** (defaults to this workshop's `local-skills/` folder on GitHub):
    ```bash
    make demo-sync-repo
    ```
-   Override variables on the command line for any customer GitLab or GitHub repository (if your repository has plugins or skills at the root instead of `local-skills/`, pass `SKILLS_REPO_SUBDIR=""` to auto-detect from the repository root):
+   Override variables for any customer repo (set `SKILLS_REPO_SUBDIR=""` to detect from the repo root):
    ```bash
    export GITLAB_TOKEN="<your-read-repository-token>"
    make demo-sync-repo \
@@ -178,7 +259,7 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
      SKILLS_REPO_PLUGIN_NAME="central-repo-skills"
    ```
 
-2. **Explicit `tools.plugin_sync ingest --source-type git` command** for a private GitLab repository (never pass raw tokens on the command line—pass the **environment variable name** via `--git-token-env`, which is injected via an origin-scoped ephemeral `http.<origin>/.extraHeader`):
+2. **Explicit CLI command** (never pass raw tokens as CLI arguments; pass the environment variable name via `--git-token-env`):
    ```bash
    export GITLAB_TOKEN="<your-read-repository-token>"
 
@@ -196,185 +277,170 @@ Inspect the JSON output: notice `"source_type": "git"`, `"layout": "standalone_s
      --scanning-policy ENABLED_BLOCKING
    ```
 
----
+</details>
 
-### Register the Endpoint Service & Verify Projected Discovery Resources (Local Mock Mode)
+<details>
+<summary><strong>Explicit Option 1 CLI commands (<code>--source-type local</code>)</strong></summary>
 
-1. Also register the `finops-billing-api` **Endpoint** Service (`NO_SPEC` + `HTTP_JSON`) directly via REST `v1`:
-   ```bash
-   curl -fsSL -X POST \
-     "http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3/services?serviceId=finops-billing-api" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "displayName": "FinOps Cloud Billing API Endpoint",
-       "description": "External Cloud Billing REST API endpoint registered for governed agent egress policies.",
-       "interfaces": [
-         {"url": "https://cloudbilling.googleapis.com/v1", "protocolBinding": "HTTP_JSON"}
-       ],
-       "endpointSpec": {"type": "NO_SPEC"}
-     }' | .venv/bin/python -m json.tool
-   ```
-
-2. Verify all projected read-only discovery resources and standalone `private-` skills:
-   ```bash
-   BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3"
-
-   # Standalone Skills (observe 'private-' prefix across Option 1 and Option 2 skills!)
-   curl -fsSL "${BASE}/skills" | .venv/bin/python -m json.tool
-
-   # Projected read-only MCP Server (with readOnlyHint & destructiveHint annotations)
-   curl -fsSL "${BASE}/mcpServers" | .venv/bin/python -m json.tool
-
-   # Projected read-only A2A Agent (interfaces projected from supportedInterfaces)
-   curl -fsSL "${BASE}/agents" | .venv/bin/python -m json.tool
-
-   # Projected read-only Endpoint
-   curl -fsSL "${BASE}/endpoints" | .venv/bin/python -m json.tool
-   ```
-
-3. Test the `A2A_AGENT_CARD` top-level `interfaces` guardrail (should return `400 INVALID_ARGUMENT`):
-   ```bash
-   curl -i -s -X POST \
-     "${BASE}/services?serviceId=bad-a2a-test" \
-     -H "Content-Type: application/json" \
-     -d '{
-       "displayName": "Invalid A2A Service",
-       "interfaces": [{"url": "http://127.0.0.1:8092/a2a", "protocolBinding": "JSONRPC"}],
-       "agentSpec": {"type": "A2A_AGENT_CARD", "content": "{\"supportedInterfaces\": [{\"url\": \"http://127.0.0.1:8092/a2a\"}]}"}
-     }'
-   ```
-
-### Mode B: Live GCP Mode (`v1` REST, `gcloud`, and Terraform `skills_source_mode`)
-
-> **Track 2 & Track 3 Fresh-Project Ordering (Choose Your Path):** Because [Lab 00](00-environment-setup.md) stopped at authentication and pre-flight (without enabling APIs or deploying Cloud Run yet), choose one of these two options:
-> 1. **Recommended (End-to-End Track 2 / Track 3 Flow):** Complete Lab 02 in **Mode A (Local Mock Mode)** above, then move to **[Lab 03](03-build-deploy-middleware.md)** where `scripts/deploy_gcp.sh` (Track 2) or `terraform/core` (Track 3) enables all required APIs, deploys Cloud Run services, registers Agent Registry Services (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api`), and ingests Skills with `--wait-for-scan` in one atomic pass.
-> 2. **Run Lab 02 Live Standalone Right Now:** Enable the Agent Registry API first so you do not hit `403 SERVICE_DISABLED`:
->    ```bash
->    gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet
->    ```
->    Then run `tools.plugin_sync ingest --only-skills --skills-location global --wait-for-scan` below and verify `gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet`. Expect regional `mcp-servers list` and `agents list` (`--location="${GCP_LOCATION}"`) to populate once Cloud Run services are deployed and registered in [Lab 03](03-build-deploy-middleware.md).
-
-1. **Via `tools.plugin_sync ingest` (REST `v1`) with `--skills-location global` and `--wait-for-scan`:**
-   > **Live Async LLM Scanning (`--wait-for-scan`), Re-Deploy Race Protection & Quota Project Header:** On live `https://agentregistry.googleapis.com/v1`, `ENABLED_BLOCKING` runs an asynchronous LLM security scan (~10 seconds) after upload. On **initial create**, newly created skills briefly remain in `STATE_DRAFT` before auto-promoting to `STATE_ACTIVE`. On **idempotent re-deploy** of an existing skill, creating a new `SkillRevision` and immediately `PATCH`ing `defaultRevision` fails with `400 FAILED_PRECONDITION` (`cannot set default revision to a revision with pending scan results when scanning policy is ENABLED_BLOCKING`). Always pass **`--wait-for-scan`** so `tools/plugin_sync/sync.py` (`wait_for_revision_scan_completion()`) polls the new revision's `scanState` to completion before promoting `defaultRevision`. `tools.plugin_sync` also automatically sends `x-goog-user-project: <project>` on all `googleapis.com` requests.
-   >
-   > **Terraform Service Ownership Note:** If `terraform/core` manages your Cloud Run `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`), pass `--only-skills` when invoking `tools.plugin_sync ingest` directly so local `127.0.0.1` development URLs in `starter-marketplace/` do not overwrite your Cloud Run Service endpoints (the Terraform bootstrapper passes `--only-skills --skills-location global --wait-for-scan` automatically).
-
-   ```bash
-   export GCP_PROJECT_ID="<your-gcp-project-id>"
-   export GCP_LOCATION="asia-southeast3"
-   export AGENT_REGISTRY_SKILLS_LOCATION="global"
-   export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
-   export AGENT_REGISTRY_AUTH_TOKEN="$(gcloud auth print-access-token --quiet)"
-
-   # Option 1 (Local Skills + Starter Plugin — standalone Skills go to global; add --only-skills if Terraform owns Services)
-   .venv/bin/python -m tools.plugin_sync ingest \
-     --source-type local \
-     --path local-skills \
-     --plugin-name local-ops-toolkit \
-     --registry-url "${AGENT_REGISTRY_BASE_URL}" \
-     --project "${GCP_PROJECT_ID}" \
-     --location "${GCP_LOCATION}" \
-     --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
-     --target-state TARGET_STATE_ACTIVE \
-     --scanning-policy ENABLED_BLOCKING \
-     --wait-for-scan \
-     --only-skills \
-     --skip-mcp-probe
-
-   # OR Option 2 (Centralized GitLab / GitHub Repo)
-   export GITLAB_TOKEN="<your-read-repository-token>"
-   .venv/bin/python -m tools.plugin_sync ingest \
-     --source-type git \
-     --repo-url https://gitlab.example.com/ai-platform/agent-marketplace.git \
-     --ref main \
-     --subdir plugins \
-     --git-token-env GITLAB_TOKEN \
-     --registry-url "${AGENT_REGISTRY_BASE_URL}" \
-     --project "${GCP_PROJECT_ID}" \
-     --location "${GCP_LOCATION}" \
-     --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
-     --target-state TARGET_STATE_ACTIVE \
-     --scanning-policy ENABLED_BLOCKING \
-     --wait-for-scan \
-     --only-skills \
-     --skip-mcp-probe
-   ```
-
-2. **Via Terraform (`terraform/core/`) with `skills_location = "global"` and `skills_source_mode = "local" | "git"`:**
-   [terraform/core/agent_registry_services.tf](../../terraform/core/agent_registry_services.tf) manages the three GA regional `google_agent_registry_service` resources (`finops-mcp-server`, `finops-advisor-agent`, `finops-billing-api` in `var.location`, default Bangkok `asia-southeast3`) and reads back their projected IDs & URNs via `data.google_agent_registry_mcp_server`, `data.google_agent_registry_agent`, and `data.google_agent_registry_endpoint` using `basename(...registry_resource)`.
-
-   Standalone Skills are bootstrapped cleanly into `var.skills_location` (`"global"` default, or `"us"`/`"eu"` for CMEK) via [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf) (`terraform_data`), which **always passes `--only-skills --skip-mcp-probe --wait-for-scan`** so Terraform-managed `google_agent_registry_service` resources are never overwritten and async scans settle cleanly. Choose your mode in `terraform/core/terraform.tfvars` (see [terraform/core/variables.tf](../../terraform/core/variables.tf) and [terraform/core/terraform.tfvars.example](../../terraform/core/terraform.tfvars.example)):
-
-   ```hcl
-   # Verified Bangkok-first regional placement: Bangkok Services (asia-southeast3) + global Skills
-   location                       = "asia-southeast3"
-   skills_location                = "global" # "global" (APAC default), "us", or "eu" (CMEK)
-
-   # Option 1 (Default): Local starter plugin + pre-prepared standalone local-skills/
-   skills_source_mode             = "local"
-   starter_plugin_dir             = "../../starter-marketplace/plugins/gcp-finops-toolkit"
-   enable_local_standalone_skills = true
-   local_skills_dir               = "../../local-skills"
-   local_skills_plugin_name       = "local-ops-toolkit"
-   skills_per_skill_plugin        = false
-
-   # Option 2 (Alternative): Clone & ingest a centralized GitLab or GitHub repo
-   # (NEVER place raw tokens in .tfvars — set skills_repo_token_env to the env var NAME!)
-   # skills_source_mode      = "git"
-   # skills_repo_url         = "https://gitlab.example.com/ai-platform/agent-marketplace.git"
-   # skills_repo_ref         = "main"
-   # skills_repo_subdir      = "plugins"
-   # skills_repo_token_env   = "GITLAB_TOKEN"
-   # skills_repo_plugin_name = "central-repo-skills"
-   # skills_per_skill_plugin = false
-   ```
-
-3. **Inspect live resources via `gcloud` (note `global` for Skills vs. `asia-southeast3` for Services):**
-   ```bash
-   # Standalone Skills live in global (or us/eu for CMEK):
-   gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet
-   # Projected MCP Servers & A2A Agents live in Bangkok primary (asia-southeast3):
-   gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
-   gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
-   ```
-
----
-
-## Step 3: Hands-On Coding Exercise (Optional Deep Dive)
-
-Practice implementing `canonical_private_skill_id`, `enrich_skill_frontmatter`, `build_single_skill_zip`, and `register_skill_revision` in [starter/lab02_plugin_sync_exercise.py](../../starter/lab02_plugin_sync_exercise.py):
+Run `ingest --source-type local` directly when you want custom flags like `--per-skill-plugin`, `--only-skills`, or `--sign-pem`:
 
 ```bash
-.venv/bin/python starter/lab02_plugin_sync_exercise.py
-# Or verify all starter exercises together:
-make starter-check
+# Ingest the full starter plugin (skills + MCP Server + A2A Agent)
+.venv/bin/python -m tools.plugin_sync ingest \
+  --source-type local \
+  --path starter-marketplace/plugins/gcp-finops-toolkit \
+  --registry-url http://127.0.0.1:8090/v1 \
+  --project acme-agent-governance \
+  --location asia-southeast3 \
+  --target-state TARGET_STATE_ACTIVE \
+  --scanning-policy ENABLED_BLOCKING
+
+# Ingest all 3 standalone skills in local-skills/ under local-ops-toolkit
+.venv/bin/python -m tools.plugin_sync ingest \
+  --source-type local \
+  --path local-skills \
+  --plugin-name local-ops-toolkit \
+  --registry-url http://127.0.0.1:8090/v1 \
+  --project acme-agent-governance \
+  --location asia-southeast3 \
+  --target-state TARGET_STATE_ACTIVE \
+  --scanning-policy ENABLED_BLOCKING
 ```
 
-Fill in the `# WORKSHOP-TODO(lab-02)` blocks and re-run until all built-in self-checks print `[PASS]`. Compare against [tools/plugin_sync/sync.py](../../tools/plugin_sync/sync.py).
+</details>
+
+---
+
+## Going Live on GCP (Optional — Track 2 & Track 3)
+
+**APAC region split:** On Live Google Cloud Agent Registry `v1`, regional `Services` (`McpServer`, `Agent`, `Endpoint`) run in Bangkok (`asia-southeast3`), while standalone `Skills` live in `global` (`--skills-location global`, or `us`/`eu` for CMEK; single-region `/skills` endpoints time out). Singapore (`asia-southeast1`) is only used for Workstream B Agent Identity `AuthProvider` (see [Attendee Quickstart](../attendee-quickstart.md)).
+
+**Fresh-project order:** If you are following Track 2 or Track 3 end to end, finish Steps 1–4 locally first, then run [Lab 03](03-build-deploy-middleware.md) to enable APIs, deploy Cloud Run, and register Services and Skills together. Expand the blocks below if you want to test live skills right now or configure Terraform's `skills_source_mode`.
+
+Key live behaviors to remember:
+- **`--wait-for-scan`:** Live `ENABLED_BLOCKING` runs an async LLM scan (~10s). Always pass `--wait-for-scan` so `wait_for_revision_scan_completion()` waits for `scanState` before patching `defaultRevision` (otherwise re-deploys fail with `400 FAILED_PRECONDITION`).
+- **`private-` auto-filtering:** The Middleware defaults to `INCLUDE_PUBLIC_SKILLS=false` so Google's built-in first-party skills in `global` never mix into your `private-*` catalog.
+- **`--only-skills`:** Pass `--only-skills` when Terraform manages your Cloud Run `Service` URLs so local `127.0.0.1` plugin manifests do not overwrite them.
+
+<details>
+<summary><strong>Track 2: Live CLI ingest (<code>--skills-location global --wait-for-scan</code>)</strong></summary>
+
+Enable the Agent Registry API on a fresh project first, then upload standalone skills to `global`:
+
+```bash
+export GCP_PROJECT_ID="<your-gcp-project-id>"
+export GCP_LOCATION="asia-southeast3"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
+export AGENT_REGISTRY_BASE_URL="https://agentregistry.googleapis.com/v1"
+
+gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet
+export AGENT_REGISTRY_AUTH_TOKEN="$(gcloud auth print-access-token --quiet)"
+
+# Option 1 (Local skills -> global; tools.plugin_sync sends x-goog-user-project automatically)
+.venv/bin/python -m tools.plugin_sync ingest \
+  --source-type local \
+  --path local-skills \
+  --plugin-name local-ops-toolkit \
+  --registry-url "${AGENT_REGISTRY_BASE_URL}" \
+  --project "${GCP_PROJECT_ID}" \
+  --location "${GCP_LOCATION}" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --target-state TARGET_STATE_ACTIVE \
+  --scanning-policy ENABLED_BLOCKING \
+  --wait-for-scan \
+  --only-skills \
+  --skip-mcp-probe
+
+# OR Option 2 (Centralized GitLab / GitHub repo)
+export GITLAB_TOKEN="<your-read-repository-token>"
+.venv/bin/python -m tools.plugin_sync ingest \
+  --source-type git \
+  --repo-url https://gitlab.example.com/ai-platform/agent-marketplace.git \
+  --ref main \
+  --subdir plugins \
+  --git-token-env GITLAB_TOKEN \
+  --registry-url "${AGENT_REGISTRY_BASE_URL}" \
+  --project "${GCP_PROJECT_ID}" \
+  --location "${GCP_LOCATION}" \
+  --skills-location "${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --target-state TARGET_STATE_ACTIVE \
+  --scanning-policy ENABLED_BLOCKING \
+  --wait-for-scan \
+  --only-skills \
+  --skip-mcp-probe
+```
+
+</details>
+
+<details>
+<summary><strong>Track 3: Terraform <code>skills_source_mode</code> (<code>terraform/core/skills_bootstrap.tf</code>)</strong></summary>
+
+[terraform/core/agent_registry_services.tf](../../terraform/core/agent_registry_services.tf) manages the 3 regional `google_agent_registry_service` resources in Bangkok (`var.location = "asia-southeast3"`). Standalone skills are uploaded into `var.skills_location` (`"global"`) by [terraform/core/skills_bootstrap.tf](../../terraform/core/skills_bootstrap.tf), which always passes `--only-skills --skip-mcp-probe --wait-for-scan`.
+
+Configure your mode in `terraform/core/terraform.tfvars` (see [variables.tf](../../terraform/core/variables.tf) and [terraform.tfvars.example](../../terraform/core/terraform.tfvars.example)):
+
+```hcl
+location                       = "asia-southeast3"
+skills_location                = "global" # "global" (APAC default), "us", or "eu" (CMEK)
+
+# Option 1 (Default): Local starter plugin + standalone local-skills/
+skills_source_mode             = "local"
+starter_plugin_dir             = "../../starter-marketplace/plugins/gcp-finops-toolkit"
+enable_local_standalone_skills = true
+local_skills_dir               = "../../local-skills"
+local_skills_plugin_name       = "local-ops-toolkit"
+skills_per_skill_plugin        = false
+
+# Option 2 (Alternative): Clone & ingest a Git repo
+# (Never put raw tokens in .tfvars — set skills_repo_token_env to the env var name)
+# skills_source_mode      = "git"
+# skills_repo_url         = "https://gitlab.example.com/ai-platform/agent-marketplace.git"
+# skills_repo_ref         = "main"
+# skills_repo_subdir      = "plugins"
+# skills_repo_token_env   = "GITLAB_TOKEN"
+# skills_repo_plugin_name = "central-repo-skills"
+# skills_per_skill_plugin = false
+```
+
+</details>
+
+<details>
+<summary><strong>Inspect live resources with <code>gcloud agent-registry</code></strong></summary>
+
+```bash
+# Standalone Skills live in global (or us/eu for CMEK):
+gcloud agent-registry skills list --project="${GCP_PROJECT_ID}" --location="${AGENT_REGISTRY_SKILLS_LOCATION:-global}" --limit=50 --quiet
+
+# Projected MCP Servers & A2A Agents live in Bangkok (asia-southeast3):
+gcloud agent-registry mcp-servers list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
+gcloud agent-registry agents list --project="${GCP_PROJECT_ID}" --location="${GCP_LOCATION}" --limit=50 --quiet
+```
+
+</details>
 
 ---
 
 ## Verification Checkpoint
 
-- [ ] `GET .../skills` lists `private-cost-anomaly-triage` and `private-bq-query-optimizer` (starter plugin) plus `private-cloud-run-debugger`, `private-terraform-iam-auditor`, and `private-incident-postmortem-writer` (Option 1 `local-skills/`) and/or `private-central-security-checker` (Option 2 cloned Git repo) in `STATE_ACTIVE` with `defaultRevisionFindingCount: 0`.
-- [ ] `GET .../mcpServers` lists `finops-mcp-server` with 3 tools (`get_billing_summary`, `analyze_bq_query`, `delete_idle_dataset`) and their MCP annotations.
-- [ ] `GET .../agents` lists `finops-advisor-agent` with projected `interfaces` from `supportedInterfaces`.
+- [ ] `.venv/bin/python starter/lab02_plugin_sync_exercise.py` prints `4/4` `[DONE]`.
+- [ ] `GET .../skills` lists `private-cost-anomaly-triage` and `private-bq-query-optimizer`, plus the 3 `local-skills/` (`private-cloud-run-debugger`, `private-terraform-iam-auditor`, `private-incident-postmortem-writer`), in `STATE_ACTIVE` with `defaultRevisionFindingCount: 0`.
+- [ ] `GET .../mcpServers` lists `finops-mcp-server` with 3 tools (`get_billing_summary`, `analyze_bq_query`, `delete_idle_dataset`), and `GET .../agents` lists `finops-advisor-agent`.
 - [ ] `.venv/bin/pytest -v tests/test_track1a_sync_and_samples.py tests/test_dual_skill_sources.py` passes completely.
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Symptom | Why It Happens | How to Fix |
 | :--- | :--- | :--- |
-| `403 SERVICE_DISABLED` calling `https://agentregistry.googleapis.com/v1` | `agentregistry.googleapis.com` has not been enabled on the fresh project yet | Either complete Lab 02 in Local Mock Mode and let `scripts/deploy_gcp.sh` / `terraform/core` in [Lab 03](03-build-deploy-middleware.md) enable all APIs automatically, or run `gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet` first. |
-| `404 NOT_FOUND` when calling `GET .../skills/cost-anomaly-triage` | Missing `private-` auto-prefix on private publisher skills | Always address the skill as `skills/private-cost-anomaly-triage` after creation. |
-| `400 INVALID_ARGUMENT: Generic 'labels' map is not supported` | Attempted to pass a `labels` object to `Service` or `Skill` | Move custom string attributes into `SKILL.md` `frontmatter.metadata` (`map<string, string>`). |
-| `400 INVALID_ARGUMENT: Top-level 'interfaces' MUST be empty` | Passed both top-level `interfaces` and `agentSpec.type = "A2A_AGENT_CARD"` | Omit top-level `interfaces`; declare endpoints inside `agentSpec.content.supportedInterfaces`. |
-| `400 INVALID_ARGUMENT: proto unmarshal failed: unknown field "stateTransitionHistory"` | Included legacy A2A v0.x `capabilities.stateTransitionHistory` in `agent-card.json` or Terraform `agent_spec.content` | Remove `stateTransitionHistory`; keep only A2A v1.0 `capabilities` (`streaming`, `pushNotifications`). |
-| `400 INVALID_ARGUMENT: duplicate interface url found in agent card` | Declared two `supportedInterfaces` bindings (e.g. `JSONRPC` and `HTTP+JSON`) with the same `/a2a` URL | Split each protocol binding onto a distinct path (`/a2a` for `JSONRPC`, `/a2a/http` for `HTTP+JSON`). |
-| `400 FAILED_PRECONDITION: cannot set default revision to a revision with pending scan results` | Re-deployed an existing skill under `ENABLED_BLOCKING` and patched `defaultRevision` before the new `SkillRevision`'s async scan (~10s) finished | Always pass `--wait-for-scan` to `tools.plugin_sync` so `wait_for_revision_scan_completion()` polls `scanState` to completion before promoting `defaultRevision`. |
-| Live `skills` create/list times out or fails in `asia-southeast3` | Standalone `Skill` resources are hosted only in `global`, `us`, or `eu` on live Agent Registry `v1` (single-region `/skills` endpoints time out) | Pass `--skills-location global` (or set `AGENT_REGISTRY_SKILLS_LOCATION=global` / `skills_location = "global"`) while keeping Services in Bangkok (`asia-southeast3`). |
+| `403 SERVICE_DISABLED` calling `https://agentregistry.googleapis.com/v1` | `agentregistry.googleapis.com` is not enabled on the project yet. | Run `gcloud services enable agentregistry.googleapis.com --project="${GCP_PROJECT_ID}" --quiet`, or finish locally and deploy via [Lab 03](03-build-deploy-middleware.md). |
+| `404 NOT_FOUND` on `GET .../skills/cost-anomaly-triage` | Private skills automatically get a `private-` prefix after creation. | Address the resource as `skills/private-cost-anomaly-triage`. |
+| `400 INVALID_ARGUMENT: Generic 'labels' map is not supported` | Sent a top-level `labels` object to a `Service` or `Skill`. | Move flat string attributes into `SKILL.md` `frontmatter.metadata` (`map<string, string>`). |
+| `400 INVALID_ARGUMENT: Top-level 'interfaces' MUST be empty` | Sent both top-level `interfaces` and `agentSpec.type = "A2A_AGENT_CARD"`. | Omit top-level `interfaces`; declare endpoints inside `agentSpec.content.supportedInterfaces`. |
+| `400 INVALID_ARGUMENT: unknown field "stateTransitionHistory"` | Included legacy A2A v0.x `capabilities.stateTransitionHistory`. | Remove `stateTransitionHistory`; keep only `streaming` and `pushNotifications`. |
+| `400 INVALID_ARGUMENT: duplicate interface url found in agent card` | Two bindings in `supportedInterfaces` share `/a2a`. | Use `/a2a` for `JSONRPC` and `/a2a/http` for `HTTP+JSON`. |
+| `400 FAILED_PRECONDITION: pending scan results` | Re-deployed a skill under `ENABLED_BLOCKING` and patched `defaultRevision` before the async scan (~10s) finished. | Always pass `--wait-for-scan` so `tools.plugin_sync` waits for scan completion before promotion. |
+| Live `/skills` create or list times out in `asia-southeast3` | Live standalone `Skills` only exist in `global`, `us`, or `eu`. | Pass `--skills-location global` (or set `skills_location = "global"`) while keeping `Services` in `asia-southeast3`. |
 
 ---
 

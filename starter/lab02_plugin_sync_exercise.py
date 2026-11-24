@@ -1,15 +1,21 @@
 """Lab 02 Starter Exercise: Decomposing Agent Plugins 1.0 -> Agent Registry v1 Skills.
 
+Walkthrough:
+    ``docs/labs/02-register-agent-registry.md`` (Step 2)
+
+Run Self-Check:
+    ``.venv/bin/python starter/lab02_plugin_sync_exercise.py`` (or ``make starter-check``)
+
 Goal:
     Google Cloud Agent Registry (v1) stores standalone ``Skill`` resources in
     ``agentskills.io`` format (strictly ONE uppercase ``SKILL.md`` per ZIP,
-    <= 1 MB compressed, scalar string ``metadata`` map) — NOT multi-skill
+    <= 1 MB compressed, scalar string ``metadata`` map), rather than multi-skill
     ``agent-plugins.org`` plugin archives.
 
     In this exercise you will implement:
     1. ``canonical_private_skill_id`` — handling Agent Registry's automatic
        ``private-`` ID prefix for PRIVATE-publisher skills.
-    2. ``enrich_skill_frontmatter`` — injecting plugin provenance & KMS signing
+    2. ``enrich_skill_frontmatter`` — injecting plugin metadata & KMS signing
        keys into ``SKILL.md`` frontmatter ``metadata`` (strictly ``map<string, string>``).
     3. ``build_single_skill_zip`` — packaging a single skill directory into an
        ``agentskills.io``-compliant ZIP archive (single uppercase ``SKILL.md``,
@@ -19,7 +25,8 @@ Goal:
        already exists) with ``scanningConfig.policy = "ENABLED_BLOCKING"``.
 
 Reference Solution:
-    ``tools/plugin_sync/``
+    ``tools/plugin_sync/sync.py`` (``canonical_private_skill_id``, ``build_skill_zip``,
+    ``apply_sync_plan``)
 """
 
 from __future__ import annotations
@@ -89,7 +96,7 @@ def enrich_skill_frontmatter(
     skill_md_text: str,
     plugin_metadata: dict[str, str],
 ) -> str:
-    """Inject scalar string provenance fields into ``SKILL.md`` YAML frontmatter.
+    """Inject scalar string metadata fields into ``SKILL.md`` YAML frontmatter.
 
     Requirements:
     - Parse existing YAML frontmatter with ``parse_frontmatter(skill_md_text)``.

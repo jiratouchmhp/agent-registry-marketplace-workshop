@@ -61,8 +61,11 @@ REQUIRED_MAKE_TARGETS: frozenset[str] = frozenset(
 )
 
 
+STARTER_README_PATH = REPO_ROOT / "starter" / "README.md"
+
+
 def _all_doc_markdown_files() -> list[Path]:
-    files = [README_PATH, LOCAL_SKILLS_DIR / "README.md"]
+    files = [README_PATH, LOCAL_SKILLS_DIR / "README.md", STARTER_README_PATH]
     files.extend(sorted(DOCS_DIR.rglob("*.md")))
     return files
 
@@ -385,6 +388,7 @@ def test_live_apac_regional_split_and_findings_documented_consistently() -> None
     lab03 = (LABS_DIR / "03-build-deploy-middleware.md").read_text(encoding="utf-8")
     lab05 = (LABS_DIR / "05-platform-agents-gitlab-sot.md").read_text(encoding="utf-8")
     lab06 = (LABS_DIR / "06-governance-scanning-lifecycle.md").read_text(encoding="utf-8")
+    lab07 = (LABS_DIR / "07-kms-encryption-and-signing.md").read_text(encoding="utf-8")
     lab08 = (LABS_DIR / "08-access-control-and-audit.md").read_text(encoding="utf-8")
 
     # Bangkok primary (asia-southeast3) + Singapore fallback for Agent Identity (asia-southeast1) + global Skills
@@ -416,8 +420,7 @@ def test_live_apac_regional_split_and_findings_documented_consistently() -> None
         ("attendee-quickstart.md", quickstart),
         ("architecture.md", arch),
         ("00-environment-setup.md", lab00),
-        ("03-build-deploy-middleware.md", lab03),
-        ("05-platform-agents-gitlab-sot.md", lab05),
+        ("07-kms-encryption-and-signing.md", lab07),
         ("08-access-control-and-audit.md", lab08),
     ):
         assert 'auth_provider_location = "asia-southeast1"' in doc, (
@@ -492,4 +495,74 @@ def test_single_region_bangkok_architecture_regression_guards() -> None:
     assert not doc_violations, (
         "Removed 2-region / failover flags referenced in documentation:\n"
         + "\n".join(doc_violations)
+    )
+
+
+def test_all_labs_have_files_table_and_starter_guidance() -> None:
+    """Every lab leads with Files You'll Work With, clear starter/ guidance, and avoids AI clichés."""
+    files_heading = "## Files You'll Work With"
+    for lab_filename in EXPECTED_LAB_FILES:
+        text = (LABS_DIR / lab_filename).read_text(encoding="utf-8")
+        assert files_heading in text, f"{lab_filename} missing '{files_heading}' section"
+        files_idx = text.index(files_heading)
+        anchor_idx = (
+            text.index("## Step 1")
+            if "## Step 1" in text
+            else text.index("## Verification Checkpoint")
+        )
+        assert files_idx < anchor_idx, (
+            f"{lab_filename} must place '{files_heading}' before '## Step 1' / '## Verification Checkpoint'"
+        )
+
+    starter_targets = (
+        ("01-author-agent-plugin.md", "starter/lab01_plugin_skeleton"),
+        ("02-register-agent-registry.md", "starter/lab02_plugin_sync_exercise.py"),
+        ("03-build-deploy-middleware.md", "starter/lab03_middleware_redirect_exercise.py"),
+        ("04-ide-developer-experience.md", "starter/lab04_hub_sync_adapter_exercise.py"),
+    )
+    for lab_filename, starter_target in starter_targets:
+        text = (LABS_DIR / lab_filename).read_text(encoding="utf-8")
+        assert starter_target in text, (
+            f"{lab_filename} must explicitly reference starter target {starter_target!r}"
+        )
+        if "## Going Live on GCP" in text:
+            assert text.index(starter_target) < text.index("## Going Live on GCP"), (
+                f"{lab_filename} must reference {starter_target!r} before '## Going Live on GCP'"
+            )
+
+    no_starter_stub_re = re.compile(r"no\s+`?starter/`?\s+coding\s+stub", re.IGNORECASE)
+    for lab_filename in (
+        "05-platform-agents-gitlab-sot.md",
+        "06-governance-scanning-lifecycle.md",
+        "07-kms-encryption-and-signing.md",
+        "08-access-control-and-audit.md",
+    ):
+        text = (LABS_DIR / lab_filename).read_text(encoding="utf-8")
+        assert no_starter_stub_re.search(text), (
+            f"{lab_filename} must explicitly state there is no `starter/` coding stub in that lab"
+        )
+
+    banned_cliches = (
+        "faithfully simulating",
+        "zero-friction",
+        "in one atomic pass",
+        "ultra-fast",
+        "Articulate the critical",
+    )
+    checked_docs = [
+        README_PATH,
+        DOCS_DIR / "attendee-quickstart.md",
+        STARTER_README_PATH,
+        *(LABS_DIR / lab_filename for lab_filename in EXPECTED_LAB_FILES),
+    ]
+    cliche_hits: list[str] = []
+    for doc_path in checked_docs:
+        lower_text = doc_path.read_text(encoding="utf-8").lower()
+        for phrase in banned_cliches:
+            if phrase.lower() in lower_text:
+                cliche_hits.append(
+                    f"{doc_path.relative_to(REPO_ROOT)} contains banned cliché {phrase!r}"
+                )
+    assert not cliche_hits, "AI clichés detected in workshop documentation:\n" + "\n".join(
+        cliche_hits
     )

@@ -1,72 +1,55 @@
-# Lab 08: Access Control, Agent Gateway IAP v2 UAP & Immutable Audit Logging
+# Lab 08: Access Control, Agent Gateway IAP & Audit Logging
 
-**Workstream:** B — Security & Governance *(Standalone Runnable — No Workstream A Terraform State Required)*  
+**Workstream:** B (Security & Governance — Standalone, no Workstream A Terraform state required)  
 **Duration:** 40 minutes  
 **Prerequisites:** Python `.venv` verified (`make test`).
 
 > **Running Workstream B Standalone**  
-> This lab requires **zero Workstream A state** (`terraform/core/` does not need to be deployed):  
-> - **Local Mock Mode (Offline):** Start `make run-mock` (`:8090`) to exercise `bindings:fetchAvailable` IAM filtering, validate IAP v2 UAP rules with `apply-uap.sh --dry-run`, and test the client-side `policy_guard.py` hook directly.  
-> - **Standalone Live GCP Mode:** Apply [terraform/security_governance/](../../terraform/security_governance/agent_gateway_iap.tf) independently (`make tf-sec-plan`) against any existing Google Cloud Agent Registry project—just populate `mcp_server_resource_id`, `mcp_server_urn`, `a2a_agent_resource_id`, and `a2a_agent_urn` in `terraform.tfvars` without touching `terraform/core/`.
+> This lab needs zero Workstream A state (`terraform/core/` does not need to be deployed):  
+> - **Local Mock Mode (Offline):** Start `make run-mock` (`:8090`) to test `bindings:fetchAvailable` IAM filtering, dry-run IAP v2 UAP rules with `apply-uap.sh --dry-run`, and run the client-side `policy_guard.py` hook directly.  
+> - **Live GCP Mode (Optional):** Apply [`terraform/security_governance/agent_gateway_iap.tf`](../../terraform/security_governance/agent_gateway_iap.tf) independently (`make tf-sec-plan`) by copying [`terraform/security_governance/terraform.tfvars.example`](../../terraform/security_governance/terraform.tfvars.example) to `terraform.tfvars` and filling in `project_id`, `middleware_sa_email`, `mcp_server_resource_id`, `mcp_server_urn`, `a2a_agent_resource_id`, and `a2a_agent_urn`.
 
----
+## Files You'll Work With
+
+No `starter/` coding stub in this lab — you'll run and inspect the repo files below directly.
+
+| Role | File | What You'll Do |
+| :--- | :--- | :--- |
+| **Inspect** | [`security-governance/iap-uap/mcp-tool-annotations-uap.json`](../../security-governance/iap-uap/mcp-tool-annotations-uap.json) | Read the IAP v2 UAP CEL rules allowing read-only tools and blocking destructive ones. |
+| **Run** | [`security-governance/iap-uap/apply-uap.sh`](../../security-governance/iap-uap/apply-uap.sh) | Preview (`--dry-run`) or apply IAM v3 AccessPolicy and PolicyBinding commands. |
+| **Inspect** | [`security-governance/hooks/hooks.json`](../../security-governance/hooks/hooks.json) | Check how Antigravity wires the client-side `policy-guard` hook. |
+| **Run / Inspect** | [`security-governance/hooks/scripts/policy_guard.py`](../../security-governance/hooks/scripts/policy_guard.py) | Test `PreToolUse` blocking and redacted `PostToolUse` JSONL logging locally. |
+| **Inspect** | [`security-governance/audit/compliance-queries.md`](../../security-governance/audit/compliance-queries.md) | Review Cloud Logging filters and BigQuery Log Analytics SQL queries. |
+| **Inspect (Live GCP)** | [`auth_bindings.tf`](../../terraform/security_governance/auth_bindings.tf), [`agent_gateway_iap.tf`](../../terraform/security_governance/agent_gateway_iap.tf), [`audit_logging.tf`](../../terraform/security_governance/audit_logging.tf) | Terraform definitions under `terraform/security_governance/` for `AuthProvider`, `Binding`, IAP UAP, and audit logging. |
+| **Configure (Live GCP)** | [`terraform/security_governance/terraform.tfvars.example`](../../terraform/security_governance/terraform.tfvars.example) | Starting template for Workstream B Terraform variables (`cp` to `terraform.tfvars` if running standalone). |
+| **Run (Live GCP)** | [`scripts/destroy_gcp.sh`](../../scripts/destroy_gcp.sh) | Cleanly remove Workstream A GCP resources and audit zero leftovers (`make gcp-destroy`). |
 
 ## Learning Objectives
 
 By the end of this lab, you will:
-1. Apply the **4 Agent Registry IAM roles** (`viewer`, `user`, `editor`, `admin`) and **per-`Skill` resource-level IAM**—enforcing the golden rule: *never grant `editor` or `admin` to runtime agents or serving middleware*.
-2. Configure **Agent Identity `AuthProvider` + Agent Registry `Binding`** and demonstrate how `GET .../bindings:fetchAvailable` actively filters out bindings whose `AuthProvider` the caller lacks `roles/agentidentity.user` on.
-3. Enforce **tool-level runtime governance** using **Network Services Agent Gateway + IAP v2 IAM Unified Access Policies (UAP)** with CEL expressions (`read_only_hint == true` ALLOW, `destructive_hint == true` DENY).
-4. Test the optional client-side **Antigravity `hooks.json` Policy Guard** ([security-governance/hooks/scripts/policy_guard.py](../../security-governance/hooks/scripts/policy_guard.py)) blocking destructive MCP tools and dangerous shell commands.
-5. Configure **immutable WORM Cloud Audit Logging** (`agentregistry.googleapis.com` + `apphubendpoint.googleapis.com` `ADMIN_READ` Data Access + Agent Gateway request logs) and review the compliance queries in [security-governance/audit/compliance-queries.md](../../security-governance/audit/compliance-queries.md).
+1. Map the 4 Agent Registry IAM roles and keep runtime agents limited to read-only access.
+2. Prove that `bindings:fetchAvailable` hides bindings when a caller lacks `roles/agentidentity.user` on the `AuthProvider`.
+3. Preview IAP v2 UAP CEL rules with `apply-uap.sh --dry-run` and test the client-side `policy_guard.py` hook locally.
+4. Review Cloud Audit Logging (`ADMIN_READ` and WORM bucket settings), compliance queries, and clean GCP teardown.
 
 ---
 
-## Step 1: Least-Privilege IAM & Per-`Skill` Resource IAM
+## Step 1: Review the 4 Agent Registry IAM Roles
 
-### The 4 Predefined Agent Registry IAM Roles
+Never grant `editor` or `admin` to runtime agents or the Polyglot Middleware. Split permissions across these four predefined roles:
 
-| Role | Capabilities | Approved Principals |
+| Role | What It Allows | Approved Principals |
 | :--- | :--- | :--- |
-| `roles/agentregistry.viewer` | Read-only discovery (`list`/`get`/`search`) & active skill download (`?alt=media`) | **Polyglot Middleware SA**, **Platform Agents (ADK)**, developers |
+| `roles/agentregistry.viewer` | Read-only discovery (`list`/`get`/`search`) and active skill downloads (`?alt=media`) | Polyglot Middleware SA, Platform Agents (ADK), developers |
 | `roles/agentregistry.user` | `viewer` + standalone `Skill` CRUD only | Skill authors (`skill-author` SA) |
-| `roles/agentregistry.editor` | `viewer` + `Service` & `Skill` CRUD | **CI/CD Publisher SA only** (never runtime agents!) |
-| `roles/agentregistry.admin` | Full control + `Binding`, `Finding`, per-`Skill` IAM, `SkillEncryptionSpec` | Platform Security Admins only (never runtime agents!) |
+| `roles/agentregistry.editor` | `viewer` + `Service` and `Skill` CRUD | CI/CD Publisher SA only (never runtime agents) |
+| `roles/agentregistry.admin` | Full control + `Binding`, `Finding`, per-`Skill` IAM, `SkillEncryptionSpec` | Platform Security Admins only (never runtime agents) |
 
-### Live GCP Mode — Grant Per-`Skill` Resource-Level IAM
+## Step 2: Test `Binding` and `bindings:fetchAvailable` IAM Filtering
 
-Restrict a sensitive private skill (e.g. `private-cost-anomaly-triage` in `global` — or `us`/`eu` if using CMEK) to a specific team or agent service account:
+In [`terraform/security_governance/auth_bindings.tf`](../../terraform/security_governance/auth_bindings.tf), an `AuthProvider` and `Binding` link the FinOps A2A Agent to the FinOps MCP Server using read-only OAuth scopes (`cloud-billing.readonly`, `bigquery.readonly`). At runtime, `GET .../bindings:fetchAvailable` drops any binding whose `AuthProvider` the caller cannot access via `roles/agentidentity.user`.
 
-```bash
-export GCP_PROJECT_ID="<your-gcp-project-id>"
-export AGENT_REGISTRY_SKILLS_LOCATION="global"
-
-gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
-  --project="${GCP_PROJECT_ID}" \
-  --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
-  --member="serviceAccount:agent-marketplace-middleware@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
-  --role="roles/agentregistry.viewer" \
-  --quiet
-```
-
----
-
-## Step 2: `AuthProvider` + `Binding` + `FetchAvailableBindings` IAM Filtering
-
-In [terraform/security_governance/auth_bindings.tf](../../terraform/security_governance/auth_bindings.tf), `google_agent_identity_auth_provider` + `google_agent_registry_binding` bind the FinOps A2A Agent (`source.identifier`) to the FinOps MCP Server (`target.identifier`) with scoped OAuth (`cloud-billing.readonly`, `bigquery.readonly`) and explicitly blocked directory admin scopes.
-
-> **Workstream B Bangkok-First Regional Placement & Service-Specific Fallbacks (`terraform/security_governance/terraform.tfvars`):**
-> - **`location = "asia-southeast3"` (Bangkok — Primary Region):** Regional Agent Registry `Services`/`Bindings`, IAP egressor IAM, Cloud KMS `EC_SIGN_P256_SHA256` asymmetric signing, and regional Cloud Logging audit bucket.
-> - **`auth_provider_location = "asia-southeast1"` (Singapore — Service-Specific Fallback ONLY):** Workstream B **Agent Identity Auth Manager (`agentidentity.googleapis.com` → `google_agent_identity_auth_provider`)** uses Singapore because Agent Identity is GA in `asia-southeast1` and not yet available in Bangkok (`asia-southeast3`).
-> - **Standalone `Skills` location (`global`, or `us`/`eu` for CMEK):** Skills and per-`Skill` IAM live in **`global`** (API supports `global`, `us`, `eu` only; `AGENT_REGISTRY_SKILLS_LOCATION=global`, `skills_location = "global"` in `terraform/core/`), and auto-registered Google/GCP remote MCP servers live in **`global`**.
-> - **`enable_agent_gateway = false`** (Network Services Agent Gateway on Cloud Run is currently GA only in `us-central1` and `europe-west1`; set `enable_agent_gateway = true` and `agent_gateway_location = "us-central1"` only when evaluating live Agent Gateway in US/EU).
-> - **`lock_audit_bucket = false`** in ephemeral workshop sandboxes so `terraform destroy` works cleanly (**set `lock_audit_bucket = true` in production** for irreversible WORM log retention!).
-
-At runtime, calling `GET .../bindings:fetchAvailable` **actively filters out** any binding whose `AuthProvider` the caller lacks `roles/agentidentity.user` on.
-
-### Mode A: Local Mock Mode — Demonstrate IAM-Filtered `bindings:fetchAvailable`
-
-Ensure `make run-mock` is running on `:8090`, then create a Binding and test authorized vs. unauthorized callers using `X-Mock-Allowed-Auth-Providers`:
+Make sure `make run-mock` is running on `:8090`, then test authorized vs. unauthorized callers with `X-Mock-Allowed-Auth-Providers`:
 
 ```bash
 BASE="http://127.0.0.1:8090/v1/projects/acme-agent-governance/locations/asia-southeast3"
@@ -91,51 +74,37 @@ curl -fsSL -X POST "${BASE}/bindings?bindingId=finops-agent-to-mcp-binding" \
     }
   }" | .venv/bin/python -m json.tool
 
-# 2. Authorized caller (holds roles/agentidentity.user on finops-mcp-oauth) -> returns 1 binding!
+# 2. Authorized caller (holds roles/agentidentity.user on finops-mcp-oauth) -> returns 1 binding
 curl -fsSL \
   -H "X-Mock-Allowed-Auth-Providers: finops-mcp-oauth" \
   "${BASE}/bindings:fetchAvailable?sourceIdentifier=${AGENT_URN}&targetIdentifier=${MCP_URN}" \
   | .venv/bin/python -m json.tool
 
-# 3. Unauthorized caller (lacks roles/agentidentity.user on finops-mcp-oauth) -> returns bindings: []!
+# 3. Unauthorized caller -> returns bindings: []
 curl -fsSL \
   -H "X-Mock-Allowed-Auth-Providers: other-auth-provider" \
   "${BASE}/bindings:fetchAvailable?sourceIdentifier=${AGENT_URN}&targetIdentifier=${MCP_URN}" \
   | .venv/bin/python -m json.tool
 ```
 
-### Mode B: Live GCP Mode (`terraform/security_governance`)
+You should see 1 binding returned for `finops-mcp-oauth` and an empty list for `other-auth-provider`.
 
-Apply [terraform/security_governance/auth_bindings.tf](../../terraform/security_governance/auth_bindings.tf) and [agent_gateway_iap.tf](../../terraform/security_governance/agent_gateway_iap.tf):
+## Step 3: Preview IAP v2 UAP CEL Rules Locally
 
-```bash
-export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
-make tf-sec-plan
-terraform -chdir=terraform/security_governance apply
-```
+Open [`security-governance/iap-uap/mcp-tool-annotations-uap.json`](../../security-governance/iap-uap/mcp-tool-annotations-uap.json). Two CEL rules on `iap.googleapis.com/resources.egressViaIAP` enforce tool-level safety at the Agent Gateway boundary:
 
----
-
-## Step 3: Agent Gateway + IAP v2 UAP Tool-Annotation Enforcement (CEL)
-
-Inspect [security-governance/iap-uap/mcp-tool-annotations-uap.json](../../security-governance/iap-uap/mcp-tool-annotations-uap.json):
-
-- **ALLOW Rule** (`iap.googleapis.com/resources.egressViaIAP`):
+- **ALLOW rule** (permits `get_billing_summary` and `analyze_bq_query`):
   ```cel
   destination.is_registered == true &&
   destination.agent_registry.resource_type == 'MCP_SERVER' &&
   destination.agent_registry.mcp_server.tool.annotations.read_only_hint == true
   ```
-  → Permits `get_billing_summary` and `analyze_bq_query`.
-- **DENY Rule** (`iap.googleapis.com/resources.egressViaIAP`):
+- **DENY rule** (blocks `delete_idle_dataset`):
   ```cel
   destination.agent_registry.mcp_server.tool.annotations.destructive_hint == true
   ```
-  → Explicitly blocks `delete_idle_dataset` at the Agent Gateway network boundary!
 
-### Mode A: Validate Rules & Preview Commands (`--dry-run`, Zero GCP Needed)
-
-*(Note: Network Services Agent Gateway is currently GA in `us-central1` and `europe-west1`; keep `enable_agent_gateway = false` in APAC-only Terraform deployments and use `us-central1` or `europe-west1` when evaluating live Agent Gateway + IAP v2 UAP.)*
+Validate the policy JSON and preview the exact `gcloud` commands offline with `--dry-run` (live Agent Gateway runs in `us-central1` or `europe-west1`):
 
 ```bash
 bash security-governance/iap-uap/apply-uap.sh \
@@ -145,21 +114,13 @@ bash security-governance/iap-uap/apply-uap.sh \
   --dry-run
 ```
 
-### Mode B: Apply IAM v3 AccessPolicy & PolicyBinding in Live GCP
+You should see the JSON pass validation and the exact IAM v3 `access-policies` and `policy-bindings` commands printed without touching GCP.
 
-```bash
-bash security-governance/iap-uap/apply-uap.sh \
-  --project "<your-gcp-project-id>" \
-  --location "us-central1" \
-  --gateway-name "agent-marketplace-gateway" \
-  --principal "principal://agents.global.proj-<PROJECT_NUMBER>.system.id.goog/resources/aiplatform/projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/finops-advisor-agent"
-```
+## Step 4: Test the Client-Side Policy Guard Hook
 
----
+Open [`security-governance/hooks/hooks.json`](../../security-governance/hooks/hooks.json) (named group `"policy-guard"`, relative `./scripts/policy_guard.py`, mode `0755`). This hook adds a client-side guardrail on top of server-side IAP policies.
 
-## Step 4: Test Client-Side Antigravity `hooks.json` Policy Guard (Defense-in-Depth)
-
-Inspect [security-governance/hooks/hooks.json](../../security-governance/hooks/hooks.json) (uses named group `"policy-guard"` and relative `./scripts/policy_guard.py` path with mode `0755`). Test both `PreToolUse` and `PostToolUse` locally:
+Test `PreToolUse` decisions and redacted `PostToolUse` logging locally:
 
 ```bash
 # 1. Read-only MCP tool -> ALLOWED ({})
@@ -174,7 +135,7 @@ echo '{"tool_call": {"name": "mcp_finops-mcp-server_delete_idle_dataset", "annot
 echo '{"tool_call": {"name": "run_command", "args": {"CommandLine": "terraform destroy -auto-approve"}}}' \
   | .venv/bin/python security-governance/hooks/scripts/policy_guard.py --event PreToolUse
 
-# 4. PostToolUse redacted audit log (arg values never logged, only arg_keys!)
+# 4. PostToolUse redacted audit log (records arg_keys only, never secret values)
 echo '{"conversation_id": "conv-demo-1", "agent_name": "finops-advisor", "tool_call": {"name": "get_billing_summary", "args": {"project_id": "acme-agent-governance", "token": "SECRET"}}, "result": "ok"}' \
   | POLICY_GUARD_AUDIT_LOG=/tmp/policy-guard-demo.jsonl \
     .venv/bin/python security-governance/hooks/scripts/policy_guard.py --event PostToolUse
@@ -182,41 +143,84 @@ echo '{"conversation_id": "conv-demo-1", "agent_name": "finops-advisor", "tool_c
 cat /tmp/policy-guard-demo.jsonl
 ```
 
-Verify `/tmp/policy-guard-demo.jsonl` records `"arg_keys": ["project_id", "token"]` without ever writing the secret value `"SECRET"`.
+You should see `{}` for step 1, `"decision": "deny"` for steps 2 and 3, and `"arg_keys": ["project_id", "token"]` in `/tmp/policy-guard-demo.jsonl` with zero trace of `"SECRET"`.
+
+## Step 5: Inspect Audit Logging Config and Compliance Queries
+
+Open [`terraform/security_governance/audit_logging.tf`](../../terraform/security_governance/audit_logging.tf):
+1. It enables `ADMIN_READ` Data Access logs on both `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com` (Admin Activity is already on by default).
+2. It creates a regional Cloud Logging bucket (`agent-governance-audit` in `asia-southeast3`, `enable_analytics = true`) with a sink routing `cloudaudit.googleapis.com/activity`, `cloudaudit.googleapis.com/data_access`, and `networkservices.googleapis.com/gateway_requests`.
+
+> **WORM Lock Warning (`lock_audit_bucket`):** Once `lock_audit_bucket = true` is applied, the bucket retention period cannot be shortened and the bucket cannot be deleted until all log entries expire. Keep `lock_audit_bucket = false` in workshop sandboxes so `terraform destroy` works, and set `lock_audit_bucket = true` in production.
+
+Now open [`security-governance/audit/compliance-queries.md`](../../security-governance/audit/compliance-queries.md) to review the Cloud Logging filters and BigQuery Log Analytics SQL queries for:
+- Scanning policy downgrades (`scanningConfig.policy = "DISABLED"`)
+- Denied IAP `egressViaIAP` calls and unregistered egress attempts (`unregisteredResource`)
+- IAP UAP `DRY_RUN` readiness breakdown before flipping to enforced mode
+- Cloud KMS `AsymmetricSign` and `GetPublicKey` audit trails
 
 ---
 
-## Step 5: Immutable WORM Audit Logging & Compliance Queries
+## Going Live on GCP (Optional)
 
-Inspect [terraform/security_governance/audit_logging.tf](../../terraform/security_governance/audit_logging.tf):
-1. Enables `ADMIN_READ` Data Access audit logs on **both** `agentregistry.googleapis.com` **and** `apphubendpoint.googleapis.com` (Admin Activity is always on).
-2. Creates a regional Cloud Logging bucket (`agent-governance-audit` in `asia-southeast3`, `enable_analytics = true`) controlled by `var.lock_audit_bucket` (**`false` in ephemeral workshop sandboxes** so `terraform destroy` cleans up; **`true` in production** for irreversible WORM retention) with a dedicated sink routing:
-   - `cloudaudit.googleapis.com/activity` (`agentregistry`, `apphubendpoint`, `agentidentity`, `iap`, `networkservices`, `cloudkms`)
-   - `cloudaudit.googleapis.com/data_access` (`agentregistry`, `apphubendpoint`, `iap`, `cloudkms`)
-   - `networkservices.googleapis.com/gateway_requests`
-3. Open [security-governance/audit/compliance-queries.md](../../security-governance/audit/compliance-queries.md) for production-ready **Cloud Logging** filters and **BigQuery Log Analytics** SQL queries covering:
-   - Scanning policy downgrade alerts (`scanningConfig.policy = "DISABLED"`)
-   - Denied IAP `egressViaIAP` calls & shadow unregistered egress attempts (`unregisteredResource`)
-   - IAP UAP `DRY_RUN` readiness breakdown before flipping to enforced mode
-   - Cloud KMS `AsymmetricSign` / `GetPublicKey` audit trail
+**Region note:** In `terraform/security_governance/terraform.tfvars`, set `location = "asia-southeast3"` (Bangkok primary) and `auth_provider_location = "asia-southeast1"` (Singapore fallback for Agent Identity). Keep `enable_agent_gateway = false` (US/EU only) and `lock_audit_bucket = false` in workshop sandboxes. Standalone `Skills` and per-`Skill` IAM stay in `global` (see [Attendee Quickstart](../attendee-quickstart.md)).
 
-> **Irreversibility Warning:** Once `lock_audit_bucket = true` (`locked = true`) is applied on `google_logging_project_bucket_config`, the bucket's retention policy cannot be shortened and the bucket cannot be deleted until all log entries expire. Keep `lock_audit_bucket = false` in workshop sandboxes and always flip `lock_audit_bucket = true` in production!
+### 1. Grant Per-`Skill` Resource-Level IAM
 
----
+Restrict a sensitive private skill (in `global`, or `us`/`eu` for CMEK) to a specific service account:
 
-## Step 6: Clean Teardown (Live GCP Workshop Cleanup)
+```bash
+export GCP_PROJECT_ID="<your-gcp-project-id>"
+export AGENT_REGISTRY_SKILLS_LOCATION="global"
 
-Always tear down ephemeral workshop resources once you finish so no billable Cloud Run services, Artifact Registry images, or Agent Registry test skills remain running:
+gcloud agent-registry skills add-iam-policy-binding private-cost-anomaly-triage \
+  --project="${GCP_PROJECT_ID}" \
+  --location="${AGENT_REGISTRY_SKILLS_LOCATION}" \
+  --member="serviceAccount:agent-marketplace-middleware@${GCP_PROJECT_ID}.iam.gserviceaccount.com" \
+  --role="roles/agentregistry.viewer" \
+  --quiet
+```
+
+### 2. Apply Workstream B Terraform and Optional Live IAP UAP
+
+If you haven't already created `terraform/security_governance/terraform.tfvars` in [Lab 07](07-kms-encryption-and-signing.md), copy the template first and fill in your required variables (`project_id`, `middleware_sa_email`, `mcp_server_resource_id`, `mcp_server_urn`, `a2a_agent_resource_id`, `a2a_agent_urn`):
+
+```bash
+cp terraform/security_governance/terraform.tfvars.example \
+   terraform/security_governance/terraform.tfvars
+```
+
+Then plan and apply the Workstream B stack:
+
+```bash
+export TF_VAR_auth_provider_client_secret="<your-oauth-client-secret>"
+make tf-sec-plan
+terraform -chdir=terraform/security_governance apply
+```
+
+If you also evaluate live Agent Gateway in `us-central1` (with `enable_agent_gateway = true`), apply the IAM v3 UAP policy:
+
+```bash
+bash security-governance/iap-uap/apply-uap.sh \
+  --project "<your-gcp-project-id>" \
+  --location "us-central1" \
+  --gateway-name "agent-marketplace-gateway" \
+  --principal "principal://agents.global.proj-<PROJECT_NUMBER>.system.id.goog/resources/aiplatform/projects/<PROJECT_ID>/locations/us-central1/reasoningEngines/finops-advisor-agent"
+```
+
+### 3. Clean Teardown
+
+Remove workshop GCP resources when finished so no billable Cloud Run services, Artifact Registry images, or test skills remain:
 
 ```bash
 export GCP_PROJECT_ID="<your-gcp-project-id>"
 
-# 1. Destroy Workstream B Terraform stack (clean when lock_audit_bucket = false)
-#    Note: Cloud KMS CryptoKeyVersions schedule for destruction rather than instant deletion.
+# 1. Destroy Workstream B Terraform stack (clean when lock_audit_bucket = false;
+#    Cloud KMS key versions schedule for destruction rather than instant deletion)
 terraform -chdir=terraform/security_governance destroy
 
-# 2. Destroy Workstream A resources (choose the Track you used in Lab 03):
-# Track 2 (Zero-Terraform gcloud + Cloud Build):
+# 2. Destroy Workstream A resources (pick the track you used in Lab 03)
+# Track 2 (gcloud + Cloud Build):
 make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 # Direct script equivalent:
 # scripts/destroy_gcp.sh --project "${GCP_PROJECT_ID}" --region asia-southeast3 --skills-location global
@@ -228,32 +232,30 @@ make gcp-destroy GCP_PROJECT_ID="${GCP_PROJECT_ID}"
 gcloud run services list --project="${GCP_PROJECT_ID}" --region="asia-southeast3" --limit=50 --quiet
 ```
 
-> **Tip for Deleting Leftover Skills with Revisions & IAM v3 Bindings:** Because `gcloud agent-registry skills delete` does **not** accept `--force`, delete any remaining test skill with revisions via REST `DELETE "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true"` with `Authorization: Bearer $(gcloud auth print-access-token --quiet)` and `x-goog-user-project: ${GCP_PROJECT_ID}` headers. On projects using IAM policy version 3 (containing conditional IAM bindings), always pass `--condition=None` to `gcloud projects remove-iam-policy-binding` so teardown does not fail or prompt interactively. Both are handled automatically by `scripts/destroy_gcp.sh`.
+> **Teardown Tip:** Because `gcloud agent-registry skills delete` has no `--force` flag, remove any leftover skill with revisions via REST `DELETE "https://agentregistry.googleapis.com/v1/projects/${GCP_PROJECT_ID}/locations/${AGENT_REGISTRY_SKILLS_LOCATION:-global}/skills/private-<id>?force=true"` (with `Authorization` and `x-goog-user-project` headers). On projects with IAM policy version 3 conditional bindings, pass `--condition=None` to `gcloud projects remove-iam-policy-binding`. `scripts/destroy_gcp.sh` automates both.
 
 ---
 
 ## Verification Checkpoint
 
-- [ ] Proved `bindings:fetchAvailable` returns the binding for an authorized `AuthProvider` caller and returns `[]` for an unauthorized caller.
-- [ ] Validated `mcp-tool-annotations-uap.json` via `apply-uap.sh --dry-run`.
+- [ ] Proved `bindings:fetchAvailable` returns the binding for an authorized `AuthProvider` caller and `[]` for an unauthorized caller.
+- [ ] Validated `mcp-tool-annotations-uap.json` with `apply-uap.sh --dry-run`.
 - [ ] Confirmed `policy_guard.py` allows read-only MCP calls, denies `destructiveHint: true` and `terraform destroy`, and writes redacted `PostToolUse` JSONL entries.
-- [ ] Reviewed [security-governance/audit/compliance-queries.md](../../security-governance/audit/compliance-queries.md) and ran the full Workstream B suite:
+- [ ] Reviewed [`security-governance/audit/compliance-queries.md`](../../security-governance/audit/compliance-queries.md) and ran:
   ```bash
   .venv/bin/pytest -v tests/test_workstream_b_security.py
   ```
 
----
-
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
+| Symptom | Why It Happens | How to Fix |
 | :--- | :--- | :--- |
-| `bindings:fetchAvailable` returns all bindings when testing locally | `X-Mock-Allowed-Auth-Providers` header omitted | Pass `-H "X-Mock-Allowed-Auth-Providers: <provider-id>"` to simulate IAM filtering in `mock_registry`. |
-| `gcloud beta iam access-policies create` fails with invalid principal format | Used a short email instead of IAM v3 Workload / Agent Identity principal URI | Format principals per IAP v2 UAP syntax (e.g. `principal://agents.global.proj-<NUM>.system.id.goog/...` or `principal://iam.googleapis.com/...`). |
-| Missing `apphubendpoint.googleapis.com` discovery audit records | Only enabled `ADMIN_READ` on `agentregistry.googleapis.com` | Enable `ADMIN_READ` Data Access on **both** `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com` (configured in `audit_logging.tf`). |
-| `gcloud agent-registry skills add-iam-policy-binding` returns `404` or times out in `asia-southeast3` | Standalone Skills are hosted in `global` (or `us`/`eu` for CMEK) on live Agent Registry `v1` | Pass `--location=global` (matching `AGENT_REGISTRY_SKILLS_LOCATION`) for per-`Skill` IAM while keeping `Bindings` and IAP egressor IAM in Bangkok (`asia-southeast3`) and `AuthProvider` in Singapore (`asia-southeast1`). |
-| `gcloud projects remove-iam-policy-binding` fails or prompts during teardown (`IAM policy version 3`) | Project contains unrelated conditional IAM bindings, requiring an explicit condition selector when mutating IAM policies | Pass `--condition=None` to `gcloud projects add-iam-policy-binding` and `remove-iam-policy-binding` (already automated in `scripts/deploy_gcp.sh` and `scripts/destroy_gcp.sh`, which also sweeps `deleted:serviceAccount:<email>?uid=...` tombstones). |
+| `bindings:fetchAvailable` returns all bindings locally | `X-Mock-Allowed-Auth-Providers` header was omitted | Pass `-H "X-Mock-Allowed-Auth-Providers: <provider-id>"` to simulate IAM filtering in `mock_registry`. |
+| `gcloud beta iam access-policies create` rejects the principal | Passed a short email instead of an IAM v3 Workload or Agent Identity URI | Use the full IAM v3 principal format (`principal://agents.global.proj-<NUM>.system.id.goog/...` or `principal://iam.googleapis.com/...`). |
+| Missing `apphubendpoint.googleapis.com` discovery audit records | Enabled `ADMIN_READ` only on `agentregistry.googleapis.com` | Enable `ADMIN_READ` Data Access on both `agentregistry.googleapis.com` and `apphubendpoint.googleapis.com` (see `audit_logging.tf`). |
+| `gcloud agent-registry skills add-iam-policy-binding` returns 404 or times out in `asia-southeast3` | Standalone `Skills` live in `global` (or `us`/`eu` for CMEK) | Pass `--location=global` for per-`Skill` IAM while keeping `Bindings` in `asia-southeast3` and `AuthProvider` in `asia-southeast1`. |
+| `gcloud projects remove-iam-policy-binding` fails or prompts on teardown | Project uses IAM policy version 3 with conditional bindings | Pass `--condition=None` to `add-iam-policy-binding` and `remove-iam-policy-binding` (automated in `scripts/deploy_gcp.sh` and `scripts/destroy_gcp.sh`). |
 
 ---
 
-**Congratulations!** You have completed both **Workstream A** and **Workstream B** of the Enterprise Agent Marketplace Workshop. Return to the [Workshop Home](../../README.md) or review the [Customer Use Case 3 Executive Brief](../customer-usecase-3-brief.md).
+**Congratulations!** You finished both Workstream A and Workstream B of the Enterprise Agent Marketplace Workshop. Return to the [Workshop Home](../../README.md) or review the [Customer Use Case 3 Executive Brief](../customer-usecase-3-brief.md).

@@ -1,23 +1,29 @@
-"""Lab 04 Starter Exercise: Safe Ownership-Tracked IDE Config Hydration.
+"""Lab 04 Starter Exercise: Safe Ownership-Tracked IDE Config Sync.
+
+Workshop Guide:
+    ``docs/labs/04-ide-developer-experience.md`` (Step 2)
 
 Goal:
-    Enterprise developer workstation hydration MUST NEVER clobber a developer's
-    personal IDE settings, must preserve user toggles like ``disabled: true`` or
-    ``disabledTools`` on managed MCP servers, must write files atomically, and
-    must ONLY prune removed enterprise entries when an upstream catalog fetch
-    completed cleanly (never on partial failure!).
+    Syncing enterprise IDE configs must never clobber a developer's personal
+    settings. It must preserve user toggles like ``disabled: true`` or
+    ``disabledTools`` on managed MCP servers, write files atomically, and
+    only prune removed enterprise entries when an upstream catalog fetch
+    completed cleanly (never on partial failure).
 
     In this exercise you will implement:
-    1. ``atomic_write_json`` — writing JSON via ``tempfile.NamedTemporaryFile``
+    1. ``atomic_write_json``: write JSON via ``tempfile.NamedTemporaryFile``
        in the target directory + ``os.fsync`` + ``os.replace``.
-    2. ``safe_merge_antigravity_mcp_config`` — ownership-tracked merge for
+    2. ``safe_merge_antigravity_mcp_config``: ownership-tracked merge for
        ``~/.gemini/config/mcp_config.json`` that:
-       - NEVER overwrites pre-existing user-authored entries (keys not in
+       - Never overwrites pre-existing user-authored entries (keys not in
          ``previous_owned_keys``).
        - Preserves user-set ``disabled`` and ``disabledTools`` fields on
-         hydrated entries across re-syncs.
-       - Prunes previously owned keys no longer in ``desired_servers`` ONLY when
+         managed entries across re-syncs.
+       - Prunes previously owned keys no longer in ``desired_servers`` only when
          ``catalog_complete=True``.
+
+Run Self-Check:
+    ``.venv/bin/python starter/lab04_hub_sync_adapter_exercise.py`` (or ``make starter-check``)
 
 Reference Solution:
     ``tools/hub_sync/hydration.py`` and ``tools/hub_sync/adapters.py``
